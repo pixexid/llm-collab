@@ -78,6 +78,8 @@ class FakeAutobridge:
             return 0, json.dumps({"ok": True})
         if args[0] == "show-binding":
             return 0, json.dumps({"session_id": self.session, "status": "active", "binding_generation": 4})
+        if args[0] == "deactivate-pi":
+            return 0, json.dumps({"deactivated_sessions": [self.session]})
         raise AssertionError(args)
 
 
@@ -203,16 +205,10 @@ class StartLivecraftTest(unittest.TestCase):
             )
         self.assertEqual(client.snapshot_calls, 0)
 
-    def test_production_gate_requires_explicit_canonical_control(self):
+    def test_production_gate_requires_current_project_authority(self):
         cfg = _cfg(production=True, disposable=False)
-        with self.assertRaisesRegex(wr.RotateError, "canonical control"):
+        with mock.patch.object(wr, "_require_current_project_authority") as authority:
             wr.require_livecraft_gate(cfg, environ={})
-
-    def test_production_gate_checks_current_project_authority(self):
-        cfg = _cfg(production=True, disposable=False)
-        with mock.patch.dict(wr.os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}, clear=True):
-            with mock.patch.object(wr, "_require_current_project_authority") as authority:
-                wr.require_livecraft_gate(cfg)
         authority.assert_called_once_with("llm-collab", mode="Livecraft production")
 
     def test_happy_path_registers_after_marker_with_lowercase_native_suffix(self):
@@ -227,6 +223,12 @@ class StartLivecraftTest(unittest.TestCase):
         register = run.calls[0]
         self.assertNotIn("--supersedes-session", register)
         self.assertEqual(register[register.index("--endpoint-id") + 1], wr.LIVECRAFT_ENDPOINT)
+        runtime_command = json.loads(register[register.index("--runtime-command") + 1])
+        self.assertIn("livecraft_wake.py", runtime_command[1])
+        self.assertEqual(
+            runtime_command[runtime_command.index("--backend-url") + 1],
+            wr.DEFAULT_LIVECRAFT_BACKEND_URL,
+        )
 
     def test_bootstrap_prompt_identifies_starter_and_reader_identity(self):
         _result, _chronology, client, _run = self._run(_cfg(starter_session_id="starter-native"))
@@ -236,6 +238,30 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertIn("--target-session-id starter-native", client.prompt_message)
         self.assertIn("starter will arm the background wake path", client.prompt_message)
         self.assertIn('"kind":"llm_collab.pi.bootstrap.v1"', client.prompt_message)
+
+    def test_cli_defaults_profile_and_starter_from_bindings(self):
+        cfg = _cfg(
+            provider=None, model=None, thinking=None, runtime_home=None,
+            starter_agent="claude", starter_session_id=None, production=True, disposable=False,
+        )
+        profile = {
+            "provider": "zai", "model": "glm-5.2", "thinking": "max",
+            "runtime_home": "/pi", "endpoint_id": wr.LIVECRAFT_ENDPOINT,
+        }
+        bindings = {
+            "claude": {"status": "active", "runtime_session_id": "starter-native"},
+            "glmpi": {"status": "active", "session_id": "SESSION-OLD"},
+        }
+        with mock.patch.object(wr, "resolve_livecraft_profile", return_value=profile), \
+             mock.patch.object(wr, "_load_optional_binding", side_effect=lambda _project, _chat, agent: bindings[agent]):
+            result, _chronology, _client, run = self._run(cfg)
+        self.assertEqual(result["profile"], {
+            "provider": "zai", "model": "glm-5.2", "thinking": "max", "runtime_home": "/pi",
+        })
+        register = run.calls[0]
+        self.assertEqual(register[register.index("--supersedes-session") + 1], "SESSION-OLD")
+        runtime_command = json.loads(register[register.index("--runtime-command") + 1])
+        self.assertIn("livecraft_wake.py", runtime_command[1])
 
     def test_rebind_passes_explicit_predecessor(self):
         _result, _chronology, _client, run = self._run(_cfg(supersedes_session="SESSION-OLD"))
@@ -296,7 +322,7 @@ class StartLivecraftTest(unittest.TestCase):
         run = FakeAutobridge(chronology)
         with self.assertRaisesRegex(wr.RotateError, "drifted"):
             self._run(livecraft=client, run=run)
-        self.assertEqual(run.calls, [])
+        self.assertEqual([call[0] for call in run.calls], ["deactivate-pi"])
         self.assertEqual(client.closed, [NATIVE])
 
     def test_noncanonical_chat_is_refused_before_native_create(self):

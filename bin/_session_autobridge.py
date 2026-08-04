@@ -2191,6 +2191,7 @@ def build_runtime_payload(session: dict, message: dict) -> dict[str, Any]:
             "agent_id": session["agent_id"],
             "project_id": session.get("project_id"),
             "chat_id": session.get("chat_id"),
+            "repo_targets": session.get("repo_targets"),
             "mode": session.get("mode"),
             "wake_strategy": session.get("wake_strategy"),
             "allowed_actions": session.get("allowed_actions", []),
@@ -3186,6 +3187,11 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     derived = False
     runtime_family = str(runtime.get("family", ""))
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
+    livecraft_runtime_command = (
+        runtime_family == "pi"
+        and session.get("endpoint_id") == "endpoint_pi_livecraft_local"
+        and bool(command)
+    )
     if runtime_family == "pi":
         # Pre-wake drift guard: the current native session must still match the
         # provider/model/thinking/cwd fingerprint pinned at registration. A mismatch
@@ -3202,25 +3208,31 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
                 "returncode": 1,
                 "delivery_accepted": False,
             }
-        # A Pi session is woken by one durable, synced event on its own exact-session
-        # event log — not by a mutable pointer file (the deleted pi_doorbell.py), which
-        # a second delivery overwrote before the monitor read it. The event is only a
-        # wake; the durable unread queue is the authority. A coalesced wake is harmless
-        # because Pi drains the queue (inbox.py --session --acknowledge), not the event.
-        wake_event = {"event": "pi_inbox_wake", "message_path": str(message["path"])}
-        append_event(str(session["session_id"]), wake_event)
-        append_wake_event(str(session["session_id"]), wake_event)
-        # returncode 0 marks the packet in the session's processed_messages so the
-        # watcher wakes once, not on every poll. That ledger is separate from the
-        # durable unread queue: delivery_accepted stays False, so the packet remains
-        # in agents/{id}/inbox.json for Pi to drain and acknowledge itself.
-        return {
-            "status": "runtime_triggered",
-            "runtime_family": "pi",
-            "event": "pi_inbox_wake",
-            "returncode": 0,
-            "delivery_accepted": False,
-        }
+        if livecraft_runtime_command:
+            # Livecraft has an API wake command, so fall through to the generic
+            # runtime-command executor. It prompts the native session in the
+            # background; the worker performs the exact-session durable drain.
+            pass
+        else:
+            # A Pi session is woken by one durable, synced event on its own exact-session
+            # event log — not by a mutable pointer file (the deleted pi_doorbell.py), which
+            # a second delivery overwrote before the monitor read it. The event is only a
+            # wake; the durable unread queue is the authority. A coalesced wake is harmless
+            # because Pi drains the queue (inbox.py --session --acknowledge), not the event.
+            wake_event = {"event": "pi_inbox_wake", "message_path": str(message["path"])}
+            append_event(str(session["session_id"]), wake_event)
+            append_wake_event(str(session["session_id"]), wake_event)
+            # returncode 0 marks the packet in the session's processed_messages so the
+            # watcher wakes once, not on every poll. That ledger is separate from the
+            # durable unread queue: delivery_accepted stays False, so the packet remains
+            # in agents/{id}/inbox.json for Pi to drain and acknowledge itself.
+            return {
+                "status": "runtime_triggered",
+                "runtime_family": "pi",
+                "event": "pi_inbox_wake",
+                "returncode": 0,
+                "delivery_accepted": False,
+            }
     if not command and runtime_family == "codex_app":
         app_server_result = execute_codex_app_server_trigger(
             session,
@@ -3280,6 +3292,10 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
     }
+    if livecraft_runtime_command:
+        # The background prompt is accepted, not the durable packet. Keep the
+        # packet unread so the Livecraft worker's exact-session drain acknowledges it.
+        trigger_result["delivery_accepted"] = False
     return trigger_result
 
 

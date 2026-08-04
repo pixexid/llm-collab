@@ -416,6 +416,57 @@ def _load_json(run_autobridge, args: list[str], what: str) -> dict:
     return json.loads(out)
 
 
+def _load_optional_binding(project: str, chat: str, agent: str) -> dict | None:
+    from _session_autobridge import BindingUnreadable, load_binding
+
+    try:
+        return load_binding(project, chat, agent)
+    except FileNotFoundError:
+        return None
+    except BindingUnreadable as exc:
+        raise RotateError(f"binding for {agent} is unreadable: {exc}") from exc
+
+
+def _resolve_starter(
+    *, starter_agent: str, starter_session_id: str | None, project: str, chat: str,
+    require_active_binding: bool = True,
+) -> tuple[str, str]:
+    binding = _load_optional_binding(project, chat, starter_agent)
+    if not require_active_binding:
+        if not starter_session_id:
+            raise RotateError("starter session id is required for the disposable pilot path")
+        return starter_agent, starter_session_id
+    if not binding or binding.get("status") != "active":
+        raise RotateError(
+            f"starter binding is not active for {project}/{chat}/{starter_agent}; "
+            "register the starter session before launching a worker"
+        )
+    native = binding.get("runtime_session_id")
+    if not isinstance(native, str) or not native.strip():
+        raise RotateError("starter binding has no exact native runtime session")
+    if starter_session_id is not None and starter_session_id != native:
+        raise RotateError(
+            f"starter session mismatch: requested {starter_session_id!r}, binding has {native!r}"
+        )
+    return starter_agent, native
+
+
+def _resolve_livecraft_predecessor(
+    *, agent: str, project: str, chat: str, requested: str | None,
+    strict: bool = True,
+) -> str | None:
+    if not strict:
+        return requested
+    binding = _load_optional_binding(project, chat, agent)
+    current = binding.get("session_id") if binding and binding.get("status") == "active" else None
+    if requested is not None and requested != current:
+        raise RotateError(
+            f"--supersedes-session {requested!r} does not name the current active "
+            f"binding {current!r} for {project}/{chat}/{agent}"
+        )
+    return current
+
+
 def resolve_predecessor(run_autobridge, agent, project, chat, repo, pred) -> dict:
     """Load the predecessor from both show and show-binding and require them to
     describe the exact same active binding tuple before anything native happens."""
@@ -469,15 +520,15 @@ MAX_TOTAL_SESSION_BYTES = 200_000_000
 
 def resolve_pi_profile(
     agent: str, project: str, *, sessions_dir=None, override=None, runtime_home=None,
+    endpoint_filter=PI_WEB_ENDPOINT,
 ) -> dict:
-    """Reduce the agent's prior Pi Web records FOR THIS PROJECT to one transport
-    profile (Codex #271 ruling): eligible = endpoint_pi_web_local + exact
-    project_id, wake forced to runtime_trigger, provider/model/thinking from the
-    greatest canonical binding_generation (strict int) with a complete tuple.
-    Zero eligible requires an explicit full profile plus runtime home. Conflicting
-    home or a greatest-generation tie fails closed `pi_profile_required`. An
-    unreadable/oversized/corrupt candidate also fails closed — never skipped into
-    an apparently-complete older profile."""
+    """Reduce stored Pi records for one agent/project to one profile.
+
+    ``endpoint_filter`` preserves the Pi-Web start path's historical scope. The
+    Livecraft first-start path deliberately passes ``None``: provider/model/
+    thinking are the agent's stored profile, while Livecraft is the selected
+    transport rather than an old Pi-Web record.
+    """
     sessions_dir = Path(sessions_dir) if sessions_dir is not None else _sessions_dir()
     records, homes, display, total = [], set(), None, 0
     for path in sorted(sessions_dir.glob("*.json")):
@@ -499,7 +550,9 @@ def resolve_pi_profile(
             continue
         if d.get("project_id") != project:
             continue
-        if d.get("endpoint_id") != PI_WEB_ENDPOINT or not runtime.get("home"):
+        if endpoint_filter is not None and d.get("endpoint_id") != endpoint_filter:
+            continue
+        if not runtime.get("home"):
             continue
         gen = d.get("binding_generation")
         if not isinstance(gen, int) or isinstance(gen, bool):
@@ -519,7 +572,7 @@ def resolve_pi_profile(
             raise RotateError("pi_profile_required: override needs all of provider/model/thinking")
         provider, model, thinking = override
         return {
-            "endpoint_id": PI_WEB_ENDPOINT,
+            "endpoint_id": endpoint_filter or LIVECRAFT_ENDPOINT,
             "runtime_home": runtime_home,
             "wake_strategy": "runtime_trigger",
             "provider": provider,
@@ -547,7 +600,7 @@ def resolve_pi_profile(
         provider, model, thinking = distinct.pop()
 
     return {
-        "endpoint_id": PI_WEB_ENDPOINT,
+        "endpoint_id": endpoint_filter or LIVECRAFT_ENDPOINT,
         "runtime_home": homes.pop(),
         "wake_strategy": "runtime_trigger",
         "provider": provider,
@@ -555,6 +608,15 @@ def resolve_pi_profile(
         "thinking": thinking,
         "display": display or agent.upper(),
     }
+
+
+def resolve_livecraft_profile(
+    agent: str, project: str, *, sessions_dir=None, override=None, runtime_home=None,
+) -> dict:
+    return resolve_pi_profile(
+        agent, project, sessions_dir=sessions_dir, override=override,
+        runtime_home=runtime_home, endpoint_filter=None,
+    )
 
 
 def _await_marker(piweb, tab_id, marker, *, timeout, interval, sleep, clock) -> None:
@@ -808,18 +870,13 @@ def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) ->
 
 
 def require_livecraft_production_gate(cfg, *, environ=None) -> None:
-    """Require explicit operator intent before a persistent Livecraft binding."""
-    environment = os.environ if environ is None else environ
-    if getattr(cfg, "production", False) is not True:
-        raise RotateError("Livecraft production gate: --production is required")
-    if environment.get("LLM_COLLAB_CANONICAL_CONTROL") != "enabled":
-        raise RotateError("Livecraft production gate: canonical control is not enabled")
+    """Allow a real binding when the current project authority permits writes."""
     _require_current_project_authority(cfg.project, mode="Livecraft production")
 
 
 def require_livecraft_gate(cfg, *, declaration_path=None, environ=None) -> None:
-    """Select the explicit production path or the existing disposable pilot path."""
-    if getattr(cfg, "production", False):
+    """Select the production launcher or retain the explicit pilot test path."""
+    if getattr(cfg, "production", True):
         require_livecraft_production_gate(cfg, environ=environ)
     else:
         require_livecraft_pilot_gate(cfg, declaration_path=declaration_path, environ=environ)
@@ -954,9 +1011,27 @@ def _await_bootstrap_handshake(
     raise RotateError(f"bootstrap handshake not received within {timeout:g} seconds")
 
 
+def _cleanup_livecraft_session(*, livecraft, run_autobridge, native: str) -> list[str]:
+    errors: list[str] = []
+    try:
+        rc, out = run_autobridge([
+            "deactivate-pi", "--native-session-id", native, "--json",
+        ])
+        if rc != 0:
+            errors.append(f"registry cleanup failed (rc={rc}): {out}")
+    except Exception as exc:
+        errors.append(f"registry cleanup failed: {exc}")
+    try:
+        livecraft.close_session(native)
+    except Exception as exc:
+        errors.append(f"Livecraft abort failed: {exc}")
+    return errors
+
+
 def _provision_livecraft_and_bind(
     *, agent, project, chat, repo_target, repo_cwd, provider, model, thinking,
-    runtime_home, starter_agent, starter_session_id, supersedes_session, livecraft, run_autobridge,
+    runtime_home, starter_agent, starter_session_id, supersedes_session, livecraft_backend_url,
+    livecraft, run_autobridge,
     bootstrap_timeout, poll_interval, sleep, clock,
 ) -> dict:
     session = livecraft.create_session(repo_cwd)
@@ -1017,7 +1092,9 @@ def _provision_livecraft_and_bind(
             sleep=sleep, clock=clock,
         )
     except Exception as exc:
-        livecraft.close_session(session_id)
+        _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=session_id,
+        )
         if isinstance(exc, RotateError):
             raise
         raise RotateError(f"pre-register Livecraft failure closed session {session_id}: {exc!r}") from exc
@@ -1029,6 +1106,10 @@ def _provision_livecraft_and_bind(
         "--runtime-home", runtime_home, "--endpoint-id", LIVECRAFT_ENDPOINT,
         "--runtime-instance-id", session_id, "--cwd", repo_cwd, "--status", "active",
         "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+        "--runtime-command", json.dumps([
+            MONITOR_PYTHON, str(RUNTIME_ROOT / "bin" / "livecraft_wake.py"),
+            "--backend-url", livecraft_backend_url, "--runtime-root", str(RUNTIME_ROOT),
+        ]),
         "--expect-pi-provider", final["provider"], "--expect-pi-model", final["model_id"],
         "--expect-pi-thinking", final["thinking"], "--json",
     ]
@@ -1036,8 +1117,12 @@ def _provision_livecraft_and_bind(
         argv.extend(("--supersedes-session", supersedes_session))
     rc, out = run_autobridge(argv)
     if rc != 0:
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=session_id,
+        )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
         raise RotateError(
-            f"register failed (rc={rc}); Livecraft session {session_id} native {native} left as partial state: {out}"
+            f"register failed (rc={rc}); Livecraft session {session_id} native {native} was aborted.{cleanup} {out}"
         )
     return {
         "logical": logical, "native": native, "tab_id": session_id,
@@ -1060,26 +1145,65 @@ def start_livecraft(
     if not repo_cwd:
         raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
     repo_cwd = str(Path(repo_cwd).resolve())
+    provided_profile = tuple(
+        getattr(cfg, key, None) for key in ("provider", "model", "thinking", "runtime_home")
+    )
+    if all(isinstance(value, str) and value.strip() for value in provided_profile):
+        profile = dict(zip(("provider", "model", "thinking", "runtime_home"), provided_profile))
+    else:
+        override_values = tuple(getattr(cfg, key, None) for key in ("provider", "model", "thinking"))
+        profile = resolve_livecraft_profile(
+            cfg.agent, cfg.project,
+            override=override_values if any(override_values) else None,
+            runtime_home=getattr(cfg, "runtime_home", None),
+        )
+    starter_agent, starter_session_id = _resolve_starter(
+        starter_agent=getattr(cfg, "starter_agent", "claude"),
+        starter_session_id=getattr(cfg, "starter_session_id", None),
+        project=cfg.project, chat=chat,
+        require_active_binding=getattr(cfg, "production", True),
+    )
+    supersedes_session = _resolve_livecraft_predecessor(
+        agent=cfg.agent, project=cfg.project, chat=chat,
+        requested=getattr(cfg, "supersedes_session", None),
+        strict=getattr(cfg, "production", True),
+    )
     result = _provision_livecraft_and_bind(
         agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
-        repo_cwd=repo_cwd, provider=cfg.provider, model=cfg.model, thinking=cfg.thinking,
-        runtime_home=cfg.runtime_home, starter_agent=cfg.starter_agent,
-        starter_session_id=cfg.starter_session_id, supersedes_session=cfg.supersedes_session,
+        repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"],
+        thinking=profile["thinking"], runtime_home=profile["runtime_home"],
+        starter_agent=starter_agent, starter_session_id=starter_session_id,
+        supersedes_session=supersedes_session,
+        livecraft_backend_url=cfg.livecraft_backend_url,
         livecraft=livecraft,
         run_autobridge=run_autobridge,
         bootstrap_timeout=cfg.bootstrap_timeout, poll_interval=cfg.poll_interval,
         sleep=sleep, clock=clock,
     )
-    binding = _load_json(
-        run_autobridge,
-        ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
-        "start-livecraft-pi postcondition",
-    )
+    try:
+        binding = _load_json(
+            run_autobridge,
+            ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
+            "start-livecraft-pi postcondition",
+        )
+    except Exception as exc:
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=result["native"],
+        )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+        raise RotateError(f"start-livecraft-pi postcondition failed; native session was aborted.{cleanup}") from exc
     verified = binding.get("session_id") == result["logical"] and binding.get("status") == "active"
+    if not verified:
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=result["native"],
+        )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+        raise RotateError(f"start-livecraft-pi postcondition mismatch; native session was aborted.{cleanup}")
     return {
         "session": result["logical"], "native_session_id": result["native"],
         "runtime_instance_id": result["tab_id"], "verified": verified,
         "generation": binding.get("binding_generation"),
+        "profile": {key: profile[key] for key in ("provider", "model", "thinking", "runtime_home")},
         "bootstrap_handshake": result["bootstrap_handshake"],
     }
 
@@ -1170,21 +1294,26 @@ def add_start_livecraft_pi_arguments(p) -> None:
     p.add_argument("--project", required=True)
     p.add_argument("--chat", required=True, help="Canonical CHAT-... id")
     p.add_argument("--repo-target", required=True)
-    p.add_argument("--provider", required=True)
-    p.add_argument("--model", required=True)
-    p.add_argument("--thinking", required=True)
-    p.add_argument("--runtime-home", required=True)
-    p.add_argument("--starter-agent", required=True,
+    p.add_argument("--provider", default=None,
+                   help="Optional first-profile provider override; normally read from the stored Pi profile")
+    p.add_argument("--model", default=None,
+                   help="Optional first-profile model override; normally read from the stored Pi profile")
+    p.add_argument("--thinking", default=None,
+                   help="Optional first-profile thinking override; normally read from the stored Pi profile")
+    p.add_argument("--runtime-home", default=None,
+                   help="Optional first-profile runtime home; normally read from the stored Pi profile")
+    p.add_argument("--starter-agent", default="claude",
                    help="Agent that created this worker session and receives the bootstrap handshake")
-    p.add_argument("--starter-session-id", required=True,
+    p.add_argument("--starter-session-id", default=None,
                    help="Native runtime session id of --starter-agent")
     p.add_argument("--supersedes-session", default=None,
                    help="Existing logical worker session to replace when rebinding a stale worker")
-    mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--production", action="store_true",
-                      help="Explicitly authorize a persistent production worker binding")
-    mode.add_argument("--disposable", action="store_true",
-                      help="Confirm this is a disposable pilot worker")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--production", dest="production", action="store_true",
+                      help="Explicitly select the persistent worker path (the default)")
+    mode.add_argument("--disposable", dest="production", action="store_false",
+                      help="Use the existing gated disposable pilot path")
+    p.set_defaults(production=True, disposable=False)
     p.add_argument("--pilot-scope", default=None, help="Exact <project>/<agent> pilot scope")
     p.add_argument("--bootstrap-timeout", type=float, default=180.0)
     p.add_argument("--poll-interval", type=float, default=2.0)
