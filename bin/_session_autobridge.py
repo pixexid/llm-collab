@@ -1181,6 +1181,15 @@ def runtime_metadata(session: dict) -> dict[str, Any]:
     return {}
 
 
+def livecraft_runtime_wake_available(session: dict) -> bool:
+    runtime = runtime_metadata(session)
+    return (
+        runtime.get("family") == "pi"
+        and session.get("endpoint_id") == "endpoint_pi_livecraft_local"
+        and bool(runtime.get("command"))
+    )
+
+
 def runtime_home_from_source(runtime_family: str, session_source: str | None) -> str | None:
     if not session_source:
         return None
@@ -1930,6 +1939,8 @@ def processed_messages(session: dict) -> set[str]:
 
 def message_needs_canonical_materialization(session: dict, message: dict) -> bool:
     if resolve_effective_action(session, message)[0] != "runtime_trigger":
+        return False
+    if livecraft_runtime_wake_available(session):
         return False
     frontmatter = message.get("frontmatter", {})
     return bool(
@@ -3187,11 +3198,7 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     derived = False
     runtime_family = str(runtime.get("family", ""))
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
-    livecraft_runtime_command = (
-        runtime_family == "pi"
-        and session.get("endpoint_id") == "endpoint_pi_livecraft_local"
-        and bool(command)
-    )
+    livecraft_runtime_command = livecraft_runtime_wake_available(session)
     if runtime_family == "pi":
         # Pre-wake drift guard: the current native session must still match the
         # provider/model/thinking/cwd fingerprint pinned at registration. A mismatch
@@ -4052,6 +4059,7 @@ def dispatch_session(
             if (
                 runtime.get("family") == "pi"
                 and not message_needs_canonical_materialization(routing_session, message)
+                and not livecraft_runtime_wake_available(routing_session)
             ):
                 event["reason"] = EXACT_BINDING_REQUIRED_REASON
                 should_mark_processed = False
