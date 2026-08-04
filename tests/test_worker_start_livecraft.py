@@ -255,14 +255,15 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(["app"], seen)
 
-    def test_amiga_single_repo_is_defaulted_when_repo_target_is_omitted(self):
+    def test_amiga_multi_repo_requires_target_and_lists_valid_keys(self):
         import _helpers
 
         _helpers.PROJECTS_FILE.write_text(json.dumps({
-            "projects": [{"id": "amiga", "repos": {"app": "."}}],
+            "projects": [{"id": "amiga", "repos": {"app": ".", "docs": "docs"}}],
         }))
         _helpers._projects_cache = None
-        self.assertEqual("app", wr._resolve_repo_target("amiga", None))
+        with self.assertRaisesRegex(wr.RotateError, r"valid keys: app, docs"):
+            wr._resolve_repo_target("amiga", None)
 
     def test_missing_repo_target_on_multi_repo_project_lists_valid_keys(self):
         import _helpers
