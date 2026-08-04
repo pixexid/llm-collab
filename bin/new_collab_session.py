@@ -85,7 +85,7 @@ DEFAULT_HOMES = {
     "gemini_cli": "~/.gemini",
 }
 # This helper only knows the discover-runtime families. Pi workers (glmpi/relay/
-# kimi) must use `worker.py start-pi`, and a human_relay (zcode) has no native
+# kimi) must use `worker.py start-livecraft-pi`, and a human_relay (zcode) has no native
 # session — routing them through discover+register would misbind, so they are
 # refused rather than guessed.
 SUPPORTED_FAMILIES = ("codex_app", "claude_app", "gemini_cli")
@@ -317,7 +317,7 @@ def main():
         if family not in SUPPORTED_FAMILIES:
             sys.exit(f"[error] {agent_id}: family {family!r} not supported by this "
                      f"helper (use {', '.join(SUPPORTED_FAMILIES)}). Pi workers use "
-                     f"`worker.py start-pi`; a human_relay has no native session.")
+                     f"`worker.py start-livecraft-pi`; a human_relay has no native session.")
         if not _supports_native_registration(agent_id, activation):
             sys.exit(
                 f"[error] {agent_id}: activation type {activation.get('type')!r} "

@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
-import worker_rotate_pi as wr  # noqa: E402
+import worker_livecraft_pi as wr  # noqa: E402
 
 
 NATIVE = "bfe59384-f808-4885-8aed-604774d728fc"
@@ -319,6 +319,39 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertEqual(register[register.index("--supersedes-session") + 1], "SESSION-OLD")
         runtime_command = json.loads(register[register.index("--runtime-command") + 1])
         self.assertIn("livecraft_wake.py", runtime_command[1])
+
+    def test_profile_uses_latest_livecraft_record_only(self):
+        sessions = Path(self.tmp.name) / "sessions"
+        sessions.mkdir()
+
+        def write_record(name, endpoint, generation, model):
+            (sessions / f"{name}.json").write_text(json.dumps({
+                "session_id": name,
+                "agent_id": "glmpi",
+                "project_id": "llm-collab",
+                "endpoint_id": endpoint,
+                "binding_generation": generation,
+                "runtime": {"family": "pi", "home": "/pi"},
+                "pi_fingerprint": {
+                    "provider": "zai", "model_id": model, "thinking_level": "max",
+                },
+            }))
+
+        write_record("SESSION-LEGACY", "endpoint_legacy_pi", 99, "wrong-model")
+        write_record("SESSION-LIVECRAFT-OLD", wr.LIVECRAFT_ENDPOINT, 3, "glm-5.1")
+        write_record("SESSION-LIVECRAFT-NEW", wr.LIVECRAFT_ENDPOINT, 4, "glm-5.2")
+
+        self.assertEqual(
+            {
+                "endpoint_id": wr.LIVECRAFT_ENDPOINT,
+                "runtime_home": "/pi",
+                "wake_strategy": "runtime_trigger",
+                "provider": "zai",
+                "model": "glm-5.2",
+                "thinking": "max",
+            },
+            wr.resolve_livecraft_profile("glmpi", "llm-collab", sessions_dir=sessions),
+        )
 
     def test_rebind_passes_explicit_predecessor(self):
         _result, _chronology, _client, run = self._run(_cfg(supersedes_session="SESSION-OLD"))
