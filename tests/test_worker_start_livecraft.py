@@ -239,6 +239,15 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertIn("starter will arm the background wake path", client.prompt_message)
         self.assertIn('"kind":"llm_collab.pi.bootstrap.v1"', client.prompt_message)
 
+    def test_marker_accepts_successful_trailing_bootstrap_marker(self):
+        client = mock.Mock()
+        client.last_assistant_text.return_value = "Delivery succeeded.\n\nBOOTSTRAP_READY"
+        wr._await_marker(
+            client, "native", "BOOTSTRAP_READY", timeout=1, interval=0,
+            sleep=lambda _seconds: None,
+            clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 0.1), counter[0])[1]),
+        )
+
     def test_cli_defaults_profile_and_starter_from_bindings(self):
         cfg = _cfg(
             provider=None, model=None, thinking=None, runtime_home=None,

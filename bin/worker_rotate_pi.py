@@ -622,7 +622,12 @@ def resolve_livecraft_profile(
 def _await_marker(piweb, tab_id, marker, *, timeout, interval, sleep, clock) -> None:
     deadline = clock() + timeout
     while clock() < deadline:
-        if piweb.last_assistant_text(tab_id) == marker:  # exact match only
+        text = piweb.last_assistant_text(tab_id)
+        if (
+            isinstance(text, str)
+            and text.strip().splitlines()
+            and text.strip().splitlines()[-1].strip() == marker
+        ):
             return
         sleep(interval)
     raise RotateError("bootstrap marker never observed within timeout")
