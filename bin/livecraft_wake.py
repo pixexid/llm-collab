@@ -12,6 +12,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from livecraft_health import ensure_livecraft_ready
+
 
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -104,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             "Do not act on this wake prompt alone, do not inspect another worker's inbox, "
             "and do not start a second watcher."
         )
+        ensure_livecraft_ready(args.backend_url)
         result = _prompt(backend_url=args.backend_url, native=native, message=prompt)
         print(json.dumps({"prompted": True, "native_session_id": native, "result": result}))
         return 0

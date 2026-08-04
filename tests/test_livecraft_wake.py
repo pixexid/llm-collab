@@ -26,10 +26,21 @@ class LivecraftWakeTest(unittest.TestCase):
             },
             "message": {"path": "Chats/wake.md"},
         }
+        events = []
+
+        def health_side_effect(_url):
+            events.append("health")
+
+        def prompt_side_effect(**_kwargs):
+            events.append("prompt")
+            return {"accepted": True}
+
         with mock.patch.object(livecraft_wake.sys, "stdin", io.TextIOWrapper(io.BytesIO(
             (json.dumps(payload) + "\n").encode()
         ))), mock.patch.object(
-            livecraft_wake, "_prompt", return_value={"accepted": True}
+            livecraft_wake, "ensure_livecraft_ready", side_effect=health_side_effect
+        ) as health, mock.patch.object(
+            livecraft_wake, "_prompt", side_effect=prompt_side_effect
         ) as prompt:
             self.assertEqual(
                 livecraft_wake.main([
@@ -38,6 +49,8 @@ class LivecraftWakeTest(unittest.TestCase):
                 ]),
                 0,
             )
+        health.assert_called_once_with("http://127.0.0.1:43121")
+        self.assertEqual(events, ["health", "prompt"])
         message = prompt.call_args.kwargs["message"]
         self.assertIn("Packet path: Chats/wake.md", message)
         self.assertIn(

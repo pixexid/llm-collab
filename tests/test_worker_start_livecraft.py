@@ -132,10 +132,13 @@ class StartLivecraftTest(unittest.TestCase):
          _helpers._config_cache, _helpers._agents_cache) = self.old
         self.tmp.cleanup()
 
-    def _run(self, cfg=None, *, livecraft=None, run=None):
+    def _run(self, cfg=None, *, livecraft=None, run=None, health_check=None):
         chronology = []
         livecraft = livecraft or FakeLivecraft(chronology)
         run = run or FakeAutobridge(chronology)
+        health_check = health_check or (
+            lambda _url, **_kwargs: chronology.append(("health", "ready"))
+        )
         with mock.patch.object(
             wr, "_await_bootstrap_handshake",
             return_value={"path": "Chats/handshake.md", "body": {}},
@@ -145,6 +148,7 @@ class StartLivecraftTest(unittest.TestCase):
                 resolve_cwd=lambda project, repo: "/repo", gate_check=lambda _cfg: None,
                 sleep=lambda _seconds: None,
                 clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 1), counter[0])[1]),
+                health_check=health_check,
             )
         return result, chronology, livecraft, run
 
@@ -221,6 +225,9 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertEqual([call[0] for call in run.calls], ["register", "show-binding"])
         marker_at = next(i for i, item in enumerate(chronology) if item == ("http", "snapshot_messages"))
         register_at = next(i for i, item in enumerate(chronology) if item == ("autobridge", "register"))
+        health_at = chronology.index(("health", "ready"))
+        create_at = chronology.index(("http", "create"))
+        self.assertLess(health_at, create_at)
         self.assertLess(marker_at, register_at)
         register = run.calls[0]
         self.assertNotIn("--supersedes-session", register)
@@ -363,6 +370,16 @@ class StartLivecraftTest(unittest.TestCase):
                 cfg, livecraft=client, run_autobridge=FakeAutobridge([]),
                 resolve_cwd=lambda _project, _repo: "/repo", gate_check=lambda _cfg: None,
             )
+        self.assertEqual(client.snapshot_calls, 0)
+
+    def test_health_failure_is_wrapped_before_native_create(self):
+        client = FakeLivecraft([])
+
+        def fail(_url, **_kwargs):
+            raise wr.LivecraftHealthError("backend health failed")
+
+        with self.assertRaisesRegex(wr.RotateError, "backend health failed"):
+            self._run(livecraft=client, health_check=fail)
         self.assertEqual(client.snapshot_calls, 0)
 
 
