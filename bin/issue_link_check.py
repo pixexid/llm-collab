@@ -31,13 +31,15 @@ import sys
 
 # GitHub's closing keywords (https://docs.github.com/.../linking-a-pull-request-to-an-issue).
 CLOSING = r"clos(?:e|es|ed)|fix(?:|es|ed)|resolv(?:e|es|ed)"
-# An issue reference in any of GitHub's forms: bare `#N` (same repo), a
+# An issue reference in any of GitHub's forms: bare `#N` (same repo), this repo's
+# `GH-N` autolink (same repo; see AGENTS.md "GitHub Autolink Safety"), a
 # repo-qualified `owner/name#N`, or a full issues URL. The owner/name is captured so
 # qualified/URL forms can be limited to the target repository (a cross-repo
-# `other/repo#N` or URL must NOT match a local issue N).
+# `other/repo#N` or URL must NOT match a local issue N). `GH-N` carries no qualifier,
+# so it counts as same-repo like a bare `#N`.
 _QUALIFIER = r"(?P<repo>[\w.-]+/[\w.-]+)"
 _REF = re.compile(
-    rf"(?:{_QUALIFIER}#|(?<![\w./-])#|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/)(\d+)",
+    rf"(?:{_QUALIFIER}#|(?<![\w./-])#|(?<![\w./-])gh-|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/)(\d+)",
     re.IGNORECASE,
 )
 # A closing keyword standalone (not inside a hyphen/word token like "auto-close")
@@ -164,7 +166,7 @@ def check_pr(repo: str, number: int) -> int:
 
 def sweep(repo: str) -> int:
     merged = _gh_json(["pr", "list", "--repo", repo, "--state", "merged",
-                       "--limit", str(MAX_SWEEP_PRS), "--json", "number,title,body"]) or []
+                       "--limit", str(MAX_SWEEP_PRS), "--json", "number,title,body,headRefName"]) or []
     # One bounded call for the open set, then intersect — avoids an N+1 gh lookup.
     open_list = _gh_json(["issue", "list", "--repo", repo, "--state", "open",
                           "--limit", str(MAX_OPEN_ISSUES), "--json", "number"]) or []
@@ -179,7 +181,14 @@ def sweep(repo: str) -> int:
     orphans: dict[int, int] = {}  # issue -> the merged PR that referenced it
     for pr in merged:
         text = f"{pr.get('title','')}\n{pr.get('body','')}"
-        for issue in any_refs(text, repo):
+        # A merged PR from a gh<N> branch that omitted #N from its body is the exact
+        # orphan the pre-merge --pr check flags; the backstop must catch it too, so
+        # fold in the branch-declared issue alongside the body references.
+        issues = set(any_refs(text, repo))
+        branch = branch_issue(pr.get("headRefName", ""))
+        if branch is not None:
+            issues.add(branch)
+        for issue in issues:
             if issue in open_issues and issue not in orphans:
                 orphans[issue] = pr["number"]
     if orphans:
