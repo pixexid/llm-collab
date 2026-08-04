@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 10 -->
+<!-- CONTRACT_VERSION: 11 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,19 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v11 (2026-08-03) ends idle standoffs at their real cause: bad
+delegation. A question and a task delegation are different acts — a question gets
+an answer, a delegation gets a deliverable — and must never share a packet. A
+delegation is a frozen, bounded work order with an exact deliverable and no open
+question; an acknowledgement is not a deliverable, so confirm the artifact before
+claiming progress. Workers mirror this: self-label an ack ("ACK only — no work
+started"), never stay silent when blocked, and never guess a mixed packet.
+Re-driving only works on a live worker — confirm the session is alive and the
+delivery landed before treating silence as waiting. Track what you actually sent,
+and never report a worker "on task" when you only asked it a question. Mechanics
+in `docs/workflows/task-intake-and-delegation.md` → `## Delegation is a frozen
+task, not a message`.
 
 Contract v10 (2026-07-31) makes AX a Codex/ChatGPT-app doorbell only. Never
 invent or hand-author an AX command: run only the exact command printed by

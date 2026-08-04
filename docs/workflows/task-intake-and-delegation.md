@@ -449,6 +449,62 @@ DB clarification:
   Supabase CLI when local auth or `SUPABASE_DB_PASSWORD` is configured, then
   explicitly recorded service-role read-only assertions as the last resort.
 
+## Delegation is a frozen task, not a message
+
+A question and a task delegation are both valid — different acts with different
+replies — and the failure is mixing them or misreading which one came back. Ask
+any worker a question freely; it answers. Delegate a task and the worker executes
+it and reports the result. Most idle standoffs trace to sending a question,
+getting an answer, and recording it as if work were underway — so nothing was
+built and the orchestrator waits for work it never assigned.
+
+**Orchestrator side**
+
+- **A delegation is a frozen, bounded work order.** Exact scope, the exact
+  deliverable the worker returns (a PR head, an activation, named files), and the
+  definition of done. No open question — the worker can execute it end to end
+  without coming back to ask.
+- **A question is fine; a question is not a delegation.** "Which will you start?",
+  "does this look right?" ask for an answer, not a deliverable. Ask them — but
+  never inside a delegation packet, and never record the answer as "the task is
+  underway." A retry of a question must never be logged as a task.
+- **One packet, one act.** Do not fold a question, prioritization,
+  ownership-confirmation, and a work order into one message.
+- **State acceptance explicitly.** For each delegation name who owns the next
+  action, what artifact proves it started (branch/head/diff — not an "on it"),
+  and when you re-drive.
+- **An acknowledgement is not a deliverable — prove the claim, not the activity.**
+  Confirm the artifact exists before reporting progress; an "ACK / read-only / no
+  work started" reply is not work in progress. Track what you actually sent, not
+  what you meant, and never report a worker "on <task>" when you only asked it
+  about <task>.
+
+**Worker side (the mirror — a mixed or unclear packet dies here in one turn)**
+
+- **Self-label an acknowledgement.** A reply that starts no work says so:
+  `ACK only — no work started`. Cheaper and surer than making the orchestrator
+  infer it from timing or artifacts.
+- **Never guess a mixed packet.** If a packet folds a question into a task, answer
+  the question and state "no executable task" — do not build half of it.
+- **A frozen task can still hit real ambiguity.** On a genuine mid-execution
+  blocker, send one narrow question flagged as a `BLOCKER` (not progress), then
+  pause — don't guess in order to stay "frozen."
+- **Silence is never a valid state.** If you are blocked, finished, or cannot
+  proceed, say so in a durable packet.
+
+**Liveness (re-driving only works on a live worker)**
+
+- **Confirm the worker is alive before treating silence as waiting.** A worker
+  with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
+  turn awaiting a doorbell, and a stopped or lease-expired session hears a re-ring
+  as silence forever. The orchestrator confirms the session is active (or
+  reactivates it) and that the ring/delivery actually landed — a silently-failed
+  delivery is its own defect, not "no progress" — before re-driving. An open lane
+  with nobody acting is a defect, and the orchestrator that owns the lane is who
+  checks.
+- **Then keep the loop alive.** Re-ring after each turn until the deliverable
+  lands; re-driving a question just yields another answer.
+
 ## Delegation message requirements
 
 - exact goal
