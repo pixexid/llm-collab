@@ -1305,13 +1305,17 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 10 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 11 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v11",
+            "frozen, bounded work order",
+            "must never share a packet",
+            "Track what you actually sent",
             "Contract v10",
             "AX a Codex/ChatGPT-app doorbell only",
             "run only the exact command printed by `deliver.py`",
