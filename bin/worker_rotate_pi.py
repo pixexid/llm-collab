@@ -21,6 +21,8 @@ import argparse
 import ipaddress
 import json
 import os
+import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -415,6 +417,57 @@ def _load_json(run_autobridge, args: list[str], what: str) -> dict:
     return json.loads(out)
 
 
+def _load_optional_binding(project: str, chat: str, agent: str) -> dict | None:
+    from _session_autobridge import BindingUnreadable, load_binding
+
+    try:
+        return load_binding(project, chat, agent)
+    except FileNotFoundError:
+        return None
+    except BindingUnreadable as exc:
+        raise RotateError(f"binding for {agent} is unreadable: {exc}") from exc
+
+
+def _resolve_starter(
+    *, starter_agent: str, starter_session_id: str | None, project: str, chat: str,
+    require_active_binding: bool = True,
+) -> tuple[str, str]:
+    binding = _load_optional_binding(project, chat, starter_agent)
+    if not require_active_binding:
+        if not starter_session_id:
+            raise RotateError("starter session id is required for the disposable pilot path")
+        return starter_agent, starter_session_id
+    if not binding or binding.get("status") != "active":
+        raise RotateError(
+            f"starter binding is not active for {project}/{chat}/{starter_agent}; "
+            "register the starter session before launching a worker"
+        )
+    native = binding.get("runtime_session_id")
+    if not isinstance(native, str) or not native.strip():
+        raise RotateError("starter binding has no exact native runtime session")
+    if starter_session_id is not None and starter_session_id != native:
+        raise RotateError(
+            f"starter session mismatch: requested {starter_session_id!r}, binding has {native!r}"
+        )
+    return starter_agent, native
+
+
+def _resolve_livecraft_predecessor(
+    *, agent: str, project: str, chat: str, requested: str | None,
+    strict: bool = True,
+) -> str | None:
+    if not strict:
+        return requested
+    binding = _load_optional_binding(project, chat, agent)
+    current = binding.get("session_id") if binding and binding.get("status") == "active" else None
+    if requested is not None and requested != current:
+        raise RotateError(
+            f"--supersedes-session {requested!r} does not name the current active "
+            f"binding {current!r} for {project}/{chat}/{agent}"
+        )
+    return current
+
+
 def resolve_predecessor(run_autobridge, agent, project, chat, repo, pred) -> dict:
     """Load the predecessor from both show and show-binding and require them to
     describe the exact same active binding tuple before anything native happens."""
@@ -468,15 +521,15 @@ MAX_TOTAL_SESSION_BYTES = 200_000_000
 
 def resolve_pi_profile(
     agent: str, project: str, *, sessions_dir=None, override=None, runtime_home=None,
+    endpoint_filter=PI_WEB_ENDPOINT,
 ) -> dict:
-    """Reduce the agent's prior Pi Web records FOR THIS PROJECT to one transport
-    profile (Codex #271 ruling): eligible = endpoint_pi_web_local + exact
-    project_id, wake forced to runtime_trigger, provider/model/thinking from the
-    greatest canonical binding_generation (strict int) with a complete tuple.
-    Zero eligible requires an explicit full profile plus runtime home. Conflicting
-    home or a greatest-generation tie fails closed `pi_profile_required`. An
-    unreadable/oversized/corrupt candidate also fails closed — never skipped into
-    an apparently-complete older profile."""
+    """Reduce stored Pi records for one agent/project to one profile.
+
+    ``endpoint_filter`` preserves the Pi-Web start path's historical scope. The
+    Livecraft first-start path deliberately passes ``None``: provider/model/
+    thinking are the agent's stored profile, while Livecraft is the selected
+    transport rather than an old Pi-Web record.
+    """
     sessions_dir = Path(sessions_dir) if sessions_dir is not None else _sessions_dir()
     records, homes, display, total = [], set(), None, 0
     for path in sorted(sessions_dir.glob("*.json")):
@@ -498,7 +551,9 @@ def resolve_pi_profile(
             continue
         if d.get("project_id") != project:
             continue
-        if d.get("endpoint_id") != PI_WEB_ENDPOINT or not runtime.get("home"):
+        if endpoint_filter is not None and d.get("endpoint_id") != endpoint_filter:
+            continue
+        if not runtime.get("home"):
             continue
         gen = d.get("binding_generation")
         if not isinstance(gen, int) or isinstance(gen, bool):
@@ -518,7 +573,7 @@ def resolve_pi_profile(
             raise RotateError("pi_profile_required: override needs all of provider/model/thinking")
         provider, model, thinking = override
         return {
-            "endpoint_id": PI_WEB_ENDPOINT,
+            "endpoint_id": endpoint_filter or LIVECRAFT_ENDPOINT,
             "runtime_home": runtime_home,
             "wake_strategy": "runtime_trigger",
             "provider": provider,
@@ -546,7 +601,7 @@ def resolve_pi_profile(
         provider, model, thinking = distinct.pop()
 
     return {
-        "endpoint_id": PI_WEB_ENDPOINT,
+        "endpoint_id": endpoint_filter or LIVECRAFT_ENDPOINT,
         "runtime_home": homes.pop(),
         "wake_strategy": "runtime_trigger",
         "provider": provider,
@@ -556,10 +611,24 @@ def resolve_pi_profile(
     }
 
 
+def resolve_livecraft_profile(
+    agent: str, project: str, *, sessions_dir=None, override=None, runtime_home=None,
+) -> dict:
+    return resolve_pi_profile(
+        agent, project, sessions_dir=sessions_dir, override=override,
+        runtime_home=runtime_home, endpoint_filter=None,
+    )
+
+
 def _await_marker(piweb, tab_id, marker, *, timeout, interval, sleep, clock) -> None:
     deadline = clock() + timeout
     while clock() < deadline:
-        if piweb.last_assistant_text(tab_id) == marker:  # exact match only
+        text = piweb.last_assistant_text(tab_id)
+        if (
+            isinstance(text, str)
+            and text.strip().splitlines()
+            and text.strip().splitlines()[-1].strip() == marker
+        ):
             return
         sleep(interval)
     raise RotateError("bootstrap marker never observed within timeout")
@@ -740,11 +809,22 @@ def start_pi(
     }
 
 
-LIVECRAFT_BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Livecraft native session {native}. Do not start project work during this bootstrap turn. Do not start a Pi event monitor: the Livecraft host watcher owns background wakes and must not interrupt this session UI.
+BOOTSTRAP_HANDSHAKE_KIND = "llm_collab.pi.bootstrap.v1"
+MAX_HANDSHAKE_INBOX_BYTES = 4 * 1024 * 1024
 
-This bootstrap hold applies only to this setup turn. A valid non-empty durable packet addressed to this worker and scoped to this exact project/repository is the collaboration task authorization. If no such packet arrives, remain idle after replying with the marker.
+LIVECRAFT_BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Livecraft native session {native}. Do not start project work during this bootstrap turn. The worker who started this session is {starter_agent}, native runtime session {starter_session_id}.
 
-After setup, remain idle until the Livecraft host presents an exact durable inbox packet. Reply only {marker}"""
+This bootstrap hold applies only to this setup turn. Before claiming ready, send exactly one durable bootstrap handshake back to {starter_agent}. The starter must receive and validate that packet before registering this session. Do not guess or change any value in the JSON below:
+
+{handshake_json}
+
+Send it through the deployed runtime with this exact command:
+printf '%s\\n' {handshake_command_json} | {runtime_command} deliver.py --chat {chat_command} --from {agent_command} --to {starter_agent_command} --title {title_command} --priority high --tags {tags_command} --project {project_command} --repo-targets {repo_command} --sender-session-id {native_command} --target-session-id {starter_session_command} --body-file -
+
+If delivery fails, do not claim ready. After successful delivery, reply only {marker}
+The starter will arm the background wake path with this exact reader identity; do not start a Pi event monitor yourself and do not use Pi-Web.
+
+After setup, remain idle until the starter presents a valid durable packet for this exact project and repository."""
 
 
 def _livecraft_declaration_path() -> Path:
@@ -753,14 +833,14 @@ def _livecraft_declaration_path() -> Path:
     return Path(RUNTIME_ROOT) / "docs" / "protocols" / "standalone-v1-feature-declarations.json"
 
 
-def _require_current_project_authority(project: str) -> None:
+def _require_current_project_authority(project: str, *, mode: str) -> None:
     """Require the current ledger snapshot to authorize canonical project writes."""
     from _helpers import config_get, project_state_root
     from llm_collab.ledger import LedgerPaths, LedgerStore
 
     workspace_id = config_get("workspace_id")
     if not workspace_id:
-        raise RotateError("Livecraft pilot gate: workspace_id is unset")
+        raise RotateError(f"{mode} gate: workspace_id is unset")
     try:
         paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
         with LedgerStore.open_reader(paths) as store:
@@ -770,9 +850,9 @@ def _require_current_project_authority(project: str) -> None:
             )
         payload = json.loads(snapshot["snapshot_json"]) if snapshot else None
     except Exception as exc:
-        raise RotateError(f"Livecraft pilot gate: current project authority unavailable: {exc}") from exc
+        raise RotateError(f"{mode} gate: current project authority unavailable: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("canonical_writes") is not True:
-        raise RotateError("Livecraft pilot gate: current project authority does not enable canonical writes")
+        raise RotateError(f"{mode} gate: current project authority does not enable canonical writes")
 
 
 def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) -> None:
@@ -792,7 +872,20 @@ def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) ->
         raise RotateError("Livecraft pilot gate: runtime dispatch is not enabled for an exact thread")
     if environment.get("LLM_COLLAB_CANONICAL_CONTROL") != "enabled":
         raise RotateError("Livecraft pilot gate: canonical control is not enabled")
-    _require_current_project_authority(cfg.project)
+    _require_current_project_authority(cfg.project, mode="Livecraft pilot")
+
+
+def require_livecraft_production_gate(cfg, *, environ=None) -> None:
+    """Allow a real binding when the current project authority permits writes."""
+    _require_current_project_authority(cfg.project, mode="Livecraft production")
+
+
+def require_livecraft_gate(cfg, *, declaration_path=None, environ=None) -> None:
+    """Select the production launcher or retain the explicit pilot test path."""
+    if getattr(cfg, "production", True):
+        require_livecraft_production_gate(cfg, environ=environ)
+    else:
+        require_livecraft_pilot_gate(cfg, declaration_path=declaration_path, environ=environ)
 
 
 def _require_livecraft_worker_scope(cfg) -> None:
@@ -808,9 +901,144 @@ def _require_livecraft_worker_scope(cfg) -> None:
         raise RotateError(f"worker {cfg.agent} has no enabled background watcher")
 
 
+def _starter_inbox_json(
+    *, starter_agent: str, project: str, chat: str, repo_target: str,
+    packet: str | None = None,
+) -> dict | list:
+    """Read or acknowledge one starter packet through the deployed runtime."""
+    command = [
+        MONITOR_PYTHON, _monitor_inbox(), "--me", starter_agent,
+        "--project", project, "--chat", chat, "--repo-target", repo_target,
+        "--json",
+    ]
+    if packet is None:
+        # The inbox command's ordinary limit is oldest-first and can hide a
+        # just-delivered handshake behind a large unread backlog. Read the
+        # bounded project/chat view and select the exact handshake below.
+        command.extend(("--all", "--peek", "--limit", str(MESSAGE_SCAN_LIMIT)))
+    else:
+        command.extend(("--packet", packet))
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RotateError(f"bootstrap handshake inbox read failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RotateError(f"bootstrap handshake inbox command failed: {detail}")
+    if len(result.stdout.encode("utf-8")) > MAX_HANDSHAKE_INBOX_BYTES:
+        raise RotateError("bootstrap handshake inbox response exceeds the byte limit")
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RotateError("bootstrap handshake inbox response is not JSON") from exc
+    if not isinstance(payload, (dict, list)):
+        raise RotateError("bootstrap handshake inbox response is malformed")
+    return payload
+
+
+def _starter_handshake_messages(
+    *, starter_agent: str, project: str, chat: str, repo_target: str,
+) -> list[dict]:
+    payload = _starter_inbox_json(
+        starter_agent=starter_agent, project=project, chat=chat, repo_target=repo_target,
+    )
+    messages = payload if isinstance(payload, list) else payload.get("messages", [])
+    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+        raise RotateError("bootstrap handshake inbox messages are malformed")
+    return messages
+
+
+def _ack_starter_handshake(
+    *, starter_agent: str, project: str, chat: str, repo_target: str, packet: str,
+) -> None:
+    payload = _starter_inbox_json(
+        starter_agent=starter_agent, project=project, chat=chat,
+        repo_target=repo_target, packet=packet,
+    )
+    messages = payload if isinstance(payload, list) else payload.get("messages", [])
+    if not isinstance(messages, list) or [message.get("path") for message in messages] != [packet]:
+        raise RotateError("bootstrap handshake acknowledgement did not select the exact packet")
+
+
+def _await_bootstrap_handshake(
+    *, starter_agent: str, starter_session_id: str, agent: str, project: str,
+    chat: str, repo_target: str, native: str, session_source: str,
+    handshake_id: str, timeout: float, interval: float, sleep, clock,
+) -> dict:
+    expected_body = {
+        "kind": BOOTSTRAP_HANDSHAKE_KIND,
+        "handshake_id": handshake_id,
+        "starter_agent": starter_agent,
+        "starter_runtime_session_id": starter_session_id,
+        "worker_agent": agent,
+        "worker_runtime_family": "pi",
+        "worker_native_session_id": native,
+        "worker_runtime_session_source": session_source,
+        "project_id": project,
+        "chat_id": chat,
+        "repo_target": repo_target,
+    }
+    expected_title = f"Pi worker bootstrap handshake {handshake_id}"
+    deadline = clock() + timeout
+    while clock() < deadline:
+        for message in _starter_handshake_messages(
+            starter_agent=starter_agent, project=project, chat=chat, repo_target=repo_target,
+        ):
+            frontmatter = message.get("frontmatter") or {}
+            if frontmatter.get("title") != expected_title:
+                continue
+            if frontmatter.get("from") != agent or frontmatter.get("to") != starter_agent:
+                raise RotateError("bootstrap handshake sender/recipient mismatch")
+            if frontmatter.get("sender_agent_id") != agent or frontmatter.get("sender_session_id") != native:
+                raise RotateError("bootstrap handshake sender session mismatch")
+            if frontmatter.get("project_id") != project or frontmatter.get("chat_id") != chat:
+                raise RotateError("bootstrap handshake project/chat mismatch")
+            if frontmatter.get("repo_targets") != [repo_target]:
+                raise RotateError("bootstrap handshake repository scope mismatch")
+            if frontmatter.get("target_session_id") != starter_session_id:
+                raise RotateError("bootstrap handshake target session mismatch")
+            try:
+                body = json.loads(str(message.get("body", "")))
+            except json.JSONDecodeError as exc:
+                raise RotateError("bootstrap handshake body is not JSON") from exc
+            if body != expected_body:
+                raise RotateError("bootstrap handshake body identity mismatch")
+            packet = message.get("path")
+            if not isinstance(packet, str) or not packet.strip():
+                raise RotateError("bootstrap handshake packet path is missing")
+            _ack_starter_handshake(
+                starter_agent=starter_agent, project=project, chat=chat,
+                repo_target=repo_target, packet=packet,
+            )
+            return {"path": packet, "body": body}
+        sleep(interval)
+    raise RotateError(f"bootstrap handshake not received within {timeout:g} seconds")
+
+
+def _cleanup_livecraft_session(*, livecraft, run_autobridge, native: str) -> list[str]:
+    errors: list[str] = []
+    try:
+        rc, out = run_autobridge([
+            "deactivate-pi", "--native-session-id", native, "--json",
+        ])
+        if rc != 0:
+            errors.append(f"registry cleanup failed (rc={rc}): {out}")
+    except Exception as exc:
+        errors.append(f"registry cleanup failed: {exc}")
+    try:
+        livecraft.close_session(native)
+    except Exception as exc:
+        errors.append(f"Livecraft abort failed: {exc}")
+    return errors
+
+
 def _provision_livecraft_and_bind(
     *, agent, project, chat, repo_target, repo_cwd, provider, model, thinking,
-    runtime_home, livecraft, run_autobridge, bootstrap_timeout, poll_interval, sleep, clock,
+    runtime_home, starter_agent, starter_session_id, supersedes_session, livecraft_backend_url,
+    livecraft, run_autobridge,
+    bootstrap_timeout, poll_interval, sleep, clock,
 ) -> dict:
     session = livecraft.create_session(repo_cwd)
     session_id = session["id"]
@@ -830,19 +1058,56 @@ def _provision_livecraft_and_bind(
         native = state["native"]
         suffix = chat[len("CHAT-"):] if chat.startswith("CHAT-") else chat
         logical = f"SESSION-LIVECRAFT-{agent.upper()}-{suffix}-{native[:8].lower()}"
-        marker = f"BOOTSTRAP_READY_{logical}"
+        handshake_id = secrets.token_hex(16)
+        handshake_body = {
+            "kind": BOOTSTRAP_HANDSHAKE_KIND,
+            "handshake_id": handshake_id,
+            "starter_agent": starter_agent,
+            "starter_runtime_session_id": starter_session_id,
+            "worker_agent": agent,
+            "worker_runtime_family": "pi",
+            "worker_native_session_id": native,
+            "worker_runtime_session_source": state["session_file"],
+            "project_id": project,
+            "chat_id": chat,
+            "repo_target": repo_target,
+        }
+        from _helpers import RUNTIME_ROOT
+
+        marker = "BOOTSTRAP_READY"
+        handshake_json = json.dumps(handshake_body, sort_keys=True, separators=(",", ":"))
         livecraft.prompt(session_id, LIVECRAFT_BOOTSTRAP_TEMPLATE.format(
             agent=agent, native=native, marker=marker,
+            starter_agent=starter_agent, starter_session_id=starter_session_id,
+            handshake_id=handshake_id, handshake_json=handshake_json,
+            handshake_command_json=shlex.quote(handshake_json),
+            runtime_command=shlex.quote(str(Path(RUNTIME_ROOT) / "bin" / "llm-collab")),
+            chat_command=shlex.quote(chat), agent_command=shlex.quote(agent),
+            starter_agent_command=shlex.quote(starter_agent),
+            title_command=shlex.quote(f"Pi worker bootstrap handshake {handshake_id}"),
+            tags_command=shlex.quote("pi-worker-bootstrap,session-handshake"),
+            project_command=shlex.quote(project), repo_command=shlex.quote(repo_target),
+            native_command=shlex.quote(native),
+            starter_session_command=shlex.quote(starter_session_id),
         ))
         _await_marker(livecraft, session_id, marker, timeout=bootstrap_timeout,
                       interval=poll_interval, sleep=sleep, clock=clock)
         final = livecraft.get_state(session_id)
         if final["native"] != native or final["cwd"] != repo_cwd or (
             final["provider"], final["model_id"], final["thinking"]
-        ) != (provider, model, thinking):
+        ) != (provider, model, thinking) or final["session_file"] != state["session_file"]:
             raise RotateError(f"Livecraft native state drifted before register: {final}")
+        handshake = _await_bootstrap_handshake(
+            starter_agent=starter_agent, starter_session_id=starter_session_id,
+            agent=agent, project=project, chat=chat, repo_target=repo_target,
+            native=native, session_source=final["session_file"],
+            handshake_id=handshake_id, timeout=bootstrap_timeout, interval=poll_interval,
+            sleep=sleep, clock=clock,
+        )
     except Exception as exc:
-        livecraft.close_session(session_id)
+        _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=session_id,
+        )
         if isinstance(exc, RotateError):
             raise
         raise RotateError(f"pre-register Livecraft failure closed session {session_id}: {exc!r}") from exc
@@ -854,19 +1119,32 @@ def _provision_livecraft_and_bind(
         "--runtime-home", runtime_home, "--endpoint-id", LIVECRAFT_ENDPOINT,
         "--runtime-instance-id", session_id, "--cwd", repo_cwd, "--status", "active",
         "--mode", "auto-read", "--wake-strategy", "runtime_trigger",
+        "--runtime-command", json.dumps([
+            MONITOR_PYTHON, str(RUNTIME_ROOT / "bin" / "livecraft_wake.py"),
+            "--backend-url", livecraft_backend_url, "--runtime-root", str(RUNTIME_ROOT),
+        ]),
         "--expect-pi-provider", final["provider"], "--expect-pi-model", final["model_id"],
         "--expect-pi-thinking", final["thinking"], "--json",
     ]
+    if supersedes_session:
+        argv.extend(("--supersedes-session", supersedes_session))
     rc, out = run_autobridge(argv)
     if rc != 0:
-        raise RotateError(
-            f"register failed (rc={rc}); Livecraft session {session_id} native {native} left as partial state: {out}"
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=session_id,
         )
-    return {"logical": logical, "native": native, "tab_id": session_id, "register_out": out}
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+        raise RotateError(
+            f"register failed (rc={rc}); Livecraft session {session_id} native {native} was aborted.{cleanup} {out}"
+        )
+    return {
+        "logical": logical, "native": native, "tab_id": session_id,
+        "register_out": out, "bootstrap_handshake": handshake,
+    }
 
 
 def start_livecraft(
-    cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_pilot_gate,
+    cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_gate,
     sleep=time.sleep, clock=time.monotonic,
 ) -> dict:
     gate_check(cfg)
@@ -880,23 +1158,66 @@ def start_livecraft(
     if not repo_cwd:
         raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
     repo_cwd = str(Path(repo_cwd).resolve())
+    provided_profile = tuple(
+        getattr(cfg, key, None) for key in ("provider", "model", "thinking", "runtime_home")
+    )
+    if all(isinstance(value, str) and value.strip() for value in provided_profile):
+        profile = dict(zip(("provider", "model", "thinking", "runtime_home"), provided_profile))
+    else:
+        override_values = tuple(getattr(cfg, key, None) for key in ("provider", "model", "thinking"))
+        profile = resolve_livecraft_profile(
+            cfg.agent, cfg.project,
+            override=override_values if any(override_values) else None,
+            runtime_home=getattr(cfg, "runtime_home", None),
+        )
+    starter_agent, starter_session_id = _resolve_starter(
+        starter_agent=getattr(cfg, "starter_agent", "claude"),
+        starter_session_id=getattr(cfg, "starter_session_id", None),
+        project=cfg.project, chat=chat,
+        require_active_binding=getattr(cfg, "production", True),
+    )
+    supersedes_session = _resolve_livecraft_predecessor(
+        agent=cfg.agent, project=cfg.project, chat=chat,
+        requested=getattr(cfg, "supersedes_session", None),
+        strict=getattr(cfg, "production", True),
+    )
     result = _provision_livecraft_and_bind(
         agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
-        repo_cwd=repo_cwd, provider=cfg.provider, model=cfg.model, thinking=cfg.thinking,
-        runtime_home=cfg.runtime_home, livecraft=livecraft, run_autobridge=run_autobridge,
+        repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"],
+        thinking=profile["thinking"], runtime_home=profile["runtime_home"],
+        starter_agent=starter_agent, starter_session_id=starter_session_id,
+        supersedes_session=supersedes_session,
+        livecraft_backend_url=cfg.livecraft_backend_url,
+        livecraft=livecraft,
+        run_autobridge=run_autobridge,
         bootstrap_timeout=cfg.bootstrap_timeout, poll_interval=cfg.poll_interval,
         sleep=sleep, clock=clock,
     )
-    binding = _load_json(
-        run_autobridge,
-        ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
-        "start-livecraft-pi postcondition",
-    )
+    try:
+        binding = _load_json(
+            run_autobridge,
+            ["show-binding", "--project", cfg.project, "--chat", chat, "--agent", cfg.agent, "--json"],
+            "start-livecraft-pi postcondition",
+        )
+    except Exception as exc:
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=result["native"],
+        )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+        raise RotateError(f"start-livecraft-pi postcondition failed; native session was aborted.{cleanup}") from exc
     verified = binding.get("session_id") == result["logical"] and binding.get("status") == "active"
+    if not verified:
+        cleanup_errors = _cleanup_livecraft_session(
+            livecraft=livecraft, run_autobridge=run_autobridge, native=result["native"],
+        )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
+        raise RotateError(f"start-livecraft-pi postcondition mismatch; native session was aborted.{cleanup}")
     return {
         "session": result["logical"], "native_session_id": result["native"],
         "runtime_instance_id": result["tab_id"], "verified": verified,
         "generation": binding.get("binding_generation"),
+        "profile": {key: profile[key] for key in ("provider", "model", "thinking", "runtime_home")},
+        "bootstrap_handshake": result["bootstrap_handshake"],
     }
 
 
@@ -986,13 +1307,27 @@ def add_start_livecraft_pi_arguments(p) -> None:
     p.add_argument("--project", required=True)
     p.add_argument("--chat", required=True, help="Canonical CHAT-... id")
     p.add_argument("--repo-target", required=True)
-    p.add_argument("--provider", required=True)
-    p.add_argument("--model", required=True)
-    p.add_argument("--thinking", required=True)
-    p.add_argument("--runtime-home", required=True)
-    p.add_argument("--pilot-scope", required=True, help="Exact <project>/<agent> pilot scope")
-    p.add_argument("--disposable", action="store_true",
-                   help="Confirm this is a disposable pilot worker")
+    p.add_argument("--provider", default=None,
+                   help="Optional first-profile provider override; normally read from the stored Pi profile")
+    p.add_argument("--model", default=None,
+                   help="Optional first-profile model override; normally read from the stored Pi profile")
+    p.add_argument("--thinking", default=None,
+                   help="Optional first-profile thinking override; normally read from the stored Pi profile")
+    p.add_argument("--runtime-home", default=None,
+                   help="Optional first-profile runtime home; normally read from the stored Pi profile")
+    p.add_argument("--starter-agent", default="claude",
+                   help="Agent that created this worker session and receives the bootstrap handshake")
+    p.add_argument("--starter-session-id", default=None,
+                   help="Native runtime session id of --starter-agent")
+    p.add_argument("--supersedes-session", default=None,
+                   help="Existing logical worker session to replace when rebinding a stale worker")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--production", dest="production", action="store_true",
+                      help="Explicitly select the persistent worker path (the default)")
+    mode.add_argument("--disposable", dest="production", action="store_false",
+                      help="Use the existing gated disposable pilot path")
+    p.set_defaults(production=True, disposable=False)
+    p.add_argument("--pilot-scope", default=None, help="Exact <project>/<agent> pilot scope")
     p.add_argument("--bootstrap-timeout", type=float, default=180.0)
     p.add_argument("--poll-interval", type=float, default=2.0)
     p.add_argument("--json", dest="json_output", action="store_true")

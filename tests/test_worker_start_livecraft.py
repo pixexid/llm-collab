@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
@@ -18,12 +20,14 @@ NATIVE = "bfe59384-f808-4885-8aed-604774d728fc"
 
 
 class FakeLivecraft:
-    def __init__(self, chronology, *, drift=False):
+    def __init__(self, chronology, *, drift=False, session_file="/pi/sessions/livecraft.jsonl"):
         self.chronology = chronology
         self.drift = drift
+        self.session_file = session_file
         self.marker = None
         self.snapshot_calls = 0
         self.closed = []
+        self.prompt_message = None
 
     def create_session(self, cwd):
         self.chronology.append(("http", "create"))
@@ -41,7 +45,7 @@ class FakeLivecraft:
         provider = "other" if self.drift and self.snapshot_calls > 1 else "zai"
         return {
             "native": NATIVE,
-            "session_file": "/pi/sessions/livecraft.jsonl",
+            "session_file": self.session_file,
             "provider": provider,
             "model_id": "glm-5.2",
             "thinking": "max",
@@ -49,7 +53,8 @@ class FakeLivecraft:
         }
 
     def prompt(self, session_id, message):
-        self.marker = re.search(r"BOOTSTRAP_READY_\S+", message).group(0)
+        self.prompt_message = message
+        self.marker = re.search(r"BOOTSTRAP_READY(?:_\S+)?", message).group(0)
         self.chronology.append(("http", "prompt"))
 
     def last_assistant_text(self, session_id):
@@ -75,6 +80,8 @@ class FakeAutobridge:
             return 0, json.dumps({"ok": True})
         if args[0] == "show-binding":
             return 0, json.dumps({"session_id": self.session, "status": "active", "binding_generation": 4})
+        if args[0] == "deactivate-pi":
+            return 0, json.dumps({"deactivated_sessions": [self.session]})
         raise AssertionError(args)
 
 
@@ -83,7 +90,9 @@ def _cfg(**over):
         livecraft_backend_url=wr.DEFAULT_LIVECRAFT_BACKEND_URL,
         agent="glmpi", project="llm-collab", chat="CHAT-NEWPROJ", repo_target="app",
         provider="zai", model="glm-5.2", thinking="max", runtime_home="/pi",
-        pilot_scope="llm-collab/glmpi", disposable=True, bootstrap_timeout=5.0,
+        starter_agent="codex", starter_session_id="codex-native",
+        supersedes_session=None,
+        pilot_scope="llm-collab/glmpi", disposable=True, production=False, bootstrap_timeout=5.0,
         poll_interval=0.0, json_output=True,
     )
     values.update(over)
@@ -127,12 +136,16 @@ class StartLivecraftTest(unittest.TestCase):
         chronology = []
         livecraft = livecraft or FakeLivecraft(chronology)
         run = run or FakeAutobridge(chronology)
-        result = wr.start_livecraft(
-            cfg or _cfg(), livecraft=livecraft, run_autobridge=run,
-            resolve_cwd=lambda project, repo: "/repo", gate_check=lambda _cfg: None,
-            sleep=lambda _seconds: None,
-            clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 1), counter[0])[1]),
-        )
+        with mock.patch.object(
+            wr, "_await_bootstrap_handshake",
+            return_value={"path": "Chats/handshake.md", "body": {}},
+        ):
+            result = wr.start_livecraft(
+                cfg or _cfg(), livecraft=livecraft, run_autobridge=run,
+                resolve_cwd=lambda project, repo: "/repo", gate_check=lambda _cfg: None,
+                sleep=lambda _seconds: None,
+                clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 1), counter[0])[1]),
+            )
         return result, chronology, livecraft, run
 
     def test_client_uses_livecraft_rpc_and_snapshot_shapes(self):
@@ -194,10 +207,17 @@ class StartLivecraftTest(unittest.TestCase):
             )
         self.assertEqual(client.snapshot_calls, 0)
 
+    def test_production_gate_requires_current_project_authority(self):
+        cfg = _cfg(production=True, disposable=False)
+        with mock.patch.object(wr, "_require_current_project_authority") as authority:
+            wr.require_livecraft_gate(cfg, environ={})
+        authority.assert_called_once_with("llm-collab", mode="Livecraft production")
+
     def test_happy_path_registers_after_marker_with_lowercase_native_suffix(self):
         result, chronology, _client, run = self._run()
         self.assertEqual(result["session"], "SESSION-LIVECRAFT-GLMPI-NEWPROJ-bfe59384")
         self.assertTrue(result["verified"])
+        self.assertEqual(result["bootstrap_handshake"]["path"], "Chats/handshake.md")
         self.assertEqual([call[0] for call in run.calls], ["register", "show-binding"])
         marker_at = next(i for i, item in enumerate(chronology) if item == ("http", "snapshot_messages"))
         register_at = next(i for i, item in enumerate(chronology) if item == ("autobridge", "register"))
@@ -205,6 +225,126 @@ class StartLivecraftTest(unittest.TestCase):
         register = run.calls[0]
         self.assertNotIn("--supersedes-session", register)
         self.assertEqual(register[register.index("--endpoint-id") + 1], wr.LIVECRAFT_ENDPOINT)
+        runtime_command = json.loads(register[register.index("--runtime-command") + 1])
+        self.assertIn("livecraft_wake.py", runtime_command[1])
+        self.assertEqual(
+            runtime_command[runtime_command.index("--backend-url") + 1],
+            wr.DEFAULT_LIVECRAFT_BACKEND_URL,
+        )
+
+    def test_bootstrap_prompt_identifies_starter_and_reader_identity(self):
+        _result, _chronology, client, _run = self._run(_cfg(starter_session_id="starter-native"))
+        self.assertIn("The worker who started this session is codex", client.prompt_message)
+        self.assertIn("--from glmpi --to codex", client.prompt_message)
+        self.assertIn("--sender-session-id bfe59384-f808-4885-8aed-604774d728fc", client.prompt_message)
+        self.assertIn("--target-session-id starter-native", client.prompt_message)
+        self.assertIn("starter will arm the background wake path", client.prompt_message)
+        self.assertIn('"kind":"llm_collab.pi.bootstrap.v1"', client.prompt_message)
+
+    def test_bootstrap_command_shell_quotes_paths_and_json_values(self):
+        import _helpers
+
+        client = FakeLivecraft([], session_file="/pi/sessions/worker's file.jsonl")
+        with mock.patch.object(_helpers, "RUNTIME_ROOT", Path("/runtime root")):
+            _result, _chronology, client, _run = self._run(
+                _cfg(starter_agent="codex's", starter_session_id="starter's native"),
+                livecraft=client,
+            )
+
+        command = next(line for line in client.prompt_message.splitlines() if "deliver.py" in line)
+        parts = shlex.split(command)
+        self.assertEqual("/runtime root/bin/llm-collab", parts[4])
+        self.assertEqual("deliver.py", parts[5])
+        self.assertEqual("codex's", parts[parts.index("--to") + 1])
+        self.assertEqual("starter's native", parts[parts.index("--target-session-id") + 1])
+        handshake = json.loads(parts[2])
+        self.assertEqual("/pi/sessions/worker's file.jsonl", handshake["worker_runtime_session_source"])
+
+    def test_marker_accepts_successful_trailing_bootstrap_marker(self):
+        client = mock.Mock()
+        client.last_assistant_text.return_value = "Delivery succeeded.\n\nBOOTSTRAP_READY"
+        wr._await_marker(
+            client, "native", "BOOTSTRAP_READY", timeout=1, interval=0,
+            sleep=lambda _seconds: None,
+            clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 0.1), counter[0])[1]),
+        )
+
+    def test_cli_defaults_profile_and_starter_from_bindings(self):
+        cfg = _cfg(
+            provider=None, model=None, thinking=None, runtime_home=None,
+            starter_agent="claude", starter_session_id=None, production=True, disposable=False,
+        )
+        profile = {
+            "provider": "zai", "model": "glm-5.2", "thinking": "max",
+            "runtime_home": "/pi", "endpoint_id": wr.LIVECRAFT_ENDPOINT,
+        }
+        bindings = {
+            "claude": {"status": "active", "runtime_session_id": "starter-native"},
+            "glmpi": {"status": "active", "session_id": "SESSION-OLD"},
+        }
+        with mock.patch.object(wr, "resolve_livecraft_profile", return_value=profile), \
+             mock.patch.object(wr, "_load_optional_binding", side_effect=lambda _project, _chat, agent: bindings[agent]):
+            result, _chronology, _client, run = self._run(cfg)
+        self.assertEqual(result["profile"], {
+            "provider": "zai", "model": "glm-5.2", "thinking": "max", "runtime_home": "/pi",
+        })
+        register = run.calls[0]
+        self.assertEqual(register[register.index("--supersedes-session") + 1], "SESSION-OLD")
+        runtime_command = json.loads(register[register.index("--runtime-command") + 1])
+        self.assertIn("livecraft_wake.py", runtime_command[1])
+
+    def test_rebind_passes_explicit_predecessor(self):
+        _result, _chronology, _client, run = self._run(_cfg(supersedes_session="SESSION-OLD"))
+        register = run.calls[0]
+        self.assertEqual(
+            register[register.index("--supersedes-session") + 1],
+            "SESSION-OLD",
+        )
+
+    def test_bootstrap_handshake_is_exact_and_acknowledged(self):
+        expected = {
+            "kind": wr.BOOTSTRAP_HANDSHAKE_KIND,
+            "handshake_id": "handshake-1",
+            "starter_agent": "codex",
+            "starter_runtime_session_id": "starter-native",
+            "worker_agent": "glmpi",
+            "worker_runtime_family": "pi",
+            "worker_native_session_id": NATIVE,
+            "worker_runtime_session_source": "/pi/sessions/livecraft.jsonl",
+            "project_id": "llm-collab",
+            "chat_id": "CHAT-NEWPROJ",
+            "repo_target": "app",
+        }
+        message = {
+            "path": "Chats/handshake.md",
+            "frontmatter": {
+                "title": "Pi worker bootstrap handshake handshake-1",
+                "from": "glmpi",
+                "to": "codex",
+                "sender_agent_id": "glmpi",
+                "sender_session_id": NATIVE,
+                "project_id": "llm-collab",
+                "chat_id": "CHAT-NEWPROJ",
+                "repo_targets": ["app"],
+                "target_session_id": "starter-native",
+            },
+            "body": json.dumps(expected, sort_keys=True),
+        }
+        with mock.patch.object(wr, "_starter_handshake_messages", return_value=[message]), \
+             mock.patch.object(wr, "_ack_starter_handshake") as acknowledge:
+            result = wr._await_bootstrap_handshake(
+                starter_agent="codex", starter_session_id="starter-native", agent="glmpi",
+                project="llm-collab", chat="CHAT-NEWPROJ", repo_target="app",
+                native=NATIVE,
+                session_source=expected["worker_runtime_session_source"],
+                handshake_id="handshake-1", timeout=1, interval=0, sleep=lambda _seconds: None,
+                clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 0.1), counter[0])[1]),
+            )
+        self.assertEqual(result["path"], "Chats/handshake.md")
+        acknowledge.assert_called_once_with(
+            starter_agent="codex", project="llm-collab", chat="CHAT-NEWPROJ",
+            repo_target="app", packet="Chats/handshake.md",
+        )
 
     def test_final_fingerprint_drift_aborts_and_never_registers(self):
         chronology = []
@@ -212,7 +352,7 @@ class StartLivecraftTest(unittest.TestCase):
         run = FakeAutobridge(chronology)
         with self.assertRaisesRegex(wr.RotateError, "drifted"):
             self._run(livecraft=client, run=run)
-        self.assertEqual(run.calls, [])
+        self.assertEqual([call[0] for call in run.calls], ["deactivate-pi"])
         self.assertEqual(client.closed, [NATIVE])
 
     def test_noncanonical_chat_is_refused_before_native_create(self):

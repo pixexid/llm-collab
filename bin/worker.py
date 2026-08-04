@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     _rotate_pi.add_start_pi_arguments(
         commands.add_parser("start-pi", help="Start a fresh Pi worker session for an existing agent"))
     _rotate_pi.add_start_livecraft_pi_arguments(
-        commands.add_parser("start-livecraft-pi", help="Start a gated disposable Livecraft Pi worker"))
+        commands.add_parser("start-livecraft-pi", help="Start an explicitly authorized Livecraft Pi worker"))
     args = parser.parse_args(argv)
     ensure_project(args.project, allow_none=False)
 

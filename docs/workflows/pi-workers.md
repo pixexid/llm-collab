@@ -66,7 +66,7 @@ Know which host you are provisioning on before you promise a new worker to a ses
   as active. `bin/worker.py rotate-pi` handles rotating a context-bloated worker to a
   fresh session (`--supersedes-session`). Both are Pi-Web-specific and
   operator-invoked — not something a worker triggers autonomously.
-- **Livecraft: gated first-start exists.** `bin/worker.py start-livecraft-pi` drives
+- **Livecraft: production first-start exists.** `bin/worker.py start-livecraft-pi` drives
   Livecraft `POST /api/sessions`, sets model/thinking through Pi RPC, verifies the exact
   native id/cwd/fingerprint, waits for a bootstrap marker from the snapshot API, then
   registers through the canonical reserve/consume path. A mismatch or missing marker
@@ -77,12 +77,13 @@ Know which host you are provisioning on before you promise a new worker to a ses
   returned identity and provider/model/thinking fingerprint, and registers only after
   the bootstrap marker succeeds. The worker bootstrap does not install a foreground
   event monitor; the Livecraft host owns background wakes.
-- **The Livecraft path stays gated.** The command refuses by default. A pilot requires
-  the valid `runtime_dispatch` declaration and exact-thread environment gate,
-  `LLM_COLLAB_CANONICAL_CONTROL=enabled`, a current project snapshot with
-  `canonical_writes: true`, an exact `--pilot-scope <project>/<agent>`, and the explicit
-  `--disposable` confirmation. Provider/model/thinking/runtime-home and repo target are
-  required; no generic flag enables production provisioning.
+- **The Livecraft path is production by default.** Without `--disposable`, the command
+  requires a current project snapshot with `canonical_writes: true` and resolves the
+  stored worker profile plus the active starter binding. Pass explicit provider/model/
+  thinking/runtime-home values only when overriding that profile. `--disposable` selects
+  the separately gated pilot path, which still requires the valid `runtime_dispatch`
+  declaration, exact-thread environment gate, `LLM_COLLAB_CANONICAL_CONTROL=enabled`,
+  an exact `--pilot-scope <project>/<agent>`, and the explicit confirmation.
 - Do not add a provider abstraction spanning both hosts until both actually need one.
 
 ## Current worker hosts
