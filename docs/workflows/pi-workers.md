@@ -90,6 +90,16 @@ creation and wake delivery untouched and reports the recovery condition clearly.
   registers through the canonical reserve/consume path. A mismatch or missing marker
   creates no binding; Livecraft has no delete endpoint, so failed cleanup can only issue
   native `abort`.
+- **Single-repository projects:** when the project's `repos` map has exactly one key,
+  `--repo-target` is optional:
+
+  ```bash
+  bin/llm-collab worker.py start-livecraft-pi \
+    --agent <agent-id> --project <project-id> --chat <CHAT-ID>
+  ```
+
+  Multi-repository projects still require the repository key. A missing or invalid
+  key fails before native session creation and lists the valid keys.
 - **The first-start flow validates exact scope.** It validates exact
   project/worker/chat/repo/cwd scope, creates exactly one native session, verifies its
   returned identity and provider/model/thinking fingerprint, and registers only after
