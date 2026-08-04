@@ -261,6 +261,10 @@ def ensure_livecraft_ready(
         if remaining <= 0:
             raise LivecraftHealthError("Livecraft backend connection refused before recovery could start")
         with lock():
+            if deadline - clock() <= 0:
+                raise LivecraftHealthError(
+                    "Livecraft backend recovery deadline expired while waiting for the recovery lock"
+                )
             status = probe(backend_url)
             if status.ready:
                 return status

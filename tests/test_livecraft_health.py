@@ -92,6 +92,43 @@ class LivecraftHealthTest(unittest.TestCase):
             )
         self.assertEqual(kicks, ["kick"])
 
+    def test_second_caller_does_not_kick_after_recovery_lock_deadline(self):
+        now = [0.0]
+        kicks = []
+        acquisitions = [0]
+
+        @contextlib.contextmanager
+        def delayed_lock():
+            acquisitions[0] += 1
+            if acquisitions[0] == 2:
+                now[0] += 1.0
+            yield
+
+        def refused(_url):
+            return HealthStatus("connection_refused")
+
+        with self.assertRaisesRegex(LivecraftHealthError, "after one LaunchAgent restart"):
+            ensure_livecraft_ready(
+                timeout=0.5,
+                probe=refused,
+                are_ports_absent=lambda _url: True,
+                kickstart=lambda: kicks.append("kick"),
+                lock=lambda: delayed_lock(),
+                sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+                clock=lambda: now[0],
+            )
+        with self.assertRaisesRegex(LivecraftHealthError, "expired while waiting"):
+            ensure_livecraft_ready(
+                timeout=0.5,
+                probe=refused,
+                are_ports_absent=lambda _url: True,
+                kickstart=lambda: kicks.append("kick"),
+                lock=lambda: delayed_lock(),
+                sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+                clock=lambda: now[0],
+            )
+        self.assertEqual(kicks, ["kick"])
+
 
 if __name__ == "__main__":
     unittest.main()
