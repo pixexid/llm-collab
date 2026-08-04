@@ -35,6 +35,11 @@ MESSAGE_SCAN_LIMIT = 5000
 HTTP_TIMEOUT_SECONDS = 30.0
 HTTP_RESPONSE_LIMIT = 1024 * 1024
 HTTP_READ_CHUNK = 64 * 1024
+STARTER_RUNTIME_DEFAULTS = {
+    "codex": ("codex_app", "~/.codex"),
+    "claude": ("claude_app", "~/.claude"),
+    "gemini": ("gemini_cli", "~/.gemini"),
+}
 
 
 def _workspace_root() -> Path:
@@ -81,6 +86,47 @@ def _resolve_chat(project: str, chat: str) -> str | None:
 
 class RotateError(Exception):
     """A precondition or Livecraft step failed; no canonical rebind was performed."""
+
+
+def _resolve_repo_target(project: str, requested: str | None) -> str:
+    from _helpers import get_project
+
+    configured = (get_project(project) or {}).get("repos")
+    keys = sorted(key for key in configured if isinstance(key, str) and key) \
+        if isinstance(configured, dict) else []
+    if requested is None and len(keys) == 1:
+        return keys[0]
+    if requested in keys:
+        return requested
+    if not keys:
+        raise RotateError(f"project {project!r} has no configured repository keys")
+    if requested is None:
+        raise RotateError(
+            f"--repo-target is required for project {project!r}; "
+            f"valid keys: {', '.join(keys)}"
+        )
+    raise RotateError(
+        f"--repo-target {requested!r} is not configured for project {project!r}; "
+        f"valid keys: {', '.join(keys)}"
+    )
+
+
+def _starter_registration_command(*, starter_agent: str, project: str, chat: str,
+                                  repo_target: str) -> str:
+    from _helpers import RUNTIME_ROOT
+
+    runtime_family, runtime_home = STARTER_RUNTIME_DEFAULTS.get(
+        starter_agent, ("YOUR_RUNTIME_FAMILY", "YOUR_RUNTIME_HOME")
+    )
+    session = f"SESSION-{starter_agent.upper()}-{chat.split('-')[-1]}"
+    return shlex.join([
+        str(Path(RUNTIME_ROOT) / "bin" / "llm-collab"), "session_autobridge.py", "register",
+        "--session", session, "--agent", starter_agent,
+        "--project", project, "--chat", chat, "--repo-target", repo_target,
+        "--mode", "auto-read", "--status", "active", "--wake-strategy", "runtime_trigger",
+        "--runtime-family", runtime_family, "--runtime-session-id", "YOUR_RUNTIME_SESSION_ID",
+        "--runtime-home", runtime_home, "--runtime-session-source", "first_read",
+    ])
 
 
 def _set_response_timeout(response, timeout: float) -> None:
@@ -282,7 +328,7 @@ def _load_optional_binding(project: str, chat: str, agent: str) -> dict | None:
 
 def _resolve_starter(
     *, starter_agent: str, starter_session_id: str | None, project: str, chat: str,
-    require_active_binding: bool = True,
+    repo_target: str, require_active_binding: bool = True,
 ) -> tuple[str, str]:
     binding = _load_optional_binding(project, chat, starter_agent)
     if not require_active_binding:
@@ -292,7 +338,9 @@ def _resolve_starter(
     if not binding or binding.get("status") != "active":
         raise RotateError(
             f"starter binding is not active for {project}/{chat}/{starter_agent}; "
-            "register the starter session before launching a worker"
+            "register the starter session before launching a worker. "
+            "Replace only YOUR_RUNTIME_SESSION_ID in this command:\n"
+            f"{_starter_registration_command(starter_agent=starter_agent, project=project, chat=chat, repo_target=repo_target)}"
         )
     native = binding.get("runtime_session_id")
     if not isinstance(native, str) or not native.strip():
@@ -770,9 +818,10 @@ def start_livecraft(
         raise RotateError(f"chat_not_found: {cfg.chat}")
     if chat != cfg.chat:
         raise RotateError("Livecraft requires the canonical --chat id")
-    repo_cwd = resolve_cwd(cfg.project, cfg.repo_target)
+    repo_target = _resolve_repo_target(cfg.project, getattr(cfg, "repo_target", None))
+    repo_cwd = resolve_cwd(cfg.project, repo_target)
     if not repo_cwd:
-        raise RotateError(f"no repo path for project {cfg.project} repo {cfg.repo_target}")
+        raise RotateError(f"no repo path for project {cfg.project} repo {repo_target}")
     repo_cwd = str(Path(repo_cwd).resolve())
     provided_profile = tuple(
         getattr(cfg, key, None) for key in ("provider", "model", "thinking", "runtime_home")
@@ -789,7 +838,7 @@ def start_livecraft(
     starter_agent, starter_session_id = _resolve_starter(
         starter_agent=getattr(cfg, "starter_agent", "claude"),
         starter_session_id=getattr(cfg, "starter_session_id", None),
-        project=cfg.project, chat=chat,
+        project=cfg.project, chat=chat, repo_target=repo_target,
         require_active_binding=getattr(cfg, "production", True),
     )
     supersedes_session = _resolve_livecraft_predecessor(
@@ -802,7 +851,7 @@ def start_livecraft(
     except LivecraftHealthError as exc:
         raise RotateError(str(exc)) from exc
     result = _provision_livecraft_and_bind(
-        agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
+        agent=cfg.agent, project=cfg.project, chat=chat, repo_target=repo_target,
         repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"],
         thinking=profile["thinking"], runtime_home=profile["runtime_home"],
         starter_agent=starter_agent, starter_session_id=starter_session_id,
@@ -847,7 +896,10 @@ def add_start_livecraft_pi_arguments(p) -> None:
     p.add_argument("--agent", required=True)
     p.add_argument("--project", required=True)
     p.add_argument("--chat", required=True, help="Canonical CHAT-... id")
-    p.add_argument("--repo-target", required=True)
+    p.add_argument(
+        "--repo-target", default=None,
+        help="Configured repository key; defaults when the project has exactly one",
+    )
     p.add_argument("--provider", default=None,
                    help="Optional first-profile provider override; normally read from the stored Pi profile")
     p.add_argument("--model", default=None,

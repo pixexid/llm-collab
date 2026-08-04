@@ -118,7 +118,8 @@ class StartLivecraftTest(unittest.TestCase):
             "workspace_name": "ws", "projects_root": str(root), "workspace_id": "ws", "schema_version": 2,
         }))
         self.old = (_helpers.CONFIG_FILE, _helpers.CHATS_DIR, _helpers.AGENTS_FILE,
-                    _helpers._config_cache, _helpers._agents_cache)
+                    _helpers.PROJECTS_FILE, _helpers._config_cache, _helpers._agents_cache,
+                    _helpers._projects_cache)
         _helpers.CONFIG_FILE = root / "collab.config.json"
         _helpers.CHATS_DIR = root / "Chats"
         _helpers.CHATS_DIR.mkdir()
@@ -129,18 +130,25 @@ class StartLivecraftTest(unittest.TestCase):
         _helpers.AGENTS_FILE.write_text(json.dumps({"agents": [{
             "id": "glmpi", "activation": {"type": "cli_session", "watcher_enabled": True},
         }]}))
+        _helpers.PROJECTS_FILE = root / "projects.json"
+        _helpers.PROJECTS_FILE.write_text(json.dumps({
+            "projects": [{"id": "llm-collab", "repos": {"app": "."}}],
+        }))
         _helpers._config_cache = None
         _helpers._agents_cache = None
+        _helpers._projects_cache = None
         self.addCleanup(self.restore)
 
     def restore(self):
         import _helpers
 
         (_helpers.CONFIG_FILE, _helpers.CHATS_DIR, _helpers.AGENTS_FILE,
-         _helpers._config_cache, _helpers._agents_cache) = self.old
+         _helpers.PROJECTS_FILE, _helpers._config_cache, _helpers._agents_cache,
+         _helpers._projects_cache) = self.old
         self.tmp.cleanup()
 
-    def _run(self, cfg=None, *, livecraft=None, run=None, health_check=None):
+    def _run(self, cfg=None, *, livecraft=None, run=None, health_check=None,
+             resolve_cwd=None):
         chronology = []
         livecraft = livecraft or FakeLivecraft(chronology)
         run = run or FakeAutobridge(chronology)
@@ -153,7 +161,8 @@ class StartLivecraftTest(unittest.TestCase):
         ):
             result = wr.start_livecraft(
                 cfg or _cfg(), livecraft=livecraft, run_autobridge=run,
-                resolve_cwd=lambda project, repo: "/repo", gate_check=lambda _cfg: None,
+                resolve_cwd=resolve_cwd or (lambda project, repo: "/repo"),
+                gate_check=lambda _cfg: None,
                 sleep=lambda _seconds: None,
                 clock=(lambda counter=[0.0]: (counter.__setitem__(0, counter[0] + 1), counter[0])[1]),
                 health_check=health_check,
@@ -236,6 +245,51 @@ class StartLivecraftTest(unittest.TestCase):
         with mock.patch.object(wr, "_require_current_project_authority") as authority:
             wr.require_livecraft_gate(cfg, environ={})
         authority.assert_called_once_with("llm-collab", mode="Livecraft production")
+
+    def test_single_repo_is_defaulted_when_repo_target_is_omitted(self):
+        seen = []
+        result, _chronology, _client, _run = self._run(
+            _cfg(repo_target=None),
+            resolve_cwd=lambda _project, repo: seen.append(repo) or "/repo",
+        )
+        self.assertTrue(result["verified"])
+        self.assertEqual(["app"], seen)
+
+    def test_missing_repo_target_on_multi_repo_project_lists_valid_keys(self):
+        import _helpers
+
+        _helpers.PROJECTS_FILE.write_text(json.dumps({
+            "projects": [{"id": "llm-collab", "repos": {"app": ".", "docs": "docs"}}],
+        }))
+        _helpers._projects_cache = None
+        with self.assertRaisesRegex(wr.RotateError, r"valid keys: app, docs"):
+            wr.start_livecraft(
+                _cfg(repo_target=None), livecraft=FakeLivecraft([]),
+                run_autobridge=FakeAutobridge([]), resolve_cwd=lambda _project, _repo: "/repo",
+                gate_check=lambda _cfg: None,
+            )
+
+    def test_invalid_repo_target_lists_valid_keys(self):
+        with self.assertRaisesRegex(wr.RotateError, r"valid keys: app"):
+            wr.start_livecraft(
+                _cfg(repo_target="main"), livecraft=FakeLivecraft([]),
+                run_autobridge=FakeAutobridge([]), resolve_cwd=lambda _project, _repo: "/repo",
+                gate_check=lambda _cfg: None,
+            )
+
+    def test_missing_starter_binding_prints_registration_command(self):
+        with mock.patch.object(wr, "_load_optional_binding", return_value=None), \
+             self.assertRaisesRegex(wr.RotateError, "session_autobridge.py register") as raised:
+            wr._resolve_starter(
+                starter_agent="claude", starter_session_id=None, project="llm-collab",
+                chat="CHAT-NEWPROJ", repo_target="app", require_active_binding=True,
+            )
+        message = str(raised.exception)
+        self.assertIn("--agent claude", message)
+        self.assertIn("--project llm-collab", message)
+        self.assertIn("--chat CHAT-NEWPROJ", message)
+        self.assertIn("--repo-target app", message)
+        self.assertIn("--runtime-session-id YOUR_RUNTIME_SESSION_ID", message)
 
     def test_happy_path_registers_after_marker_with_lowercase_native_suffix(self):
         result, chronology, _client, run = self._run()
