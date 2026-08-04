@@ -35,10 +35,10 @@ MESSAGE_SCAN_LIMIT = 5000
 HTTP_TIMEOUT_SECONDS = 30.0
 HTTP_RESPONSE_LIMIT = 1024 * 1024
 HTTP_READ_CHUNK = 64 * 1024
-STARTER_RUNTIME_DEFAULTS = {
-    "codex": ("codex_app", "~/.codex"),
-    "claude": ("claude_app", "~/.claude"),
-    "gemini": ("gemini_cli", "~/.gemini"),
+STARTER_RUNTIME_FAMILIES = {
+    "codex": "codex_app",
+    "claude": "claude_app",
+    "gemini": "gemini_cli",
 }
 
 
@@ -115,17 +115,17 @@ def _starter_registration_command(*, starter_agent: str, project: str, chat: str
                                   repo_target: str) -> str:
     from _helpers import RUNTIME_ROOT
 
-    runtime_family, runtime_home = STARTER_RUNTIME_DEFAULTS.get(
-        starter_agent, ("YOUR_RUNTIME_FAMILY", "YOUR_RUNTIME_HOME")
-    )
+    runtime_family = STARTER_RUNTIME_FAMILIES.get(starter_agent)
+    if runtime_family is None:
+        raise RotateError(f"starter agent {starter_agent!r} has no known runtime family")
     session = f"SESSION-{starter_agent.upper()}-{chat.split('-')[-1]}"
     return shlex.join([
         str(Path(RUNTIME_ROOT) / "bin" / "llm-collab"), "session_autobridge.py", "register",
         "--session", session, "--agent", starter_agent,
         "--project", project, "--chat", chat, "--repo-target", repo_target,
-        "--mode", "auto-read", "--status", "active", "--wake-strategy", "runtime_trigger",
+        "--mode", "manual", "--status", "active", "--wake-strategy", "none",
         "--runtime-family", runtime_family, "--runtime-session-id", "YOUR_RUNTIME_SESSION_ID",
-        "--runtime-home", runtime_home, "--runtime-session-source", "first_read",
+        "--runtime-session-source", "runtime_dir",
     ])
 
 

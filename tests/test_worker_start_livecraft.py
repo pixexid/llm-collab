@@ -255,6 +255,15 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(["app"], seen)
 
+    def test_amiga_single_repo_is_defaulted_when_repo_target_is_omitted(self):
+        import _helpers
+
+        _helpers.PROJECTS_FILE.write_text(json.dumps({
+            "projects": [{"id": "amiga", "repos": {"app": "."}}],
+        }))
+        _helpers._projects_cache = None
+        self.assertEqual("app", wr._resolve_repo_target("amiga", None))
+
     def test_missing_repo_target_on_multi_repo_project_lists_valid_keys(self):
         import _helpers
 
@@ -290,6 +299,25 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertIn("--chat CHAT-NEWPROJ", message)
         self.assertIn("--repo-target app", message)
         self.assertIn("--runtime-session-id YOUR_RUNTIME_SESSION_ID", message)
+
+    def test_starter_registration_command_parses_as_minimal_manual_binding(self):
+        import session_autobridge
+
+        argv = shlex.split(wr._starter_registration_command(
+            starter_agent="claude", project="llm-collab", chat="CHAT-NEWPROJ",
+            repo_target="app",
+        ))
+        parser_argv = [argv[0], *argv[argv.index("register"):]]
+        with mock.patch.object(sys, "argv", parser_argv):
+            parsed = session_autobridge.parse_args()
+        self.assertEqual("register", parsed.command)
+        self.assertEqual("manual", parsed.mode)
+        self.assertEqual("active", parsed.status)
+        self.assertEqual("none", parsed.wake_strategy)
+        self.assertEqual("claude_app", parsed.runtime_family)
+        self.assertEqual("runtime_dir", parsed.runtime_session_source)
+        self.assertIsNone(parsed.runtime_home)
+        self.assertNotIn("--runtime-home", argv)
 
     def test_happy_path_registers_after_marker_with_lowercase_native_suffix(self):
         result, chronology, _client, run = self._run()
