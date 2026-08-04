@@ -20,10 +20,12 @@ NATIVE = "bfe59384-f808-4885-8aed-604774d728fc"
 
 
 class FakeLivecraft:
-    def __init__(self, chronology, *, drift=False, session_file="/pi/sessions/livecraft.jsonl"):
+    def __init__(self, chronology, *, drift=False, session_file="/pi/sessions/livecraft.jsonl",
+                 abort_error=None):
         self.chronology = chronology
         self.drift = drift
         self.session_file = session_file
+        self.abort_error = abort_error
         self.marker = None
         self.snapshot_calls = 0
         self.closed = []
@@ -64,21 +66,27 @@ class FakeLivecraft:
     def close_session(self, session_id):
         self.closed.append(session_id)
         self.chronology.append(("http", "abort"))
+        if self.abort_error:
+            raise self.abort_error
 
 
 class FakeAutobridge:
-    def __init__(self, chronology):
+    def __init__(self, chronology, *, register_rc=0, show_binding_rc=0):
         self.chronology = chronology
         self.calls = []
         self.session = None
+        self.register_rc = register_rc
+        self.show_binding_rc = show_binding_rc
 
     def __call__(self, args):
         self.calls.append(args)
         self.chronology.append(("autobridge", args[0]))
         if args[0] == "register":
             self.session = args[args.index("--session") + 1]
-            return 0, json.dumps({"ok": True})
+            return self.register_rc, json.dumps({"ok": self.register_rc == 0})
         if args[0] == "show-binding":
+            if self.show_binding_rc:
+                return self.show_binding_rc, ""
             return 0, json.dumps({"session_id": self.session, "status": "active", "binding_generation": 4})
         if args[0] == "deactivate-pi":
             return 0, json.dumps({"deactivated_sessions": [self.session]})
@@ -180,6 +188,18 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertEqual(calls[1][2], {"type": "set_model", "provider": "zai", "modelId": "glm-5.2"})
         self.assertEqual(calls[2][2], {"type": "set_thinking_level", "level": "max"})
         self.assertEqual(calls[4][2], {"type": "prompt", "message": "bootstrap"})
+
+    def test_livecraft_close_session_propagates_abort_failure(self):
+        def request(method, path, body):
+            if path == "/api/sessions":
+                return 201, {"id": NATIVE, "cwd": "/repo"}
+            return 503, {"error": "backend unavailable"}
+
+        client = wr.Livecraft("http://127.0.0.1:43121", request=request)
+        client.create_session("/repo")
+
+        with self.assertRaisesRegex(wr.RotateError, "Livecraft RPC abort failed \(HTTP 503\)"):
+            client.close_session(NATIVE)
 
     def test_http_body_is_bounded_before_json_parse(self):
         class Body:
@@ -361,6 +381,20 @@ class StartLivecraftTest(unittest.TestCase):
             self._run(livecraft=client, run=run)
         self.assertEqual([call[0] for call in run.calls], ["deactivate-pi"])
         self.assertEqual(client.closed, [NATIVE])
+
+    def test_register_failure_reports_livecraft_abort_failure(self):
+        client = FakeLivecraft([], abort_error=RuntimeError("abort unavailable"))
+        run = FakeAutobridge([], register_rc=1)
+
+        with self.assertRaisesRegex(wr.RotateError, "Livecraft abort failed: abort unavailable"):
+            self._run(livecraft=client, run=run)
+
+    def test_postcondition_failure_reports_livecraft_abort_failure(self):
+        client = FakeLivecraft([], abort_error=RuntimeError("abort unavailable"))
+        run = FakeAutobridge([], show_binding_rc=1)
+
+        with self.assertRaisesRegex(wr.RotateError, "Livecraft abort failed: abort unavailable"):
+            self._run(livecraft=client, run=run)
 
     def test_noncanonical_chat_is_refused_before_native_create(self):
         cfg = _cfg(chat="NEWPROJ")

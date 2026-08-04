@@ -152,6 +152,25 @@ class WorkerRotatePiTest(unittest.TestCase):
                 wr._monitor_inbox(),
             )
 
+    def test_handshake_discovery_and_acknowledgment_use_the_same_scan_cap(self):
+        class Result:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        for packet in (None, "Chats/handshake.md"):
+            with self.subTest(packet=packet), patch.object(
+                wr.subprocess, "run", return_value=Result()
+            ) as run:
+                wr._starter_inbox_json(
+                    starter_agent="codex", project="llm-collab", chat="CHAT-1",
+                    repo_target="app", packet=packet,
+                )
+            command = run.call_args.args[0]
+            self.assertEqual(
+                ["--limit", str(wr.MESSAGE_SCAN_LIMIT)], command[-2:]
+            )
+
     def setUp(self):
         # rotate() resolves the workspace via _helpers.config_get(); without an
         # isolated config it reads the gitignored collab.config.json (absent in a
