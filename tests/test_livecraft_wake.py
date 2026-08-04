@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -44,7 +45,8 @@ class LivecraftWakeTest(unittest.TestCase):
             message,
         )
         self.assertIn(
-            "/runtime/bin/inbox.py --me glmpi --session SESSION-LIVECRAFT-GLMPI-CHAT-bfe59384 "
+            f"{shlex.quote(sys.executable)} /runtime/bin/inbox.py --me glmpi "
+            "--session SESSION-LIVECRAFT-GLMPI-CHAT-bfe59384 "
             "--project llm-collab --chat CHAT-82A03B1D --repo-target app --acknowledge --json",
             message,
         )

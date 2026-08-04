@@ -34,11 +34,12 @@ def _required(mapping: dict, key: str) -> str:
     return value
 
 
-def _drain_command(*, runtime_root: str, agent: str, logical: str, native: str,
-                   project: str, chat: str, repo: str) -> str:
+def _drain_command(*, python_executable: str, runtime_root: str, agent: str,
+                   logical: str, native: str, project: str, chat: str, repo: str) -> str:
     parts = [
         f"LLM_COLLAB_READER_RUNTIME_ID={shlex.quote(native)}",
         "LLM_COLLAB_READER_RUNTIME_FAMILY=pi",
+        shlex.quote(python_executable),
         shlex.quote(str(Path(runtime_root) / "bin" / "inbox.py")),
         "--me", shlex.quote(agent), "--session", shlex.quote(logical),
         "--project", shlex.quote(project), "--chat", shlex.quote(chat),
@@ -91,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         repo = _required({"repo": repo_targets[0]}, "repo")
         path = _required(message, "path")
         drain = _drain_command(
-            runtime_root=args.runtime_root, agent=agent, logical=logical, native=native,
+            python_executable=sys.executable, runtime_root=args.runtime_root,
+            agent=agent, logical=logical, native=native,
             project=project, chat=chat, repo=repo,
         )
         prompt = (
