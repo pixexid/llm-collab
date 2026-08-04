@@ -31,6 +31,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from livecraft_health import LivecraftHealthError, ensure_livecraft_ready
+
 DEFAULT_PI_WEB_URL = "http://127.0.0.1:8504"
 DEFAULT_LIVECRAFT_BACKEND_URL = "http://127.0.0.1:43121"
 _BIN = Path(__file__).resolve().parent
@@ -1145,7 +1147,7 @@ def _provision_livecraft_and_bind(
 
 def start_livecraft(
     cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_gate,
-    sleep=time.sleep, clock=time.monotonic,
+    sleep=time.sleep, clock=time.monotonic, health_check=ensure_livecraft_ready,
 ) -> dict:
     gate_check(cfg)
     _require_livecraft_worker_scope(cfg)
@@ -1181,6 +1183,10 @@ def start_livecraft(
         requested=getattr(cfg, "supersedes_session", None),
         strict=getattr(cfg, "production", True),
     )
+    try:
+        health_check(cfg.livecraft_backend_url, sleep=sleep, clock=clock)
+    except LivecraftHealthError as exc:
+        raise RotateError(str(exc)) from exc
     result = _provision_livecraft_and_bind(
         agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
         repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"],
