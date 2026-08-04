@@ -39,10 +39,25 @@ Safe refresh flow:
 ```
 
 The deploy command requires the named source to be an exact `origin/main`, then
-resets
-the deployed runtime's tracked files. It leaves runtime-state symlinks and
-source-checkout files untouched. If the source is stale or its contract differs
-from `origin/main`, it refuses before changing the target.
+performs one fenced deployment transaction:
+
+1. Preflight the source and deployed target, including the target's current head,
+   clean tracked state, PM2 availability, and both old/new workspace names.
+2. Read `pm2 jlist` and stop every persistent PM2 app owned by either workspace
+   name. The command verifies that no owned app remains live before changing the
+   deployed tree.
+3. Advance the deployed runtime only after that fence, then read the target's
+   current `pm2/ecosystem.config.cjs` and stop/delete every owned PM2 app omitted
+   from the new ecosystem.
+4. Run `pm2 startOrRestart <target>/pm2/ecosystem.config.cjs --update-env`, verify
+   the target HEAD, PM2 roster/status/cwd/script/args, and a non-streaming log probe
+   for each app, then run `pm2 save` so removed apps do not return after reboot.
+
+Any failure after the fence rolls the target back to its previous head and restores
+the previous ecosystem/PM2 roster. If rollback or restoration cannot be verified,
+the command fails loudly with both errors. It leaves runtime-state symlinks and
+source-checkout files untouched; a stale source, contract mismatch, dirty target,
+failed fence, or unverifiable PM2 state refuses before advancing the target.
 
 Do not use these commands against a parked or dirty operator checkout:
 
