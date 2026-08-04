@@ -8049,7 +8049,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_pi_provision_returns_the_committed_binding_without_reopening_the_ledger(self):
         args = SimpleNamespace(
             project="amiga", chat="CHAT-PI", agent="glmpi",
-            endpoint_id="endpoint-pi", runtime_instance_id="pi-web",
+            endpoint_id="endpoint-pi", runtime_instance_id="livecraft-session",
             cwd="/tmp/work", repo_targets=["app"],
         )
         canonical = {
@@ -8801,7 +8801,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             allowed_actions=[], runtime_family="pi", runtime_session_id="pi-new",
             runtime_session_source="/tmp/pi-new.jsonl", runtime_home="/tmp/pi-home",
             runtime_command=None, runtime_timeout=30, endpoint_id="endpoint-new",
-            runtime_instance_id="pi-web", cwd="/tmp/work",
+            runtime_instance_id="livecraft-session", cwd="/tmp/work",
             supersedes_session="SESSION-OLD",
         )
         settled = {

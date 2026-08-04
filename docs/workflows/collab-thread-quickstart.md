@@ -56,7 +56,7 @@ python bin/new_collab_session.py \
 
 Co-worker families are explicit (`agent:family`), never guessed. This helper
 supports the discover-runtime families only — `codex_app`, `claude_app`,
-`gemini_cli`. Pi workers (glmpi/relay/kimi) use `worker.py start-pi` and a
+`gemini_cli`. Pi workers (glmpi/relay/kimi) use `worker.py start-livecraft-pi` and a
 human-relay (zcode) has no native session, so both are refused here rather than
 misbound.
 
@@ -159,11 +159,11 @@ project + chat + agent + native Pi session + repository
 ```
 
 Use a fresh native Pi session for every project/chat binding. For an existing Pi
-agent with a previously verified Pi Web profile in that project, start and bind
+agent with a previously verified Livecraft profile in that project, start and bind
 it with one command:
 
 ```bash
-bin/llm-collab worker.py start-pi \
+bin/llm-collab worker.py start-livecraft-pi \
   --agent <agent-id> \
   --project <project-id> \
   --chat <CHAT-ID> \
@@ -174,34 +174,21 @@ For the first profile in a project, provide the profile and exact Pi runtime
 home explicitly instead of fabricating history:
 
 ```bash
-bin/llm-collab worker.py start-pi \
+bin/llm-collab worker.py start-livecraft-pi \
   --agent <agent-id> --project <project-id> --chat <CHAT-ID> \
   --repo-target <repo-id> \
   --provider <provider-id> --model <model-id> --thinking <level> \
   --runtime-home <absolute-pi-runtime-home>
 ```
 
-`start-pi` creates a fresh Pi Web session, restores the agent's pinned
-provider/model/thinking profile, registers the exact native session in the
-canonical workspace, starts one persistent `monitor_watch_path` on that
-session's wake-only event file, and waits for the worker's bootstrap marker. The
-diagnostic event log is not a worker wake source. It fails
-closed instead of guessing when the profile is ambiguous, corrupt, unreadable,
-or newer than the last complete fingerprint. The explicit first-profile form is
-the only zero-history exception.
-
-Install the lifecycle extension once for the Pi runtime, then reload Pi:
-
-```bash
-mkdir -p '<absolute-pi-runtime-home>/agent/extensions'
-ln -sfn \
-  '<absolute-workspace>/pi-extensions/llm-collab-lifecycle.ts' \
-  '<absolute-pi-runtime-home>/agent/extensions/llm-collab-lifecycle.ts'
-```
-
-The extension deactivates the old exact binding on switch, fork, shutdown, and
-reload. Without it, a dead native session can remain dispatchable after its
-monitor is gone; `start-pi` does not install the extension for you.
+`start-livecraft-pi` checks the shared Livecraft backend, creates a fresh native
+session, restores the agent's pinned provider/model/thinking profile, verifies
+the exact project/repository scope and native fingerprint, and waits for the
+worker's starter handshake before registering the canonical binding. The
+Livecraft host owns background wakes; the worker does not start a foreground
+event monitor. It fails closed instead of guessing when the profile is
+ambiguous, corrupt, unreadable, or newer than the last complete fingerprint.
+The explicit first-profile form is the only zero-history exception.
 
 The returned `verified=true` proves the canonical binding was created. Complete
 setup with one disposable durable packet targeted through that binding; require

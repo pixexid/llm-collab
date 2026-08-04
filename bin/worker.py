@@ -80,22 +80,14 @@ def main(argv: list[str] | None = None) -> int:
     attach.add_argument("--token", default=None)
     attach.add_argument("--repo-id", default="app")
     attach.add_argument("--timeout-seconds", type=float, default=180.0)
-    import worker_rotate_pi as _rotate_pi
-    _rotate_pi.add_rotate_pi_arguments(
-        commands.add_parser("rotate-pi", help="Rotate a bloated Pi worker to a fresh native session"))
-    _rotate_pi.add_start_pi_arguments(
-        commands.add_parser("start-pi", help="Start a fresh Pi worker session for an existing agent"))
-    _rotate_pi.add_start_livecraft_pi_arguments(
+    import worker_livecraft_pi as _livecraft_pi
+    _livecraft_pi.add_start_livecraft_pi_arguments(
         commands.add_parser("start-livecraft-pi", help="Start an explicitly authorized Livecraft Pi worker"))
     args = parser.parse_args(argv)
     ensure_project(args.project, allow_none=False)
 
-    if args.command == "rotate-pi":
-        return _rotate_pi.run(args)
-    if args.command == "start-pi":
-        return _rotate_pi.run_start_pi(args)
     if args.command == "start-livecraft-pi":
-        return _rotate_pi.run_start_livecraft_pi(args)
+        return _livecraft_pi.run_start_livecraft_pi(args)
 
     if args.command == "send":
         from _session_autobridge import iter_sessions

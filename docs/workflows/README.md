@@ -20,10 +20,9 @@ Recommended read order:
 5. `observation-global-cadence-rfc.md` — design contract for the GH-179 global
    observation cadence budget, GH-183 pinned-root precondition, and GH-181 audit
    accounting before scheduler implementation
-6. `pi-workers.md` — how Pi-runtime workers (glmpi/relay/kimi) are hosted
-   (Pi-Web vs Livecraft, endpoint-per-binding), what they inherit by default
-   (ponytail is runtime-global), and the provisioning state (Pi-Web `start-pi`
-   exists; Livecraft has an explicitly gated pilot first-start)
+6. `pi-workers.md` — how Pi-runtime workers (glmpi/relay/kimi) use the shared
+   Livecraft host, what they inherit by default (ponytail is runtime-global),
+   and how the production first-start binding is gated
 7. `task-intake-and-delegation.md`
 8. `review-and-handoff.md`
 9. `isolated-worktrees.md`
