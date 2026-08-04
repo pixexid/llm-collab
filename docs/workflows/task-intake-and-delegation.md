@@ -502,8 +502,14 @@ built and the orchestrator waits for work it never assigned.
   delivery is its own defect, not "no progress" — before re-driving. An open lane
   with nobody acting is a defect, and the orchestrator that owns the lane is who
   checks.
-- **Then keep the loop alive.** Re-ring after each turn until the deliverable
-  lands; re-driving a question just yields another answer.
+- **Then keep the loop alive — through the recipient's own transport.**
+  Re-driving is a *new durable packet* plus only the wake action `deliver.py`
+  reports for that recipient — never a hand-chosen ring. For a watcher-backed
+  recipient (Claude, Pi workers) deliver durably and stop; its watcher owns
+  pickup, so never ring it. For a doorbell worker (Codex) run only the exact
+  AX command `deliver.py` prints, and never re-ring a `QUEUED (UNCONFIRMED)`
+  attempt. Re-driving a question just yields another answer. (See AGENTS.md
+  contract v10 and `## Delegation message requirements`.)
 
 ## Delegation message requirements
 
