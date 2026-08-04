@@ -21,6 +21,7 @@ import argparse
 import ipaddress
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -740,11 +741,22 @@ def start_pi(
     }
 
 
-LIVECRAFT_BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Livecraft native session {native}. Do not start project work during this bootstrap turn. Do not start a Pi event monitor: the Livecraft host watcher owns background wakes and must not interrupt this session UI.
+BOOTSTRAP_HANDSHAKE_KIND = "llm_collab.pi.bootstrap.v1"
+MAX_HANDSHAKE_INBOX_BYTES = 4 * 1024 * 1024
 
-This bootstrap hold applies only to this setup turn. A valid non-empty durable packet addressed to this worker and scoped to this exact project/repository is the collaboration task authorization. If no such packet arrives, remain idle after replying with the marker.
+LIVECRAFT_BOOTSTRAP_TEMPLATE = """Automated llm-collab worker provisioning. You are {agent} in fresh Livecraft native session {native}. Do not start project work during this bootstrap turn. The worker who started this session is {starter_agent}, native runtime session {starter_session_id}.
 
-After setup, remain idle until the Livecraft host presents an exact durable inbox packet. Reply only {marker}"""
+This bootstrap hold applies only to this setup turn. Before claiming ready, send exactly one durable bootstrap handshake back to {starter_agent}. The starter must receive and validate that packet before registering this session. Do not guess or change any value in the JSON below:
+
+{handshake_json}
+
+Send it through the deployed runtime with this exact command:
+printf '%s\\n' '{handshake_json}' | {runtime_root}/bin/llm-collab deliver.py --chat {chat} --from {agent} --to {starter_agent} --title 'Pi worker bootstrap handshake {handshake_id}' --priority high --tags pi-worker-bootstrap,session-handshake --project {project} --repo-targets {repo} --sender-session-id {native} --target-session-id {starter_session_id} --body-file -
+
+If delivery fails, do not claim ready. After successful delivery, reply only {marker}
+The starter will arm the background wake path with this exact reader identity; do not start a Pi event monitor yourself and do not use Pi-Web.
+
+After setup, remain idle until the starter presents a valid durable packet for this exact project and repository."""
 
 
 def _livecraft_declaration_path() -> Path:
@@ -753,14 +765,14 @@ def _livecraft_declaration_path() -> Path:
     return Path(RUNTIME_ROOT) / "docs" / "protocols" / "standalone-v1-feature-declarations.json"
 
 
-def _require_current_project_authority(project: str) -> None:
+def _require_current_project_authority(project: str, *, mode: str) -> None:
     """Require the current ledger snapshot to authorize canonical project writes."""
     from _helpers import config_get, project_state_root
     from llm_collab.ledger import LedgerPaths, LedgerStore
 
     workspace_id = config_get("workspace_id")
     if not workspace_id:
-        raise RotateError("Livecraft pilot gate: workspace_id is unset")
+        raise RotateError(f"{mode} gate: workspace_id is unset")
     try:
         paths = LedgerPaths.derive(project_state_root(), str(workspace_id))
         with LedgerStore.open_reader(paths) as store:
@@ -770,9 +782,9 @@ def _require_current_project_authority(project: str) -> None:
             )
         payload = json.loads(snapshot["snapshot_json"]) if snapshot else None
     except Exception as exc:
-        raise RotateError(f"Livecraft pilot gate: current project authority unavailable: {exc}") from exc
+        raise RotateError(f"{mode} gate: current project authority unavailable: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("canonical_writes") is not True:
-        raise RotateError("Livecraft pilot gate: current project authority does not enable canonical writes")
+        raise RotateError(f"{mode} gate: current project authority does not enable canonical writes")
 
 
 def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) -> None:
@@ -792,7 +804,25 @@ def require_livecraft_pilot_gate(cfg, *, declaration_path=None, environ=None) ->
         raise RotateError("Livecraft pilot gate: runtime dispatch is not enabled for an exact thread")
     if environment.get("LLM_COLLAB_CANONICAL_CONTROL") != "enabled":
         raise RotateError("Livecraft pilot gate: canonical control is not enabled")
-    _require_current_project_authority(cfg.project)
+    _require_current_project_authority(cfg.project, mode="Livecraft pilot")
+
+
+def require_livecraft_production_gate(cfg, *, environ=None) -> None:
+    """Require explicit operator intent before a persistent Livecraft binding."""
+    environment = os.environ if environ is None else environ
+    if getattr(cfg, "production", False) is not True:
+        raise RotateError("Livecraft production gate: --production is required")
+    if environment.get("LLM_COLLAB_CANONICAL_CONTROL") != "enabled":
+        raise RotateError("Livecraft production gate: canonical control is not enabled")
+    _require_current_project_authority(cfg.project, mode="Livecraft production")
+
+
+def require_livecraft_gate(cfg, *, declaration_path=None, environ=None) -> None:
+    """Select the explicit production path or the existing disposable pilot path."""
+    if getattr(cfg, "production", False):
+        require_livecraft_production_gate(cfg, environ=environ)
+    else:
+        require_livecraft_pilot_gate(cfg, declaration_path=declaration_path, environ=environ)
 
 
 def _require_livecraft_worker_scope(cfg) -> None:
@@ -808,9 +838,126 @@ def _require_livecraft_worker_scope(cfg) -> None:
         raise RotateError(f"worker {cfg.agent} has no enabled background watcher")
 
 
+def _starter_inbox_json(
+    *, starter_agent: str, project: str, chat: str, repo_target: str,
+    packet: str | None = None,
+) -> dict | list:
+    """Read or acknowledge one starter packet through the deployed runtime."""
+    command = [
+        MONITOR_PYTHON, _monitor_inbox(), "--me", starter_agent,
+        "--project", project, "--chat", chat, "--repo-target", repo_target,
+        "--json",
+    ]
+    if packet is None:
+        # The inbox command's ordinary limit is oldest-first and can hide a
+        # just-delivered handshake behind a large unread backlog. Read the
+        # bounded project/chat view and select the exact handshake below.
+        command.extend(("--all", "--peek", "--limit", str(MESSAGE_SCAN_LIMIT)))
+    else:
+        command.extend(("--packet", packet))
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RotateError(f"bootstrap handshake inbox read failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RotateError(f"bootstrap handshake inbox command failed: {detail}")
+    if len(result.stdout.encode("utf-8")) > MAX_HANDSHAKE_INBOX_BYTES:
+        raise RotateError("bootstrap handshake inbox response exceeds the byte limit")
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RotateError("bootstrap handshake inbox response is not JSON") from exc
+    if not isinstance(payload, (dict, list)):
+        raise RotateError("bootstrap handshake inbox response is malformed")
+    return payload
+
+
+def _starter_handshake_messages(
+    *, starter_agent: str, project: str, chat: str, repo_target: str,
+) -> list[dict]:
+    payload = _starter_inbox_json(
+        starter_agent=starter_agent, project=project, chat=chat, repo_target=repo_target,
+    )
+    messages = payload if isinstance(payload, list) else payload.get("messages", [])
+    if not isinstance(messages, list) or not all(isinstance(message, dict) for message in messages):
+        raise RotateError("bootstrap handshake inbox messages are malformed")
+    return messages
+
+
+def _ack_starter_handshake(
+    *, starter_agent: str, project: str, chat: str, repo_target: str, packet: str,
+) -> None:
+    payload = _starter_inbox_json(
+        starter_agent=starter_agent, project=project, chat=chat,
+        repo_target=repo_target, packet=packet,
+    )
+    messages = payload if isinstance(payload, list) else payload.get("messages", [])
+    if not isinstance(messages, list) or [message.get("path") for message in messages] != [packet]:
+        raise RotateError("bootstrap handshake acknowledgement did not select the exact packet")
+
+
+def _await_bootstrap_handshake(
+    *, starter_agent: str, starter_session_id: str, agent: str, project: str,
+    chat: str, repo_target: str, native: str, session_source: str,
+    handshake_id: str, timeout: float, interval: float, sleep, clock,
+) -> dict:
+    expected_body = {
+        "kind": BOOTSTRAP_HANDSHAKE_KIND,
+        "handshake_id": handshake_id,
+        "starter_agent": starter_agent,
+        "starter_runtime_session_id": starter_session_id,
+        "worker_agent": agent,
+        "worker_runtime_family": "pi",
+        "worker_native_session_id": native,
+        "worker_runtime_session_source": session_source,
+        "project_id": project,
+        "chat_id": chat,
+        "repo_target": repo_target,
+    }
+    expected_title = f"Pi worker bootstrap handshake {handshake_id}"
+    deadline = clock() + timeout
+    while clock() < deadline:
+        for message in _starter_handshake_messages(
+            starter_agent=starter_agent, project=project, chat=chat, repo_target=repo_target,
+        ):
+            frontmatter = message.get("frontmatter") or {}
+            if frontmatter.get("title") != expected_title:
+                continue
+            if frontmatter.get("from") != agent or frontmatter.get("to") != starter_agent:
+                raise RotateError("bootstrap handshake sender/recipient mismatch")
+            if frontmatter.get("sender_agent_id") != agent or frontmatter.get("sender_session_id") != native:
+                raise RotateError("bootstrap handshake sender session mismatch")
+            if frontmatter.get("project_id") != project or frontmatter.get("chat_id") != chat:
+                raise RotateError("bootstrap handshake project/chat mismatch")
+            if frontmatter.get("repo_targets") != [repo_target]:
+                raise RotateError("bootstrap handshake repository scope mismatch")
+            if frontmatter.get("target_session_id") != starter_session_id:
+                raise RotateError("bootstrap handshake target session mismatch")
+            try:
+                body = json.loads(str(message.get("body", "")))
+            except json.JSONDecodeError as exc:
+                raise RotateError("bootstrap handshake body is not JSON") from exc
+            if body != expected_body:
+                raise RotateError("bootstrap handshake body identity mismatch")
+            packet = message.get("path")
+            if not isinstance(packet, str) or not packet.strip():
+                raise RotateError("bootstrap handshake packet path is missing")
+            _ack_starter_handshake(
+                starter_agent=starter_agent, project=project, chat=chat,
+                repo_target=repo_target, packet=packet,
+            )
+            return {"path": packet, "body": body}
+        sleep(interval)
+    raise RotateError(f"bootstrap handshake not received within {timeout:g} seconds")
+
+
 def _provision_livecraft_and_bind(
     *, agent, project, chat, repo_target, repo_cwd, provider, model, thinking,
-    runtime_home, livecraft, run_autobridge, bootstrap_timeout, poll_interval, sleep, clock,
+    runtime_home, starter_agent, starter_session_id, supersedes_session, livecraft, run_autobridge,
+    bootstrap_timeout, poll_interval, sleep, clock,
 ) -> dict:
     session = livecraft.create_session(repo_cwd)
     session_id = session["id"]
@@ -830,17 +977,45 @@ def _provision_livecraft_and_bind(
         native = state["native"]
         suffix = chat[len("CHAT-"):] if chat.startswith("CHAT-") else chat
         logical = f"SESSION-LIVECRAFT-{agent.upper()}-{suffix}-{native[:8].lower()}"
-        marker = f"BOOTSTRAP_READY_{logical}"
+        handshake_id = secrets.token_hex(16)
+        handshake_body = {
+            "kind": BOOTSTRAP_HANDSHAKE_KIND,
+            "handshake_id": handshake_id,
+            "starter_agent": starter_agent,
+            "starter_runtime_session_id": starter_session_id,
+            "worker_agent": agent,
+            "worker_runtime_family": "pi",
+            "worker_native_session_id": native,
+            "worker_runtime_session_source": state["session_file"],
+            "project_id": project,
+            "chat_id": chat,
+            "repo_target": repo_target,
+        }
+        from _helpers import RUNTIME_ROOT
+
+        marker = "BOOTSTRAP_READY"
         livecraft.prompt(session_id, LIVECRAFT_BOOTSTRAP_TEMPLATE.format(
             agent=agent, native=native, marker=marker,
+            starter_agent=starter_agent, starter_session_id=starter_session_id,
+            handshake_id=handshake_id, handshake_json=json.dumps(
+                handshake_body, sort_keys=True, separators=(",", ":")
+            ), runtime_root=RUNTIME_ROOT, project=project, chat=chat,
+            repo=repo_target,
         ))
         _await_marker(livecraft, session_id, marker, timeout=bootstrap_timeout,
                       interval=poll_interval, sleep=sleep, clock=clock)
         final = livecraft.get_state(session_id)
         if final["native"] != native or final["cwd"] != repo_cwd or (
             final["provider"], final["model_id"], final["thinking"]
-        ) != (provider, model, thinking):
+        ) != (provider, model, thinking) or final["session_file"] != state["session_file"]:
             raise RotateError(f"Livecraft native state drifted before register: {final}")
+        handshake = _await_bootstrap_handshake(
+            starter_agent=starter_agent, starter_session_id=starter_session_id,
+            agent=agent, project=project, chat=chat, repo_target=repo_target,
+            native=native, session_source=final["session_file"],
+            handshake_id=handshake_id, timeout=bootstrap_timeout, interval=poll_interval,
+            sleep=sleep, clock=clock,
+        )
     except Exception as exc:
         livecraft.close_session(session_id)
         if isinstance(exc, RotateError):
@@ -857,16 +1032,21 @@ def _provision_livecraft_and_bind(
         "--expect-pi-provider", final["provider"], "--expect-pi-model", final["model_id"],
         "--expect-pi-thinking", final["thinking"], "--json",
     ]
+    if supersedes_session:
+        argv.extend(("--supersedes-session", supersedes_session))
     rc, out = run_autobridge(argv)
     if rc != 0:
         raise RotateError(
             f"register failed (rc={rc}); Livecraft session {session_id} native {native} left as partial state: {out}"
         )
-    return {"logical": logical, "native": native, "tab_id": session_id, "register_out": out}
+    return {
+        "logical": logical, "native": native, "tab_id": session_id,
+        "register_out": out, "bootstrap_handshake": handshake,
+    }
 
 
 def start_livecraft(
-    cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_pilot_gate,
+    cfg, *, livecraft, run_autobridge, resolve_cwd, gate_check=require_livecraft_gate,
     sleep=time.sleep, clock=time.monotonic,
 ) -> dict:
     gate_check(cfg)
@@ -883,7 +1063,10 @@ def start_livecraft(
     result = _provision_livecraft_and_bind(
         agent=cfg.agent, project=cfg.project, chat=chat, repo_target=cfg.repo_target,
         repo_cwd=repo_cwd, provider=cfg.provider, model=cfg.model, thinking=cfg.thinking,
-        runtime_home=cfg.runtime_home, livecraft=livecraft, run_autobridge=run_autobridge,
+        runtime_home=cfg.runtime_home, starter_agent=cfg.starter_agent,
+        starter_session_id=cfg.starter_session_id, supersedes_session=cfg.supersedes_session,
+        livecraft=livecraft,
+        run_autobridge=run_autobridge,
         bootstrap_timeout=cfg.bootstrap_timeout, poll_interval=cfg.poll_interval,
         sleep=sleep, clock=clock,
     )
@@ -897,6 +1080,7 @@ def start_livecraft(
         "session": result["logical"], "native_session_id": result["native"],
         "runtime_instance_id": result["tab_id"], "verified": verified,
         "generation": binding.get("binding_generation"),
+        "bootstrap_handshake": result["bootstrap_handshake"],
     }
 
 
@@ -990,9 +1174,18 @@ def add_start_livecraft_pi_arguments(p) -> None:
     p.add_argument("--model", required=True)
     p.add_argument("--thinking", required=True)
     p.add_argument("--runtime-home", required=True)
-    p.add_argument("--pilot-scope", required=True, help="Exact <project>/<agent> pilot scope")
-    p.add_argument("--disposable", action="store_true",
-                   help="Confirm this is a disposable pilot worker")
+    p.add_argument("--starter-agent", required=True,
+                   help="Agent that created this worker session and receives the bootstrap handshake")
+    p.add_argument("--starter-session-id", required=True,
+                   help="Native runtime session id of --starter-agent")
+    p.add_argument("--supersedes-session", default=None,
+                   help="Existing logical worker session to replace when rebinding a stale worker")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--production", action="store_true",
+                      help="Explicitly authorize a persistent production worker binding")
+    mode.add_argument("--disposable", action="store_true",
+                      help="Confirm this is a disposable pilot worker")
+    p.add_argument("--pilot-scope", default=None, help="Exact <project>/<agent> pilot scope")
     p.add_argument("--bootstrap-timeout", type=float, default=180.0)
     p.add_argument("--poll-interval", type=float, default=2.0)
     p.add_argument("--json", dest="json_output", action="store_true")
