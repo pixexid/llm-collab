@@ -60,6 +60,8 @@ from _session_autobridge import (
     BindingUnreadable,
     HEURISTIC_RUNTIME_DISCOVERY_FAMILIES,
     HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON,
+    MAX_DISPATCH_INBOX_BYTES,
+    MAX_DISPATCH_PACKET_BYTES,
     ReadBudget as ExactReadBudget,
     UnreadableFile,
     active_read_budget,
@@ -85,6 +87,11 @@ from session_autobridge import (
 
 MAX_EXACT_SESSION_ENTRIES = 5_000
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
+MAX_MESSAGE_SCAN_ENTRIES = MAX_EXACT_SESSION_ENTRIES
+
+
+class InboxScanLimitExceeded(ValueError):
+    """The complete listing cannot be proved within the scan bound."""
 
 
 def exact_registry_contains(
@@ -264,21 +271,53 @@ def publish_runtime_identity(args) -> dict | None:
 
 
 def load_all_messages(agent_id: str) -> list[dict]:
-    """Load all messages (read + unread) for an agent."""
-    inbox = load_agent_inbox(agent_id)
-    all_paths = inbox.get("read", []) + inbox.get("unread", [])
-    messages = []
-    for rel_path in all_paths:
-        abs_path = ROOT / rel_path
-        if abs_path.exists():
-            fm, body = parse_frontmatter(abs_path.read_text())
-            messages.append({
-                "path": rel_path,
-                "read": rel_path in inbox.get("read", []),
-                "frontmatter": fm,
-                "body": body,
-            })
-    return messages
+    """Load a complete, bounded message listing for an agent."""
+    budget = ExactReadBudget(MAX_DISPATCH_INBOX_BYTES, "inbox scan")
+    with active_read_budget(budget):
+        try:
+            raw = read_regular_file_bounded(agent_inbox_path(agent_id), budget.remaining)
+        except FileNotFoundError:
+            return []
+        inbox = json.loads(raw.decode("utf-8"))
+        if not isinstance(inbox, dict):
+            raise ValueError("inbox index must be an object")
+        read_paths = inbox.get("read", [])
+        unread_paths = inbox.get("unread", [])
+        if not isinstance(read_paths, list) or not isinstance(unread_paths, list):
+            raise ValueError("inbox index must contain read and unread lists")
+        total = len(read_paths) + len(unread_paths)
+        if total > MAX_MESSAGE_SCAN_ENTRIES:
+            raise InboxScanLimitExceeded(
+                f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; refusing an incomplete result"
+            )
+        paths = [*read_paths, *unread_paths]
+        if any(
+            not isinstance(path, str)
+            or not path
+            or path != path.strip()
+            or "\x00" in path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            for path in paths
+        ):
+            raise ValueError("inbox index contains invalid message pointers")
+        read_set = set(read_paths)
+        messages = []
+        for rel_path in paths:
+            abs_path = ROOT / rel_path
+            if abs_path.exists():
+                message_raw = read_regular_file_bounded(
+                    abs_path,
+                    min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
+                )
+                fm, body = parse_frontmatter(message_raw.decode("utf-8"))
+                messages.append({
+                    "path": rel_path,
+                    "read": rel_path in read_set,
+                    "frontmatter": fm,
+                    "body": body,
+                })
+        return messages
 
 
 def exact_read_session(args, budget: ExactReadBudget) -> dict:
@@ -979,12 +1018,25 @@ def main():
                 print(f"[inbox] Acknowledged {len(acknowledged)} exact-session packet(s).")
             mark_messages_read(args.me, acknowledged)
             return
-    elif args.packet:
-        messages = load_all_messages(args.me)
-    elif args.show_all:
-        messages = load_all_messages(args.me)
-    else:
-        messages = get_unread_messages(args.me)
+    if not exact_requested:
+        try:
+            if args.packet:
+                messages = load_all_messages(args.me)
+            elif args.show_all:
+                messages = load_all_messages(args.me)
+            else:
+                messages = get_unread_messages(args.me)
+        except InboxScanLimitExceeded as error:
+            payload = {
+                "error": "inbox_scan_limit_exceeded",
+                "detail": str(error),
+                "messages": [],
+            }
+            if args.json_output:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                print(f"[inbox] {error}", file=sys.stderr)
+            sys.exit(75)
     messages = filter_messages(
         messages,
         None if exact_requested else args.project,

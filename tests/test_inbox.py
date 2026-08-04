@@ -1048,6 +1048,70 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual([], inbox["unread"])
         self.assertEqual(paths, inbox["read"])
 
+    def test_bounded_all_scan_refuses_over_cap_without_mutating(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        before = {"agent": "codex", "unread": [], "read": paths}
+        write_json(self.root / "agents" / "codex" / "inbox.json", before)
+
+        result = self.run_inbox(
+            "--all", "--limit", str(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES), "--json"
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "inbox_scan_limit_exceeded", json.loads(result.stdout)["error"]
+        )
+        self.assertEqual(before, self.load_inbox())
+
+    def test_bounded_all_scan_accepts_exact_cap(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES)
+        ]
+        before = {"agent": "codex", "unread": [], "read": paths}
+        write_json(self.root / "agents" / "codex" / "inbox.json", before)
+
+        result = self.run_inbox(
+            "--all", "--limit", str(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES), "--json"
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout))
+        self.assertEqual(before, self.load_inbox())
+
+    def test_all_scan_missing_inbox_index_is_empty_without_mutation(self) -> None:
+        inbox_path = self.root / "agents" / "codex" / "inbox.json"
+        inbox_path.unlink()
+
+        result = self.run_inbox("--all", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout))
+        self.assertFalse(inbox_path.exists())
+
+    def test_bounded_packet_scan_refuses_over_cap_without_acknowledging(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        before = {"agent": "codex", "unread": paths, "read": []}
+        write_json(self.root / "agents" / "codex" / "inbox.json", before)
+
+        result = self.run_inbox(
+            "--packet", paths[-1],
+            "--limit", str(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES),
+            "--json",
+        )
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "inbox_scan_limit_exceeded", json.loads(result.stdout)["error"]
+        )
+        self.assertEqual(before, self.load_inbox())
+
     def test_repo_target_selector_filters_and_reports_ambiguous_packets(self) -> None:
         matched = self.add_message(
             "MATCHED", project_line="amiga", repo_targets=["llm-collab"]

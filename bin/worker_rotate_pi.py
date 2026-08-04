@@ -368,10 +368,7 @@ class Livecraft:
         return None
 
     def close_session(self, session_id: str) -> None:
-        try:
-            self._command(session_id, {"type": "abort"})
-        except Exception:
-            pass  # Livecraft has no delete endpoint; abort is best-effort cleanup.
+        self._command(session_id, {"type": "abort"})
 
 
 def require_loopback(url: str, option: str = "--pi-web-url") -> str:
@@ -919,7 +916,7 @@ def _starter_inbox_json(
         # bounded project/chat view and select the exact handshake below.
         command.extend(("--all", "--peek", "--limit", str(MESSAGE_SCAN_LIMIT)))
     else:
-        command.extend(("--packet", packet))
+        command.extend(("--packet", packet, "--limit", str(MESSAGE_SCAN_LIMIT)))
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=HTTP_TIMEOUT_SECONDS,
@@ -1107,12 +1104,17 @@ def _provision_livecraft_and_bind(
             sleep=sleep, clock=clock,
         )
     except Exception as exc:
-        _cleanup_livecraft_session(
+        cleanup_errors = _cleanup_livecraft_session(
             livecraft=livecraft, run_autobridge=run_autobridge, native=session_id,
         )
+        cleanup = f" cleanup: {'; '.join(cleanup_errors)}" if cleanup_errors else ""
         if isinstance(exc, RotateError):
+            if cleanup:
+                raise RotateError(f"{exc}{cleanup}") from exc
             raise
-        raise RotateError(f"pre-register Livecraft failure closed session {session_id}: {exc!r}") from exc
+        raise RotateError(
+            f"pre-register Livecraft failure closed session {session_id}: {exc!r}{cleanup}"
+        ) from exc
 
     argv = [
         "register", "--session", logical, "--agent", agent, "--project", project,
