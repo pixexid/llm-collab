@@ -33,46 +33,57 @@ class DeployRuntimeTest(unittest.TestCase):
             target.mkdir()
             (source / ".git").mkdir()
             (target / ".git").mkdir()
+            events: list[str] = []
+
+            def mark(name: str):
+                events.append(name)
+
             with (
                 patch.object(
                     deploy_runtime,
                     "source_head",
                     return_value=("head-sha", "10"),
                 ),
+                patch.object(deploy_runtime, "target_preflight", return_value="old-sha"),
+                patch.object(deploy_runtime, "pm2_binary", return_value="/usr/bin/pm2"),
+                patch.object(deploy_runtime, "ecosystem_definitions", return_value={}),
                 patch.object(
                     deploy_runtime,
-                    "git",
-                    side_effect=["old-sha", ""],
-                ) as git,
+                    "fence_watchers",
+                    side_effect=lambda owned_names: mark("fence"),
+                ),
                 patch.object(
-                    deploy_runtime.subprocess,
-                    "run",
-                    return_value=subprocess.CompletedProcess([], 0, "", ""),
-                ) as run,
-                patch.object(deploy_runtime, "DEFAULT_TARGET", target),
+                    deploy_runtime,
+                    "reset_target",
+                    side_effect=lambda target_path, head: mark(f"reset:{head}"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "reconcile_pm2",
+                    side_effect=lambda target_path, owned_names, definitions: mark("reconcile"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "verify_deployment",
+                    side_effect=lambda target_path, head, owned_names, definitions: mark("verify"),
+                ),
+                patch.object(deploy_runtime, "pm2_run") as pm2_run,
             ):
-                evidence = deploy_runtime.deploy(source)
+                evidence = deploy_runtime.deploy(source, target)
 
         self.assertEqual("head-sha", evidence["head"])
-        git.assert_has_calls(
-            [
-                call(target.resolve(), "rev-parse", "HEAD"),
-                call(target.resolve(), "status", "--porcelain=v1", "--untracked-files=no"),
-            ]
-        )
-        run.assert_called_once()
-        self.assertEqual("head-sha", run.call_args.args[0][-1])
+        self.assertEqual("old-sha", evidence["previous_head"])
+        self.assertLess(events.index("fence"), events.index("reset:head-sha"))
+        self.assertLess(events.index("reset:head-sha"), events.index("reconcile"))
+        self.assertLess(events.index("reconcile"), events.index("verify"))
+        pm2_run.assert_called_once_with(["save"])
 
     def test_timeout_rolls_target_back_to_previous_head(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "source"
             target = Path(temp_dir) / "target"
-            source.mkdir()
             target.mkdir()
-            (source / ".git").mkdir()
             (target / ".git").mkdir()
             with (
-                patch.object(deploy_runtime, "source_head", return_value=("new-sha", "10")),
                 patch.object(
                     deploy_runtime,
                     "git",
@@ -88,7 +99,135 @@ class DeployRuntimeTest(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(deploy_runtime.DeployError, "restored target HEAD old-sha"):
+                    deploy_runtime.reset_target(target, "new-sha")
+
+    def test_deploy_restores_previous_state_after_verification_failure(self):
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            target = Path(temp_dir) / "target"
+            source.mkdir()
+            target.mkdir()
+            (source / ".git").mkdir()
+            (target / ".git").mkdir()
+            with (
+                patch.object(deploy_runtime, "source_head", return_value=("new-sha", "10")),
+                patch.object(deploy_runtime, "target_preflight", return_value="old-sha"),
+                patch.object(deploy_runtime, "pm2_binary", return_value="/usr/bin/pm2"),
+                patch.object(deploy_runtime, "ecosystem_definitions", return_value={}),
+                patch.object(
+                    deploy_runtime,
+                    "fence_watchers",
+                    side_effect=lambda owned_names: events.append("fence"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "reset_target",
+                    side_effect=lambda target_path, head: events.append(f"reset:{head}"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "reconcile_pm2",
+                    side_effect=lambda target_path, owned_names, definitions: events.append("reconcile"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "verify_deployment",
+                    side_effect=deploy_runtime.DeployError("roster mismatch"),
+                ),
+                patch.object(
+                    deploy_runtime,
+                    "restore_previous_deployment",
+                    side_effect=lambda target_path, previous, owned_names: events.append("restore"),
+                ),
+                patch.object(deploy_runtime, "pm2_run"),
+            ):
+                with self.assertRaisesRegex(deploy_runtime.DeployError, "restored target HEAD old-sha"):
                     deploy_runtime.deploy(source, target)
+
+        self.assertEqual(["fence", "reset:new-sha", "reconcile", "restore"], events)
+
+    def test_reconcile_deletes_omitted_processes_before_restart(self):
+        current = [{"name": "fixture-old", "pm2_env": {"status": "stopped"}}]
+        with (
+            patch.object(deploy_runtime, "pm2_jlist", side_effect=[current, []]),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            deploy_runtime.reconcile_pm2(
+                Path("/deployed/runtime"),
+                frozenset({"fixture-old", "fixture-new"}),
+                {"fixture-new": {"name": "fixture-new"}},
+            )
+
+        self.assertEqual(
+            [
+                call(["delete", "fixture-old"]),
+                call([
+                    "startOrRestart",
+                    "/deployed/runtime/pm2/ecosystem.config.cjs",
+                    "--update-env",
+                ]),
+            ],
+            pm2_run.call_args_list,
+        )
+
+    def test_verify_checks_head_definition_and_log_probe(self):
+        record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[record]),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            deploy_runtime.verify_deployment(
+                Path("/deployed/runtime"),
+                "new-sha",
+                frozenset({"fixture-new"}),
+                {
+                    "fixture-new": {
+                        "cwd": "/deployed/runtime",
+                        "script": "python3",
+                        "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                    }
+                },
+            )
+
+        pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
+
+    def test_managed_processes_does_not_match_related_workspace_names(self):
+        records = [
+            {"name": "foo-worker"},
+            {"name": "foo-bar-worker"},
+        ]
+
+        self.assertEqual(
+            {"foo-worker": records[0]},
+            deploy_runtime.managed_processes(records, frozenset({"foo-worker"})),
+        )
+
+    def test_pm2_jlist_rejects_oversized_output_before_json_parse(self):
+        with patch.object(deploy_runtime, "PM2_JLIST_MAX_BYTES", 4), patch.object(
+            deploy_runtime,
+            "pm2_run",
+            return_value=subprocess.CompletedProcess([], 0, "[]xxx", ""),
+        ):
+            with self.assertRaisesRegex(deploy_runtime.DeployError, "refusing to parse"):
+                deploy_runtime.pm2_jlist()
+
+    def test_pm2_run_bounded_rejects_oversized_stdout(self):
+        with patch.object(deploy_runtime, "pm2_binary", return_value=sys.executable):
+            with self.assertRaisesRegex(deploy_runtime.DeployError, "exceeds 16 bytes"):
+                deploy_runtime.pm2_run(
+                    ["-c", "import sys; sys.stdout.write('x' * 128)"],
+                    max_output_bytes=16,
+                )
 
     def test_source_and_target_must_differ(self):
         with tempfile.TemporaryDirectory() as temp_dir:

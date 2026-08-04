@@ -36,6 +36,12 @@ npm install -g pm2
 
 ## How it works
 
+The complete deploy lifecycle is defined in the canonical
+[`Session Startup` safe refresh flow](../workflows/session-startup.md#keep-the-tooling-current):
+fence before advancing the runtime, reconcile removed apps, restart the current
+ecosystem, verify it, and save only after verification. The manual commands below
+manage individual PM2 apps; they do not replace that deploy transaction.
+
 `pm2/ecosystem.config.cjs` reads `agents.json` dynamically and generates one PM2
 app per agent where `activation.watcher_enabled: true`. The current ecosystem
 file does not filter by activation type. `human` and `human_relay` entries are
