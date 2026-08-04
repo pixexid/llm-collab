@@ -262,8 +262,17 @@ class StartLivecraftTest(unittest.TestCase):
             "projects": [{"id": "amiga", "repos": {"app": ".", "docs": "docs"}}],
         }))
         _helpers._projects_cache = None
+        (_helpers.CHATS_DIR / "2026-08-03_test__CHAT-NEWPROJ" / "meta.json").write_text(
+            json.dumps({"chat_id": "CHAT-NEWPROJ", "project_id": "amiga"})
+        )
+        chronology = []
         with self.assertRaisesRegex(wr.RotateError, r"valid keys: app, docs"):
-            wr._resolve_repo_target("amiga", None)
+            wr.start_livecraft(
+                _cfg(project="amiga", repo_target=None), livecraft=FakeLivecraft(chronology),
+                run_autobridge=FakeAutobridge([]), resolve_cwd=lambda _project, _repo: "/repo",
+                gate_check=lambda _cfg: None,
+            )
+        self.assertEqual([], chronology)
 
     def test_missing_repo_target_on_multi_repo_project_lists_valid_keys(self):
         import _helpers
