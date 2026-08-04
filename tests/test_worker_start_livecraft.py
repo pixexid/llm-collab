@@ -320,7 +320,7 @@ class StartLivecraftTest(unittest.TestCase):
         runtime_command = json.loads(register[register.index("--runtime-command") + 1])
         self.assertIn("livecraft_wake.py", runtime_command[1])
 
-    def test_profile_uses_latest_livecraft_record_only(self):
+    def _assert_profile_uses_latest_livecraft_record_only(self, project):
         sessions = Path(self.tmp.name) / "sessions"
         sessions.mkdir()
 
@@ -328,7 +328,7 @@ class StartLivecraftTest(unittest.TestCase):
             (sessions / f"{name}.json").write_text(json.dumps({
                 "session_id": name,
                 "agent_id": "glmpi",
-                "project_id": "llm-collab",
+                "project_id": project,
                 "endpoint_id": endpoint,
                 "binding_generation": generation,
                 "runtime": {"family": "pi", "home": "/pi"},
@@ -350,8 +350,14 @@ class StartLivecraftTest(unittest.TestCase):
                 "model": "glm-5.2",
                 "thinking": "max",
             },
-            wr.resolve_livecraft_profile("glmpi", "llm-collab", sessions_dir=sessions),
+            wr.resolve_livecraft_profile("glmpi", project, sessions_dir=sessions),
         )
+
+    def test_profile_uses_latest_livecraft_record_only(self):
+        self._assert_profile_uses_latest_livecraft_record_only("llm-collab")
+
+    def test_profile_uses_latest_livecraft_record_only_for_amiga(self):
+        self._assert_profile_uses_latest_livecraft_record_only("amiga")
 
     def test_rebind_passes_explicit_predecessor(self):
         _result, _chronology, _client, run = self._run(_cfg(supersedes_session="SESSION-OLD"))
