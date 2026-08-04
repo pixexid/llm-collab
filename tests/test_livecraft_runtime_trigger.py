@@ -21,6 +21,7 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
             "session_id": "SESSION-LIVECRAFT-GLMPI-CHAT-bfe59384",
             "agent_id": "glmpi", "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
             "repo_targets": ["app"], "endpoint_id": "endpoint_pi_livecraft_local",
+            "binding_id": "binding-livecraft", "binding_generation": 2,
             "runtime": {
                 "family": "pi", "session_id": "bfe59384-f808-4885-8aed-604774d728fc",
                 "session_source": "/pi/session.jsonl", "home": "/pi",

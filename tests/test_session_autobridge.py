@@ -9087,6 +9087,38 @@ class SessionAutobridgeTest(unittest.TestCase):
         runtime_trigger.assert_not_called()
         self.assertEqual("pull_pending", result["actions"][0]["reason"])
 
+    def test_unbound_livecraft_runtime_is_held_without_marking_packet_processed(self):
+        session = {
+            "session_id": "SESSION-LIVECRAFT-UNBOUND",
+            "agent_id": "glmpi",
+            "project_id": "llm-collab",
+            "chat_id": "CHAT-LIVECRAFT-UNBOUND",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "endpoint_id": "endpoint_pi_livecraft_local",
+            "runtime": {
+                "family": "pi",
+                "session_id": "livecraft-native-unbound",
+                "command": [sys.executable, "-c", "pass"],
+            },
+        }
+        message = {
+            "path": "Chats/livecraft-unbound/packet.md",
+            "frontmatter": {"target_session_id": "livecraft-native-unbound"},
+        }
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        mark_processed = Mock()
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib, "execute_runtime_trigger", runtime_trigger
+        ), patch.object(
+            session_autobridge_lib, "mark_message_processed", mark_processed
+        ):
+            result = session_autobridge_lib.dispatch_session(session["session_id"])
+
+        self.assertEqual("exact_binding_required", result["actions"][0]["reason"])
+        runtime_trigger.assert_not_called()
+        mark_processed.assert_not_called()
+
     def test_watch_inbox_default_off_empty_ledger_preserves_legacy_runtime_trigger(self):
         root = self.make_workspace()
         self.add_agent(

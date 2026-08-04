@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -19,9 +20,10 @@ NATIVE = "bfe59384-f808-4885-8aed-604774d728fc"
 
 
 class FakeLivecraft:
-    def __init__(self, chronology, *, drift=False):
+    def __init__(self, chronology, *, drift=False, session_file="/pi/sessions/livecraft.jsonl"):
         self.chronology = chronology
         self.drift = drift
+        self.session_file = session_file
         self.marker = None
         self.snapshot_calls = 0
         self.closed = []
@@ -43,7 +45,7 @@ class FakeLivecraft:
         provider = "other" if self.drift and self.snapshot_calls > 1 else "zai"
         return {
             "native": NATIVE,
-            "session_file": "/pi/sessions/livecraft.jsonl",
+            "session_file": self.session_file,
             "provider": provider,
             "model_id": "glm-5.2",
             "thinking": "max",
@@ -238,6 +240,25 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertIn("--target-session-id starter-native", client.prompt_message)
         self.assertIn("starter will arm the background wake path", client.prompt_message)
         self.assertIn('"kind":"llm_collab.pi.bootstrap.v1"', client.prompt_message)
+
+    def test_bootstrap_command_shell_quotes_paths_and_json_values(self):
+        import _helpers
+
+        client = FakeLivecraft([], session_file="/pi/sessions/worker's file.jsonl")
+        with mock.patch.object(_helpers, "RUNTIME_ROOT", Path("/runtime root")):
+            _result, _chronology, client, _run = self._run(
+                _cfg(starter_agent="codex's", starter_session_id="starter's native"),
+                livecraft=client,
+            )
+
+        command = next(line for line in client.prompt_message.splitlines() if "deliver.py" in line)
+        parts = shlex.split(command)
+        self.assertEqual("/runtime root/bin/llm-collab", parts[4])
+        self.assertEqual("deliver.py", parts[5])
+        self.assertEqual("codex's", parts[parts.index("--to") + 1])
+        self.assertEqual("starter's native", parts[parts.index("--target-session-id") + 1])
+        handshake = json.loads(parts[2])
+        self.assertEqual("/pi/sessions/worker's file.jsonl", handshake["worker_runtime_session_source"])
 
     def test_marker_accepts_successful_trailing_bootstrap_marker(self):
         client = mock.Mock()

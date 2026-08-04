@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -818,7 +819,7 @@ This bootstrap hold applies only to this setup turn. Before claiming ready, send
 {handshake_json}
 
 Send it through the deployed runtime with this exact command:
-printf '%s\\n' '{handshake_json}' | {runtime_root}/bin/llm-collab deliver.py --chat {chat} --from {agent} --to {starter_agent} --title 'Pi worker bootstrap handshake {handshake_id}' --priority high --tags pi-worker-bootstrap,session-handshake --project {project} --repo-targets {repo} --sender-session-id {native} --target-session-id {starter_session_id} --body-file -
+printf '%s\\n' {handshake_command_json} | {runtime_command} deliver.py --chat {chat_command} --from {agent_command} --to {starter_agent_command} --title {title_command} --priority high --tags {tags_command} --project {project_command} --repo-targets {repo_command} --sender-session-id {native_command} --target-session-id {starter_session_command} --body-file -
 
 If delivery fails, do not claim ready. After successful delivery, reply only {marker}
 The starter will arm the background wake path with this exact reader identity; do not start a Pi event monitor yourself and do not use Pi-Web.
@@ -1074,13 +1075,20 @@ def _provision_livecraft_and_bind(
         from _helpers import RUNTIME_ROOT
 
         marker = "BOOTSTRAP_READY"
+        handshake_json = json.dumps(handshake_body, sort_keys=True, separators=(",", ":"))
         livecraft.prompt(session_id, LIVECRAFT_BOOTSTRAP_TEMPLATE.format(
             agent=agent, native=native, marker=marker,
             starter_agent=starter_agent, starter_session_id=starter_session_id,
-            handshake_id=handshake_id, handshake_json=json.dumps(
-                handshake_body, sort_keys=True, separators=(",", ":")
-            ), runtime_root=RUNTIME_ROOT, project=project, chat=chat,
-            repo=repo_target,
+            handshake_id=handshake_id, handshake_json=handshake_json,
+            handshake_command_json=shlex.quote(handshake_json),
+            runtime_command=shlex.quote(str(Path(RUNTIME_ROOT) / "bin" / "llm-collab")),
+            chat_command=shlex.quote(chat), agent_command=shlex.quote(agent),
+            starter_agent_command=shlex.quote(starter_agent),
+            title_command=shlex.quote(f"Pi worker bootstrap handshake {handshake_id}"),
+            tags_command=shlex.quote("pi-worker-bootstrap,session-handshake"),
+            project_command=shlex.quote(project), repo_command=shlex.quote(repo_target),
+            native_command=shlex.quote(native),
+            starter_session_command=shlex.quote(starter_session_id),
         ))
         _await_marker(livecraft, session_id, marker, timeout=bootstrap_timeout,
                       interval=poll_interval, sleep=sleep, clock=clock)

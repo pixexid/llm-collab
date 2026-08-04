@@ -1187,6 +1187,8 @@ def livecraft_runtime_wake_available(session: dict) -> bool:
         runtime.get("family") == "pi"
         and session.get("endpoint_id") == "endpoint_pi_livecraft_local"
         and bool(runtime.get("command"))
+        and bool(session.get("binding_id"))
+        and bool(session.get("binding_generation"))
     )
 
 
