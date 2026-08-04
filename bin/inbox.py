@@ -906,6 +906,17 @@ def format_message(msg: dict, index: int) -> str:
     return "\n".join(lines)
 
 
+def _print_refused_gates(refused_gates: list[dict]) -> None:
+    for gate in refused_gates:
+        print(
+            f"[activation] refused {gate['path']}: {gate.get('reason')}",
+            file=sys.stderr,
+        )
+        owner = gate.get("owner")
+        if owner:
+            print(f"  owner: {json.dumps(owner, sort_keys=True)}", file=sys.stderr)
+
+
 def main():
     args = parse_args()
 
@@ -1049,8 +1060,6 @@ def main():
         messages, args.repo_target, args.project
     )
     repo_scope_refused.extend(filtered_repo_scope)
-    if not args.packet and not exact_requested:
-        messages = messages[: args.limit]
 
     if not messages:
         if args.json_output:
@@ -1091,29 +1100,41 @@ def main():
     consume = not args.peek and not args.show_all
     refused_gates: list[dict] = []
     if not exact_requested:
+        # Select up to --limit *valid* packets, scanning past refused activations
+        # instead of letting a refused prefix consume the budget: with --limit N, N
+        # refused entries ahead of valid mail must not hide it permanently — refused
+        # packets stay unread, so every retry re-selects the same prefix (GH-502).
+        # A refused packet is skipped (left unread) and surfaced in activation_refused.
+        # --packet selects exactly one message and is never limited here.
+        limit = None if args.packet else args.limit
+        selected: list[dict] = []
         for message in messages:
+            if limit is not None and len(selected) >= limit:
+                break
             gate = gate_activation_message(args, message, consume=consume)
             if gate is not None:
                 message["activation_gate"] = gate
                 if consume and not gate.get("authorized"):
                     refused_gates.append({"path": message["path"], **gate})
+                    continue
+            selected.append(message)
+        messages = selected
 
-    if refused_gates:
-        payload = {"activation_refused": refused_gates, "messages": messages}
-        if args.json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            for gate in refused_gates:
-                print(
-                    f"[activation] refused {gate['path']}: {gate.get('reason')}",
-                    file=sys.stderr,
-                )
-                owner = gate.get("owner")
-                if owner:
-                    print(f"  owner: {json.dumps(owner, sort_keys=True)}", file=sys.stderr)
-        sys.exit(75)
-
+    # Only an all-refused scan (no valid packet anywhere to show or drain) keeps the
+    # exit-75 failure; a mixed batch shows/drains the valid packets and exits 0.
     shown_paths = [m["path"] for m in messages if not m.get("read")]
+    if refused_gates and not shown_paths:
+        if args.json_output:
+            print(
+                json.dumps(
+                    {"activation_refused": refused_gates, "messages": messages},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            _print_refused_gates(refused_gates)
+        sys.exit(75)
     if consume and not exact_requested:
         shown_paths, late_refused = recheck_repo_scope_before_read(
             args.me, shown_paths, args.repo_target, args.project
@@ -1122,6 +1143,8 @@ def main():
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
+        if refused_gates:
+            payload["activation_refused"] = refused_gates
         if repo_scope_refused:
             payload["repo_scope_refused"] = repo_scope_refused
         if published_runtime is not None:
@@ -1145,6 +1168,8 @@ def main():
         print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
+        if refused_gates:
+            _print_refused_gates(refused_gates)
         for refused in repo_scope_refused:
             print(
                 f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
