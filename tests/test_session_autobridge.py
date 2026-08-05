@@ -9607,8 +9607,21 @@ class SessionAutobridgeTest(unittest.TestCase):
         ), patch.object(session_autobridge_lib, "append_event") as append_event:
             result = session_autobridge_lib.dispatch_session("SESSION-REFUSAL")
 
+        # GH-539: the refusal payload now also carries the packet's routing
+        # inputs so a terminal-refusal fingerprint can tell "same decision" from
+        # "packet rerouted". Asserting them here keeps the shape pinned rather
+        # than loosening the assertion.
         self.assertEqual(
-            [{"path": message["path"], "reason": "route_ambiguous"}],
+            [
+                {
+                    "path": message["path"],
+                    "reason": "route_ambiguous",
+                    "packet_repo_targets": message["frontmatter"].get("repo_targets"),
+                    "packet_project": message["frontmatter"].get("project_id"),
+                    # GH-539: mtime observed with the parsed bytes
+                    "packet_mtime": message.get("mtime"),
+                }
+            ],
             result["repo_scope_refused"],
         )
         self.assertTrue(
@@ -10118,8 +10131,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                     repo_targets=["llm-collab"],
                 ),
             )
+        # GH-539: dispatch now also carries the terminal-refusal skip set.
         dispatch.assert_called_once_with(
-            "SESSION-REPO", project_id="amiga", repo_targets=["llm-collab"]
+            "SESSION-REPO",
+            project_id="amiga",
+            repo_targets=["llm-collab"],
+            skip_paths=set(),
         )
 
     def test_watcher_repo_scope_recheck_blocks_wrong_packet_before_read(self):

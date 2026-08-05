@@ -1853,8 +1853,9 @@ def matching_unread_messages(
     *,
     invocation_repo_targets: Any = None,
     repo_scope_refusals: list[dict] | None = None,
+    skip_paths: set[str] | None = None,
 ) -> list[dict]:
-    messages = bounded_unread_messages(str(session["agent_id"]))
+    messages = bounded_unread_messages(str(session["agent_id"]), skip_paths)
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
     if project_id:
@@ -1863,13 +1864,33 @@ def matching_unread_messages(
         messages = [m for m in messages if m["frontmatter"].get("chat_id") == chat_id]
     matched_messages: list[dict] = []
     for message in messages:
+        # GH-539: a message whose repo-scope decision is already terminal is
+        # skipped BEFORE the routing check, so the watcher stops re-doing the
+        # work — not just re-logging it. Suppressing only the log left the cost
+        # O(backlog) per poll.
+        if skip_paths and message["path"] in skip_paths:
+            continue
         repo_match, repo_reason = _session_repo_scope_matches(
             session, message, invocation_repo_targets
         )
         if not repo_match:
             if repo_scope_refusals is not None:
+                # GH-539: carry the packet's routing inputs so a terminal-refusal
+                # fingerprint can distinguish "same decision" from "packet rerouted".
+                # Without these the fingerprint sees None and a corrected packet
+                # stays suppressed under the same subscriber decision.
                 repo_scope_refusals.append(
-                    {"path": message["path"], "reason": repo_reason}
+                    {
+                        "path": message["path"],
+                        "reason": repo_reason,
+                        "packet_repo_targets": message["frontmatter"].get("repo_targets"),
+                        "packet_project": message["frontmatter"].get("project_id"),
+                        # GH-539: the mtime AS OBSERVED with this body. Sampling it
+                        # later lets a rewrite between read and record store the new
+                        # mtime against the old decision, so the corrected packet is
+                        # skipped forever.
+                        "packet_mtime": message.get("mtime"),
+                    }
                 )
             continue
         target_match, _ = message_targets_session(
@@ -1882,7 +1903,7 @@ def matching_unread_messages(
     return matched_messages
 
 
-def bounded_unread_messages(agent_id: str) -> list[dict]:
+def bounded_unread_messages(agent_id: str, skip_paths: set[str] | None = None) -> list[dict]:
     budget = ReadBudget(MAX_DISPATCH_INBOX_BYTES, "dispatch inbox")
     with active_read_budget(budget):
         raw = read_regular_file_bounded(
@@ -1907,8 +1928,17 @@ def bounded_unread_messages(agent_id: str) -> list[dict]:
             )
         messages = []
         for relative_path in unread:
+            # GH-539: drop terminally-refused paths BEFORE the body is opened, so
+            # a large refusal backlog cannot exhaust MAX_DISPATCH_INBOX_BYTES
+            # before an eligible packet is reached. Filtering after the read
+            # skipped the routing work but still paid for every byte.
+            if skip_paths and relative_path in skip_paths:
+                continue
             try:
-                message_raw = read_regular_file_bounded(
+                # GH-539: bytes and identity from ONE descriptor. A separate
+                # stat after the read can observe a rewritten file and would
+                # certify content that was never parsed.
+                message_raw, observed_mtime = read_regular_file_bounded_with_identity(
                     ROOT / relative_path,
                     min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
                 )
@@ -1930,6 +1960,7 @@ def bounded_unread_messages(agent_id: str) -> list[dict]:
                     "path": relative_path,
                     "frontmatter": frontmatter,
                     "body": body,
+                    "mtime": observed_mtime,
                 }
             )
     return messages
@@ -2962,7 +2993,20 @@ class active_read_budget:
         return False
 
 
-def read_regular_file_bounded(path: Path, limit: int) -> bytes:
+def read_regular_file_bounded_with_identity(path: Path, limit: int) -> tuple[bytes, float | None]:
+    """Bytes plus the mtime from the SAME descriptor that produced them (GH-539).
+
+    read()-then-stat() is two operations on two possibly-different objects: a rewrite
+    landing between them yields metadata describing bytes the caller never parsed.
+    Anything that records "this content had this identity" must take both from one
+    descriptor, which is what the fstat below already does.
+    """
+    identity: dict = {}
+    payload = read_regular_file_bounded(path, limit, _identity_out=identity)
+    return payload, identity.get("mtime")
+
+
+def read_regular_file_bounded(path: Path, limit: int, *, _identity_out: dict | None = None) -> bytes:
     """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
 
     Every untrusted read in this codebase needs the same four things and gets them wrong
@@ -2982,6 +3026,10 @@ def read_regular_file_bounded(path: Path, limit: int) -> bytes:
         raise UnreadableFile(f"cannot open {path}: {error}") from error
     try:
         info = os.fstat(descriptor)
+        if _identity_out is not None:
+            # Same descriptor, same object: this mtime describes exactly the bytes
+            # returned below.
+            _identity_out["mtime"] = info.st_mtime
         if not stat.S_ISREG(info.st_mode):
             raise UnreadableFile(f"{path} is not a regular file; refusing to read it")
         if info.st_size > limit:
@@ -3839,6 +3887,7 @@ def dispatch_session(
     *,
     project_id: str | None = None,
     repo_targets: list[str] | None = None,
+    skip_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id)
     if session.get("binding_id"):
@@ -3910,6 +3959,7 @@ def dispatch_session(
         routing_session,
         invocation_repo_targets=repo_targets,
         repo_scope_refusals=repo_scope_refusals,
+        skip_paths=skip_paths,
     ):
         if processed_message_blocks_dispatch(routing_session, message, seen):
             if (
