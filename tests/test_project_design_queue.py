@@ -502,13 +502,14 @@ class ProjectDesignQueueTest(unittest.TestCase):
                     return task_body
 
             with patch.object(project_design_queue, "get_project", return_value={"id": "amiga"}):
-                with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
-                    errors, _ = project_design_queue.validate_queue(
-                        "amiga",
-                        payload,
-                        check_github=False,
-                        check_issue_mirror=False,
-                    )
+                with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                    with patch.object(project_design_queue, "find_task_by_id", return_value=FakeTaskPath()):
+                        errors, _ = project_design_queue.validate_queue(
+                            "amiga",
+                            payload,
+                            check_github=False,
+                            check_issue_mirror=False,
+                        )
 
             self.assertEqual(errors, [])
 
