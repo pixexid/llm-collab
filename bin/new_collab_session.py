@@ -18,13 +18,15 @@ fresh native session — that keeps the flow clean and avoids the refusal.
 It:
   1. Refuses if this checkout is behind origin/main (co-workers must run current
      code, not a parked/dirty operator checkout).
-  2. Creates the chat.
-  3. Registers ONLY the initiator's own, explicitly-supplied native session.
-  4. Prints the initiator's own pickup command, branched by its wake channel
+  2. Preflights the initiator's native session against existing dispatchable
+     scopes, before any chat directory or file is written.
+  3. Creates the chat.
+  4. Registers ONLY the initiator's own, explicitly-supplied native session.
+  5. Prints the initiator's own pickup command, branched by its wake channel
      (a watcher-backed initiator arms an inbox watcher; Codex, with no native
      watcher, gets poll/AX guidance) — do it, a packet you never see is a packet
      you never answer.
-  5. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
+  6. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
      plus the pickup command for that worker's real wake channel (watcher-backed
      workers watch; Codex has no native watcher and is woken by the sender's AX
      doorbell, so it polls).
@@ -178,6 +180,30 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
+
+
+def preflight_starter_binding(*, agent: str, project: str, runtime_session_id: str,
+                              runtime_family: str) -> None:
+    """Refuse a new chat before creation when the starter native is already routed."""
+    from session_autobridge import preflight_native_session_registration
+
+    # The real chat id does not exist yet. The ownership guard only needs a
+    # different scope, so use a non-persisted sentinel rather than creating a
+    # directory just to discover the refusal.
+    pending_chat = f"__pending-new-collab__{agent}__{runtime_session_id}"
+    pending_session = f"__pending-new-collab__{agent}__{runtime_session_id}"
+    try:
+        preflight_native_session_registration(
+            session_id=pending_session,
+            project_id=project,
+            chat_id=pending_chat,
+            native_session_id=runtime_session_id,
+            native_family=runtime_family,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        sys.exit(
+            f"[error] starter native session cannot own a new chat before creation: {exc}"
+        )
 
 
 # Every generated command goes through the deployed launcher, which selects a
@@ -337,6 +363,15 @@ def main():
             f"project {args.project!r} (configured: "
             f"{', '.join(sorted(configured_repos)) or 'none'})."
         )
+
+    # GH-536: validate the starter's native routing scope before new_chat.py
+    # writes the directory. Ordinary new_chat.py remains deliberately unaware
+    # of worker bindings; this guard belongs only to the worker-aware path.
+    preflight_starter_binding(
+        agent=args.me, project=args.project,
+        runtime_session_id=args.my_runtime_session_id,
+        runtime_family=args.my_runtime_family,
+    )
 
     created = subprocess.run(
         [sys.executable, str(BIN / "new_chat.py"),

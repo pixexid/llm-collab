@@ -535,6 +535,28 @@ class SessionAutobridgeTest(unittest.TestCase):
             "status": status, "runtime": {"family": family, "session_id": native},
         }
 
+    def test_gh536_preflight_refuses_owned_native_without_writing(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions), \
+             self.assertRaisesRegex(
+                 session_autobridge_cli.NativeSessionOwnedElsewhere,
+                 "deactivate the other lease or use a fresh native session",
+             ):
+            session_autobridge_cli.preflight_native_session_registration(
+                session_id="PENDING", project_id="llm-collab", chat_id="CHAT-NEW",
+                native_session_id="NAT-1", native_family="claude_app",
+            )
+        self.assertEqual(["S0.json"], [path.name for path in sessions.iterdir()])
+
+    def test_gh536_preflight_allows_unowned_native(self):
+        sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
+        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+            session_autobridge_cli.preflight_native_session_registration(
+                session_id="PENDING", project_id="llm-collab", chat_id="CHAT-NEW",
+                native_session_id="NAT-2", native_family="claude_app",
+            )
+        self.assertEqual(["S0.json"], [path.name for path in sessions.iterdir()])
+
     def test_gh468_resolve_native_family_single_live_returns_it(self):
         sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
