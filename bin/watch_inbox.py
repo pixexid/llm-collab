@@ -24,10 +24,9 @@ import hashlib
 import json
 import os
 import platform
-import re
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (
@@ -195,10 +194,6 @@ def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list
 # Progress is watcher-owned state: it records that a DECISION was made. It never
 # marks a message read and never touches the durable inbox, so this is not backlog
 # cleanup by another name.
-REFUSAL_WINDOW_DAYS = 7
-_PACKET_TS = re.compile(r"(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})_")
-
-
 def refusal_progress_path(agent_id: str) -> Path:
     return agent_dir(agent_id) / "watcher-refusal-progress.json"
 
@@ -222,9 +217,32 @@ def load_refusal_progress(agent_id: str) -> dict:
         if not isinstance(key, str):
             continue
         if isinstance(value, dict) and isinstance(value.get("fp"), str):
-            clean[key] = {"fp": value["fp"], "mtime": value.get("mtime")}
-        elif isinstance(value, str):  # pre-GH-539 shape, still usable
-            clean[key] = {"fp": value, "mtime": None}
+            # Every field terminal_refusal_paths feeds back into
+            # refusal_fingerprint must survive the round trip, or a restart
+            # recomputes a DIFFERENT fingerprint and re-evaluates the stale
+            # refusal — which would defeat persistence entirely.
+            reason = value.get("reason")
+            packet_repo_targets = value.get("packet_repo_targets")
+            packet_project = value.get("packet_project")
+            clean[key] = {
+                "fp": value["fp"],
+                "mtime": value.get("mtime") if isinstance(value.get("mtime"), (int, float)) else None,
+                "reason": reason if isinstance(reason, str) else "",
+                "packet_repo_targets": packet_repo_targets
+                if isinstance(packet_repo_targets, list) or packet_repo_targets is None
+                else None,
+                "packet_project": packet_project
+                if isinstance(packet_project, str) or packet_project is None
+                else None,
+            }
+        elif isinstance(value, str):  # pre-GH-539 shape: fingerprint only
+            clean[key] = {
+                "fp": value,
+                "mtime": None,
+                "reason": "",
+                "packet_repo_targets": None,
+                "packet_project": None,
+            }
     return clean
 
 
@@ -288,23 +306,6 @@ def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscrib
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
-
-
-def within_refusal_window(message_path: str, now: datetime | None = None) -> bool:
-    """True when the packet's own filename timestamp is inside the recent window.
-    An unparseable name is treated as IN-window: never hide a message because its
-    name did not match a convention."""
-    match = _PACKET_TS.search(Path(message_path).name)
-    if not match:
-        return True
-    try:
-        stamp = datetime.strptime(
-            f"{match.group(1)}T{match.group(2)}:{match.group(3)}:{match.group(4)}",
-            "%Y-%m-%dT%H:%M:%S",
-        )
-    except ValueError:
-        return True
-    return stamp >= (now or datetime.utcnow()) - timedelta(days=REFUSAL_WINDOW_DAYS)
 
 
 def dispatch_autobridge(

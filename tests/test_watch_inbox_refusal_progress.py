@@ -11,39 +11,11 @@ from __future__ import annotations
 import json
 import sys
 import unittest
-from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 import watch_inbox  # noqa: E402
-
-
-class RefusalWindowTest(unittest.TestCase):
-    def test_recent_packet_is_in_window(self) -> None:
-        now = datetime(2026, 8, 5, 4, 0, 0)
-        self.assertTrue(
-            watch_inbox.within_refusal_window("2026-08-04T09-00-00_to-claude_x.md", now)
-        )
-
-    def test_old_packet_is_out_of_window(self) -> None:
-        now = datetime(2026, 8, 5, 4, 0, 0)
-        self.assertFalse(
-            watch_inbox.within_refusal_window("2026-06-27T01-18-18_to-claude_x.md", now)
-        )
-
-    def test_boundary_is_inclusive_at_the_window_edge(self) -> None:
-        now = datetime(2026, 8, 5, 4, 0, 0)
-        edge = now - timedelta(days=watch_inbox.REFUSAL_WINDOW_DAYS)
-        name = edge.strftime("%Y-%m-%dT%H-%M-%S") + "_to-claude_x.md"
-        self.assertTrue(watch_inbox.within_refusal_window(name, now))
-
-    def test_unparseable_name_is_never_hidden(self) -> None:
-        """A message must never be dropped because its filename did not match a
-        convention; fail OPEN on naming, fail closed on routing."""
-        now = datetime(2026, 8, 5, 4, 0, 0)
-        self.assertTrue(watch_inbox.within_refusal_window("weird-name.md", now))
-        self.assertTrue(watch_inbox.within_refusal_window("", now))
 
 
 class RefusalFingerprintTest(unittest.TestCase):
@@ -85,11 +57,15 @@ class RefusalProgressStoreTest(unittest.TestCase):
 
     def test_round_trip(self) -> None:
         with self._patch_dir():
-            watch_inbox.save_refusal_progress("claude", {"a.md": {"fp": "fp1", "mtime": None}})
-            self.assertEqual(
-                {"a.md": {"fp": "fp1", "mtime": None}},
-                watch_inbox.load_refusal_progress("claude"),
-            )
+            entry = {
+                "fp": "fp1",
+                "mtime": None,
+                "reason": "repo_mismatch",
+                "packet_repo_targets": ["other"],
+                "packet_project": "amiga",
+            }
+            watch_inbox.save_refusal_progress("claude", {"a.md": entry})
+            self.assertEqual({"a.md": entry}, watch_inbox.load_refusal_progress("claude"))
 
     def test_missing_store_is_empty_not_an_error(self) -> None:
         with self._patch_dir():
@@ -161,7 +137,15 @@ class RefusalProgressShapeTest(unittest.TestCase):
             # A pre-GH-539 bare-string entry stays usable, normalised to the
             # richer shape; malformed values are dropped.
             self.assertEqual(
-                {"a.md": {"fp": "fp1", "mtime": None}},
+                {
+                    "a.md": {
+                        "fp": "fp1",
+                        "mtime": None,
+                        "reason": "",
+                        "packet_repo_targets": None,
+                        "packet_project": None,
+                    }
+                },
                 watch_inbox.load_refusal_progress("claude"),
             )
 
@@ -269,6 +253,76 @@ class TerminalRefusalSkipsWorkTest(unittest.TestCase):
         scope.assert_not_called()
         self.assertEqual([], result)
         self.assertEqual([], refusals)
+
+
+class RestartRoundTripTest(unittest.TestCase):
+    """Codex finding: load_refusal_progress previously reduced entries to
+    {fp, mtime}, so after a watcher RESTART terminal_refusal_paths recomputed a
+    different fingerprint and re-evaluated the stale refusal — persistence was
+    effectively dead across restarts."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _patch_dir(self):
+        from unittest.mock import patch
+
+        return patch.object(watch_inbox, "agent_dir", return_value=self.root)
+
+    def test_persisted_entry_still_skips_after_restart(self) -> None:
+        path = "Chats/x/nonexistent-so-mtime-is-None.md"
+        repo_targets, project_id = ["app"], "llm-collab"
+        reason, packet_repo, packet_project = "repo_mismatch", ["other"], "amiga"
+        fp = watch_inbox.refusal_fingerprint(
+            reason, repo_targets, packet_repo, project_id, packet_project
+        )
+        live = {
+            path: {
+                "fp": fp,
+                "mtime": None,
+                "reason": reason,
+                "packet_repo_targets": packet_repo,
+                "packet_project": packet_project,
+            }
+        }
+        # skips before any restart
+        self.assertEqual(
+            {path}, watch_inbox.terminal_refusal_paths(live, repo_targets, project_id)
+        )
+        with self._patch_dir():
+            watch_inbox.save_refusal_progress("claude", live)
+            reloaded = watch_inbox.load_refusal_progress("claude")
+        # ...and still skips after a save/load cycle
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(reloaded, repo_targets, project_id),
+        )
+
+    def test_reloaded_entry_still_reopens_on_changed_routing(self) -> None:
+        """The round trip must not become a blanket skip: AC4 still applies."""
+        path = "Chats/x/nonexistent-so-mtime-is-None.md"
+        fp = watch_inbox.refusal_fingerprint(
+            "repo_mismatch", ["app"], ["other"], "llm-collab", "amiga"
+        )
+        live = {
+            path: {
+                "fp": fp,
+                "mtime": None,
+                "reason": "repo_mismatch",
+                "packet_repo_targets": ["other"],
+                "packet_project": "amiga",
+            }
+        }
+        with self._patch_dir():
+            watch_inbox.save_refusal_progress("claude", live)
+            reloaded = watch_inbox.load_refusal_progress("claude")
+        self.assertEqual(
+            set(), watch_inbox.terminal_refusal_paths(reloaded, ["docs"], "llm-collab")
+        )
 
 
 if __name__ == "__main__":
