@@ -310,10 +310,14 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id:
     for key, entry in progress.items():
         if entry.get("session_id") != session_id:
             continue  # another session's decision never satisfies this one
+        if entry.get("session_repo_targets") != repo_targets:
+            # The session was re-registered with a corrected scope: the stored
+            # decision was made under the OLD scope and must be re-evaluated.
+            continue
         path = entry.get("path") or key.split("\u0000", 1)[-1]
         expected = refusal_fingerprint(
             entry.get("reason", ""),
-            entry.get("session_repo_targets") if entry.get("session_repo_targets") is not None else repo_targets,
+            repo_targets,
             entry.get("packet_repo_targets"),
             project_id,
             entry.get("packet_project"),

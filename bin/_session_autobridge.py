@@ -1855,7 +1855,7 @@ def matching_unread_messages(
     repo_scope_refusals: list[dict] | None = None,
     skip_paths: set[str] | None = None,
 ) -> list[dict]:
-    messages = bounded_unread_messages(str(session["agent_id"]))
+    messages = bounded_unread_messages(str(session["agent_id"]), skip_paths)
     project_id = session.get("project_id")
     chat_id = session.get("chat_id")
     if project_id:
@@ -1898,7 +1898,7 @@ def matching_unread_messages(
     return matched_messages
 
 
-def bounded_unread_messages(agent_id: str) -> list[dict]:
+def bounded_unread_messages(agent_id: str, skip_paths: set[str] | None = None) -> list[dict]:
     budget = ReadBudget(MAX_DISPATCH_INBOX_BYTES, "dispatch inbox")
     with active_read_budget(budget):
         raw = read_regular_file_bounded(
@@ -1923,6 +1923,12 @@ def bounded_unread_messages(agent_id: str) -> list[dict]:
             )
         messages = []
         for relative_path in unread:
+            # GH-539: drop terminally-refused paths BEFORE the body is opened, so
+            # a large refusal backlog cannot exhaust MAX_DISPATCH_INBOX_BYTES
+            # before an eligible packet is reached. Filtering after the read
+            # skipped the routing work but still paid for every byte.
+            if skip_paths and relative_path in skip_paths:
+                continue
             try:
                 message_raw = read_regular_file_bounded(
                     ROOT / relative_path,

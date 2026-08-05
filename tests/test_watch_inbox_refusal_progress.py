@@ -221,6 +221,7 @@ class TerminalRefusalSkipsWorkTest(unittest.TestCase):
                 "packet_repo_targets": packet_repo,
                 "packet_project": packet_project,
                 "session_id": None,
+                "session_repo_targets": repo_targets,
             }
         }
 
@@ -299,6 +300,7 @@ class RestartRoundTripTest(unittest.TestCase):
                 "packet_repo_targets": packet_repo,
                 "packet_project": packet_project,
                 "session_id": None,
+                "session_repo_targets": repo_targets,
             }
         }
         # skips before any restart
@@ -329,6 +331,7 @@ class RestartRoundTripTest(unittest.TestCase):
                 "packet_repo_targets": ["other"],
                 "packet_project": "amiga",
                 "session_id": None,
+                "session_repo_targets": ["app"],
             }
         }
         with self._patch_dir():
@@ -359,6 +362,7 @@ class BotReviewRegressionsTest(unittest.TestCase):
                 "packet_repo_targets": ["docs"],
                 "packet_project": "llm-collab",
                 "session_id": "SESSION-APP",
+                "session_repo_targets": ["app"],
             }
         }
         self.assertEqual(
@@ -466,3 +470,64 @@ class BoundedReadSeamTest(unittest.TestCase):
             os.mkfifo(fifo)
             with patch.object(watch_inbox, "agent_dir", return_value=root):
                 self.assertEqual({}, watch_inbox.load_refusal_progress("claude"))
+
+
+class ReRegisteredScopeTest(unittest.TestCase):
+    """Codex P2: a refusal recorded under the OLD session scope must not survive
+    the session being re-registered with a corrected scope."""
+
+    def test_corrected_stored_session_scope_reopens(self) -> None:
+        path = "Chats/x/p.md"
+        old_scope = ["app"]
+        entry = {
+            "path": path,
+            "session_id": "SESSION-A",
+            "session_repo_targets": old_scope,
+            "fp": watch_inbox.refusal_fingerprint(
+                "repo_mismatch", old_scope, ["docs"], "llm-collab", "llm-collab", "SESSION-A"
+            ),
+            "mtime": None,
+            "reason": "repo_mismatch",
+            "packet_repo_targets": ["docs"],
+            "packet_project": "llm-collab",
+        }
+        progress = {watch_inbox.progress_key("SESSION-A", path): entry}
+        # unchanged scope: still terminal
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(progress, old_scope, "llm-collab", "SESSION-A"),
+        )
+        # same session re-registered with a corrected scope: must re-evaluate
+        self.assertEqual(
+            set(),
+            watch_inbox.terminal_refusal_paths(progress, ["docs"], "llm-collab", "SESSION-A"),
+        )
+
+
+class SkipBeforeReadTest(unittest.TestCase):
+    """Codex P2: skipped packets must not be opened or charged against
+    MAX_DISPATCH_INBOX_BYTES, or a large refusal backlog starves eligible mail."""
+
+    def test_skipped_packet_body_is_never_read(self) -> None:
+        import _session_autobridge as sab
+        from unittest.mock import patch
+
+        reads: list = []
+
+        def fake_read(path, limit):
+            reads.append(str(path))
+            name = str(path)
+            if name.endswith("inbox.json"):
+                return b'{"unread": ["Chats/x/skipme.md", "Chats/x/keep.md"]}'
+            return b"---\nproject_id: llm-collab\n---\n"
+
+        with patch.object(sab, "read_regular_file_bounded", side_effect=fake_read), patch.object(
+            sab, "agent_inbox_path", return_value=Path("/tmp/inbox.json")
+        ):
+            sab.bounded_unread_messages("claude", skip_paths={"Chats/x/skipme.md"})
+
+        self.assertFalse(
+            any("skipme" in r for r in reads),
+            "skipped packet body was read and charged against the budget",
+        )
+        self.assertTrue(any("keep" in r for r in reads), "eligible packet was not reached")
