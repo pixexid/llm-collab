@@ -230,6 +230,12 @@ closed an issue nobody intended to close, the second time through the `GH-`
 autolink in a merge commit body, and in both cases the adjacent prose was
 *negated*.
 
+Running this repository's `bin/issue_link_check.py` against llm-collab: pass
+`--gh-autolink` with `--pr` or `--sweep` so `GH-N` references are recognized. The
+flag is intentionally omitted from the portable workflow docs
+(`docs/workflows/commit-push-prs.md`) because other repositories may not define
+the `GH-N` autolink.
+
 ## Requesting Code Review (all workers, every repository)
 
 GitHub Codex review is automatic when a PR is opened or marked ready. **Every PR

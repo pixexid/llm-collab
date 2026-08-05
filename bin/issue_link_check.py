@@ -31,15 +31,17 @@ import sys
 
 # GitHub's closing keywords (https://docs.github.com/.../linking-a-pull-request-to-an-issue).
 CLOSING = r"clos(?:e|es|ed)|fix(?:|es|ed)|resolv(?:e|es|ed)"
-# An issue reference in any of GitHub's forms: bare `#N` (same repo), this repo's
-# `GH-N` autolink (same repo; see AGENTS.md "GitHub Autolink Safety"), a
-# repo-qualified `owner/name#N`, or a full issues URL. The owner/name is captured so
-# qualified/URL forms can be limited to the target repository (a cross-repo
-# `other/repo#N` or URL must NOT match a local issue N). `GH-N` carries no qualifier,
-# so it counts as same-repo like a bare `#N`.
+# An issue reference in any of GitHub's forms: bare `#N` (same repo), a target
+# repo's `GH-N` autolink, a repo-qualified `owner/name#N`, or a full issues URL.
+# The owner/name is captured so qualified/URL forms can be limited to the target
+# repository (a cross-repo `other/repo#N` or URL must NOT match a local issue N).
+# GH-522: `GH-N` is this workspace's autolink shorthand, NOT a property of whatever
+# repo --repo names, so its alternative is tagged `(?P<gh>...)` and `_refs` drops it
+# unless the caller opted the repo in (see `gh_autolink`; AGENTS.md "GitHub Autolink
+# Safety"). With the opt-in it counts as same-repo like a bare `#N`.
 _QUALIFIER = r"(?P<repo>[\w.-]+/[\w.-]+)"
 _REF = re.compile(
-    rf"(?:{_QUALIFIER}#|(?<![\w./-])#|(?<![\w./-])gh-|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/)(\d+)",
+    rf"(?:{_QUALIFIER}#|(?<![\w./-])#|(?P<gh>(?<![\w./-])gh-)|https?://github\.com/(?P<url_repo>[\w.-]+/[\w.-]+)/issues/)(\d+)",
     re.IGNORECASE,
 )
 # A closing keyword standalone (not inside a hyphen/word token like "auto-close")
@@ -53,12 +55,19 @@ MAX_SWEEP_PRS = 60
 MAX_OPEN_ISSUES = 400
 
 
-def _refs(pattern: re.Pattern, text: str, repo: str | None) -> set[int]:
+def _refs(
+    pattern: re.Pattern, text: str, repo: str | None, *, gh_autolink: bool = False
+) -> set[int]:
     """Local issue numbers matched by `pattern`. Bare `#N` is same-repo; a
     repo-qualified or URL form counts only when its owner/name equals `repo`
-    (when `repo` is given)."""
+    (when `repo` is given). A `GH-N` autolink match counts only when the caller
+    opted the target repo in via `gh_autolink` (GH-522); otherwise it is inert
+    text, because a bare `GH-N` is this workspace's shorthand, not a property of
+    whatever repo `--repo` happens to name."""
     out: set[int] = set()
     for m in pattern.finditer(text or ""):
+        if m.group("gh") is not None and not gh_autolink:
+            continue
         qualifier = m.group("repo") or m.group("url_repo")
         number = int(m.groups()[-1])
         if qualifier is None or repo is None or qualifier.lower() == repo.lower():
@@ -66,12 +75,16 @@ def _refs(pattern: re.Pattern, text: str, repo: str | None) -> set[int]:
     return out
 
 
-def closing_refs(text: str, repo: str | None = None) -> set[int]:
-    return _refs(CLOSING_REF, text, repo)
+def closing_refs(
+    text: str, repo: str | None = None, *, gh_autolink: bool = False
+) -> set[int]:
+    return _refs(CLOSING_REF, text, repo, gh_autolink=gh_autolink)
 
 
-def any_refs(text: str, repo: str | None = None) -> set[int]:
-    return _refs(_REF, text, repo)
+def any_refs(
+    text: str, repo: str | None = None, *, gh_autolink: bool = False
+) -> set[int]:
+    return _refs(_REF, text, repo, gh_autolink=gh_autolink)
 
 
 def branch_issue(branch: str) -> int | None:
@@ -79,7 +92,14 @@ def branch_issue(branch: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def classify_pr(title: str, body: str, branch: str, repo: str | None = None) -> dict[str, list[int]]:
+def classify_pr(
+    title: str,
+    body: str,
+    branch: str,
+    repo: str | None = None,
+    *,
+    gh_autolink: bool = False,
+) -> dict[str, list[int]]:
     """Classify a PR's issue links.
 
     Closing is detected in the PR BODY only: GitHub's durable auto-close fires from
@@ -92,10 +112,14 @@ def classify_pr(title: str, body: str, branch: str, repo: str | None = None) -> 
     reported as informational references only (too noisy to treat as the PR's issue,
     and auto-closing them would be wrong).
     """
-    closing = closing_refs(body, repo)
+    closing = closing_refs(body, repo, gh_autolink=gh_autolink)
     b = branch_issue(branch)
     orphan_risk = [b] if (b is not None and b not in closing) else []
-    referenced = sorted(any_refs(f"{title}\n{body}", repo) - closing - set(orphan_risk))
+    referenced = sorted(
+        any_refs(f"{title}\n{body}", repo, gh_autolink=gh_autolink)
+        - closing
+        - set(orphan_risk)
+    )
     return {
         "closing": sorted(closing),
         "orphan_risk": orphan_risk,
@@ -129,10 +153,10 @@ def default_branch(repo: str) -> str:
     return name
 
 
-def check_pr(repo: str, number: int) -> int:
+def check_pr(repo: str, number: int, *, gh_autolink: bool = False) -> int:
     pr = _gh_json(["pr", "view", str(number), "--repo", repo,
                    "--json", "title,body,headRefName,baseRefName,state"])
-    cls = classify_pr(pr.get("title", ""), pr.get("body", ""), pr.get("headRefName", ""), repo)
+    cls = classify_pr(pr.get("title", ""), pr.get("body", ""), pr.get("headRefName", ""), repo, gh_autolink=gh_autolink)
     base = pr.get("baseRefName", "")
     default = default_branch(repo)
     if cls["closing"]:
@@ -164,7 +188,7 @@ def check_pr(repo: str, number: int) -> int:
     return 0
 
 
-def sweep(repo: str) -> int:
+def sweep(repo: str, *, gh_autolink: bool = False) -> int:
     merged = _gh_json(["pr", "list", "--repo", repo, "--state", "merged",
                        "--limit", str(MAX_SWEEP_PRS), "--json", "number,title,body,headRefName"]) or []
     # One bounded call for the open set, then intersect — avoids an N+1 gh lookup.
@@ -184,7 +208,7 @@ def sweep(repo: str) -> int:
         # A merged PR from a gh<N> branch that omitted #N from its body is the exact
         # orphan the pre-merge --pr check flags; the backstop must catch it too, so
         # fold in the branch-declared issue alongside the body references.
-        issues = set(any_refs(text, repo))
+        issues = set(any_refs(text, repo, gh_autolink=gh_autolink))
         branch = branch_issue(pr.get("headRefName", ""))
         if branch is not None:
             issues.add(branch)
@@ -209,9 +233,19 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--pr", type=int, help="check one PR for orphan risk")
     g.add_argument("--sweep", action="store_true", help="find open issues referenced by merged PRs")
     p.add_argument("--strict", action="store_true", help="exit nonzero on orphan risk / found orphans")
+    # GH-522: a bare `GH-N` is this workspace's autolink shorthand, not a property of
+    # whatever repo --repo names, so it is OFF by default (fail-closed). Opt the
+    # resolved repo in when it really defines a `GH-` autolink (e.g. llm-collab).
+    p.add_argument("--gh-autolink", action="store_true",
+                   help="the resolved --repo defines a `GH-N` autolink; count GH-N refs "
+                        "(off by default — a bare GH-N is not assumed for any repo)")
     args = p.parse_args(argv)
     repo = resolve_repo(args.repo)
-    rc = check_pr(repo, args.pr) if args.pr is not None else sweep(repo)
+    rc = (
+        check_pr(repo, args.pr, gh_autolink=args.gh_autolink)
+        if args.pr is not None
+        else sweep(repo, gh_autolink=args.gh_autolink)
+    )
     return rc if args.strict else 0
 
 
