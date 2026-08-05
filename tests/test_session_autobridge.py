@@ -10129,8 +10129,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                     repo_targets=["llm-collab"],
                 ),
             )
+        # GH-539: dispatch now also carries the terminal-refusal skip set.
         dispatch.assert_called_once_with(
-            "SESSION-REPO", project_id="amiga", repo_targets=["llm-collab"]
+            "SESSION-REPO",
+            project_id="amiga",
+            repo_targets=["llm-collab"],
+            skip_paths=set(),
         )
 
     def test_watcher_repo_scope_recheck_blocks_wrong_packet_before_read(self):

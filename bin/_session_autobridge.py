@@ -1853,6 +1853,7 @@ def matching_unread_messages(
     *,
     invocation_repo_targets: Any = None,
     repo_scope_refusals: list[dict] | None = None,
+    skip_paths: set[str] | None = None,
 ) -> list[dict]:
     messages = bounded_unread_messages(str(session["agent_id"]))
     project_id = session.get("project_id")
@@ -1863,6 +1864,12 @@ def matching_unread_messages(
         messages = [m for m in messages if m["frontmatter"].get("chat_id") == chat_id]
     matched_messages: list[dict] = []
     for message in messages:
+        # GH-539: a message whose repo-scope decision is already terminal is
+        # skipped BEFORE the routing check, so the watcher stops re-doing the
+        # work — not just re-logging it. Suppressing only the log left the cost
+        # O(backlog) per poll.
+        if skip_paths and message["path"] in skip_paths:
+            continue
         repo_match, repo_reason = _session_repo_scope_matches(
             session, message, invocation_repo_targets
         )
@@ -3848,6 +3855,7 @@ def dispatch_session(
     *,
     project_id: str | None = None,
     repo_targets: list[str] | None = None,
+    skip_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     session = load_session(session_id)
     if session.get("binding_id"):
@@ -3919,6 +3927,7 @@ def dispatch_session(
         routing_session,
         invocation_repo_targets=repo_targets,
         repo_scope_refusals=repo_scope_refusals,
+        skip_paths=skip_paths,
     ):
         if processed_message_blocks_dispatch(routing_session, message, seen):
             if (

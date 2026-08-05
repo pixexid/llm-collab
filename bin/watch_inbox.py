@@ -217,7 +217,15 @@ def load_refusal_progress(agent_id: str) -> dict:
         # same way as corrupt JSON: progress is an optimisation, never a gate,
         # and a list here would blow up progress.get() in the watcher loop.
         return {}
-    return {k: v for k, v in refused.items() if isinstance(k, str) and isinstance(v, str)}
+    clean: dict = {}
+    for key, value in refused.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, dict) and isinstance(value.get("fp"), str):
+            clean[key] = {"fp": value["fp"], "mtime": value.get("mtime")}
+        elif isinstance(value, str):  # pre-GH-539 shape, still usable
+            clean[key] = {"fp": value, "mtime": None}
+    return clean
 
 
 def save_refusal_progress(agent_id: str, refused: dict) -> None:
@@ -235,6 +243,35 @@ def save_refusal_progress(agent_id: str, refused: dict) -> None:
             tmp.unlink()
         except OSError:
             pass
+
+
+def _packet_mtime(message_path: str) -> float | None:
+    try:
+        return (ROOT / message_path).stat().st_mtime
+    except OSError:
+        return None
+
+
+def terminal_refusal_paths(progress: dict, repo_targets, project_id) -> set[str]:
+    """Paths whose repo-scope refusal is already terminal under the CURRENT
+    subscriber decision AND whose packet file is unchanged. Either side moving
+    re-opens eligibility (AC4): a changed subscriber decision changes the
+    fingerprint, a rerouted packet changes its mtime."""
+    skip: set[str] = set()
+    for path, entry in progress.items():
+        expected = refusal_fingerprint(
+            entry.get("reason", ""),
+            repo_targets,
+            entry.get("packet_repo_targets"),
+            project_id,
+            entry.get("packet_project"),
+        )
+        if entry.get("fp") != expected:
+            continue
+        if entry.get("mtime") != _packet_mtime(path):
+            continue
+        skip.add(path)
+    return skip
 
 
 def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscriber_project, packet_project) -> str:
@@ -289,10 +326,17 @@ def dispatch_autobridge(
         fingerprint = refusal_fingerprint(
             reason, repo_targets, packet_repo_targets, project_id, packet_project
         )
-        if progress.get(path) == fingerprint:
+        existing = progress.get(path) or {}
+        if existing.get("fp") == fingerprint and existing.get("mtime") == _packet_mtime(path):
             stats[reason] = stats.get(reason, 0) + 1
             return False
-        progress[path] = fingerprint
+        progress[path] = {
+            "fp": fingerprint,
+            "mtime": _packet_mtime(path),
+            "reason": reason,
+            "packet_repo_targets": packet_repo_targets,
+            "packet_project": packet_project,
+        }
         stats["_new"] = stats.get("_new", 0) + 1
         return True
 
@@ -332,7 +376,10 @@ def dispatch_autobridge(
             continue
         try:
             result = dispatch_session(
-                session_id, project_id=project_id, repo_targets=repo_targets
+                session_id,
+                project_id=project_id,
+                repo_targets=repo_targets,
+                skip_paths=terminal_refusal_paths(progress, repo_targets, project_id),
             )
         except Exception as error:
             # Isolate per session: one session's failure (e.g. the save_session

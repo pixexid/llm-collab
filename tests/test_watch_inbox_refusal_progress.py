@@ -85,8 +85,11 @@ class RefusalProgressStoreTest(unittest.TestCase):
 
     def test_round_trip(self) -> None:
         with self._patch_dir():
-            watch_inbox.save_refusal_progress("claude", {"a.md": "fp1"})
-            self.assertEqual({"a.md": "fp1"}, watch_inbox.load_refusal_progress("claude"))
+            watch_inbox.save_refusal_progress("claude", {"a.md": {"fp": "fp1", "mtime": None}})
+            self.assertEqual(
+                {"a.md": {"fp": "fp1", "mtime": None}},
+                watch_inbox.load_refusal_progress("claude"),
+            )
 
     def test_missing_store_is_empty_not_an_error(self) -> None:
         with self._patch_dir():
@@ -155,7 +158,12 @@ class RefusalProgressShapeTest(unittest.TestCase):
     def test_non_string_entries_are_dropped(self) -> None:
         with self._patch_dir():
             self._write('{"refused": {"a.md": "fp1", "b.md": 7, "9": null}}')
-            self.assertEqual({"a.md": "fp1"}, watch_inbox.load_refusal_progress("claude"))
+            # A pre-GH-539 bare-string entry stays usable, normalised to the
+            # richer shape; malformed values are dropped.
+            self.assertEqual(
+                {"a.md": {"fp": "fp1", "mtime": None}},
+                watch_inbox.load_refusal_progress("claude"),
+            )
 
 
 class BatchRefusalRoutingInputsTest(unittest.TestCase):
@@ -201,6 +209,67 @@ class BatchRefusalRoutingInputsTest(unittest.TestCase):
         self.assertEqual(1, len(refusals))
         self.assertEqual(["other"], refusals[0]["packet_repo_targets"])
         self.assertEqual("llm-collab", refusals[0]["packet_project"])
+
+class TerminalRefusalSkipsWorkTest(unittest.TestCase):
+    """GH-539 review finding 1 — the one that matters. Suppressing the refusal
+    EVENT while still running matching_unread_messages left the cost O(backlog)
+    per poll. These assert the WORK is skipped, and that AC4 still re-opens."""
+
+    def _entry(self, path, reason="repo_mismatch", packet_repo=None, packet_project=None,
+               repo_targets=None, project_id=None, mtime=None):
+        fp = watch_inbox.refusal_fingerprint(
+            reason, repo_targets, packet_repo, project_id, packet_project
+        )
+        return {
+            path: {
+                "fp": fp,
+                "mtime": mtime,
+                "reason": reason,
+                "packet_repo_targets": packet_repo,
+                "packet_project": packet_project,
+            }
+        }
+
+    def test_terminal_path_is_skipped_under_the_same_decision(self) -> None:
+        path = "Chats/x/nonexistent-so-mtime-is-None.md"
+        progress = self._entry(path, repo_targets=["app"], project_id="llm-collab")
+        skip = watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab")
+        self.assertEqual({path}, skip)
+
+    def test_changed_subscriber_decision_reopens(self) -> None:
+        """AC4, subscriber side: correcting --repo-target must re-evaluate."""
+        path = "Chats/x/nonexistent-so-mtime-is-None.md"
+        progress = self._entry(path, repo_targets=["app"], project_id="llm-collab")
+        skip = watch_inbox.terminal_refusal_paths(progress, ["docs"], "llm-collab")
+        self.assertEqual(set(), skip)
+
+    def test_rerouted_packet_reopens_via_mtime(self) -> None:
+        """AC4, packet side: a rewritten packet changes mtime, so a stored
+        terminal decision no longer suppresses it."""
+        path = "Chats/x/nonexistent-so-mtime-is-None.md"
+        progress = self._entry(path, repo_targets=["app"], project_id="llm-collab", mtime=123.0)
+        skip = watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab")
+        self.assertEqual(set(), skip)
+
+    def test_matching_unread_messages_skips_before_the_routing_check(self) -> None:
+        """The integrated assertion: with the path in skip_paths the repo-scope
+        check is never called, so no work and no refusal is produced."""
+        import _session_autobridge as sab
+        from unittest.mock import patch
+
+        session = {"agent_id": "claude", "project_id": None, "chat_id": None}
+        message = {"path": "Chats/x/a.md", "frontmatter": {}}
+        refusals: list = []
+        with patch.object(sab, "bounded_unread_messages", return_value=[message]), patch.object(
+            sab, "_session_repo_scope_matches"
+        ) as scope:
+            result = sab.matching_unread_messages(
+                session, repo_scope_refusals=refusals, skip_paths={"Chats/x/a.md"}
+            )
+        scope.assert_not_called()
+        self.assertEqual([], result)
+        self.assertEqual([], refusals)
+
 
 if __name__ == "__main__":
     unittest.main()
