@@ -9618,6 +9618,8 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "reason": "route_ambiguous",
                     "packet_repo_targets": message["frontmatter"].get("repo_targets"),
                     "packet_project": message["frontmatter"].get("project_id"),
+                    # GH-539: mtime observed with the parsed bytes
+                    "packet_mtime": message.get("mtime"),
                 }
             ],
             result["repo_scope_refused"],

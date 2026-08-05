@@ -393,7 +393,7 @@ def dispatch_autobridge(
     progress = refusal_progress if refusal_progress is not None else {}
     stats = refusal_stats if refusal_stats is not None else {}
 
-    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None) -> bool:
+    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None, packet_mtime=None) -> bool:
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
         fingerprint = refusal_fingerprint(
@@ -403,7 +403,11 @@ def dispatch_autobridge(
         )
         key = progress_key(session_id, path)
         existing = progress.get(key) or {}
-        if existing.get("fp") == fingerprint and existing.get("mtime") == _packet_mtime(path):
+        # Use the mtime observed WITH the body that produced this decision. A
+        # fresh stat here would certify a version we never examined.
+        observed = packet_mtime if packet_mtime is not None else _packet_mtime(path)
+        existing = progress.get(key) or {}
+        if existing.get("fp") == fingerprint and existing.get("mtime") == observed:
             stats[reason] = stats.get(reason, 0) + 1
             return False
         progress[key] = {
@@ -411,7 +415,7 @@ def dispatch_autobridge(
             "session_repo_targets": repo_targets,
             "session_scope": _stable_targets(session_scope),
             "fp": fingerprint,
-            "mtime": _packet_mtime(path),
+            "mtime": observed,
             "reason": reason,
             "packet_repo_targets": packet_repo_targets,
             "packet_project": packet_project,
@@ -492,6 +496,7 @@ def dispatch_autobridge(
                 packet_repo_targets=refusal.get("packet_repo_targets"),
                 packet_project=refusal.get("packet_project"),
                 session_scope=session_scope,
+                packet_mtime=refusal.get("packet_mtime"),
             ):
                 continue
             emit(
@@ -533,6 +538,7 @@ def dispatch_autobridge(
                 effective_repo_targets = repo_targets
                 message_path = ROOT / action["message_path"]
                 frontmatter: dict = {}
+                observed_mtime = _packet_mtime(action["message_path"])
                 if effective_repo_targets is None:
                     repo_match, repo_reason = True, "unscoped"
                 else:
@@ -555,6 +561,7 @@ def dispatch_autobridge(
                         packet_repo_targets=frontmatter.get("repo_targets"),
                         packet_project=frontmatter.get("project_id"),
                         session_scope=session_scope,
+                        packet_mtime=observed_mtime,
                     ):
                         emit(
                             {

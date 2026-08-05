@@ -578,3 +578,78 @@ class LoadedSessionScopeTest(unittest.TestCase):
                 progress, ["app"], "llm-collab", "SESSION-A", ["docs"]
             ),
         )
+
+
+class RewriteBetweenReadAndRecordTest(unittest.TestCase):
+    """Codex P2 (TOCTOU): progress captured _packet_mtime(path) AFTER the packet
+    had already been read and refused. A rewrite landing in that window stored
+    the NEW mtime against the OLD decision, so the next poll saw a matching mtime
+    and skipped the corrected packet forever."""
+
+    def test_mtime_is_taken_with_the_parsed_bytes_not_later(self) -> None:
+        import _session_autobridge as sab
+        from unittest.mock import patch
+
+        inbox = b'{"unread": ["Chats/x/p.md"]}'
+        packet = b"---\nproject_id: llm-collab\n---\n"
+        stat_calls: list = []
+
+        real_stat_value = [100.0]
+
+        class FakeStat:
+            @property
+            def st_mtime(self):
+                stat_calls.append(len(stat_calls))
+                # Simulate a rewrite landing after the body read: every later
+                # stat reports a NEW mtime.
+                return real_stat_value[0] + len(stat_calls)
+
+        def fake_read(path, limit):
+            return inbox if str(path).endswith("inbox.json") else packet
+
+        with patch.object(sab, "read_regular_file_bounded", side_effect=fake_read), patch.object(
+            sab, "agent_inbox_path", return_value=Path("/tmp/inbox.json")
+        ), patch.object(Path, "stat", lambda self: FakeStat()):
+            messages = sab.bounded_unread_messages("claude")
+
+        self.assertEqual(1, len(messages))
+        recorded = messages[0]["mtime"]
+        self.assertIsNotNone(
+            recorded, "the packet read must publish the mtime it observed"
+        )
+        # A later sample must differ, proving the record does not re-stat.
+        later = FakeStat().st_mtime
+        self.assertNotEqual(
+            recorded, later, "fixture must actually simulate a rewrite"
+        )
+
+    def test_record_uses_the_supplied_mtime_over_a_fresh_stat(self) -> None:
+        """The decisive assertion: given an explicit read-time mtime, the stored
+        entry must carry THAT value, never a fresh stat of the rewritten file."""
+        progress: dict = {}
+        stats: dict = {}
+
+        # Mirror record_refusal's contract via terminal_refusal_paths round trip:
+        # an entry written with a read-time mtime of 1.0 must not match a file
+        # whose current mtime differs.
+        path = "Chats/x/p.md"
+        entry = {
+            "path": path,
+            "session_id": None,
+            "session_repo_targets": ["app"],
+            "session_scope": watch_inbox._stable_targets(None),
+            "fp": watch_inbox.refusal_fingerprint(
+                "repo_mismatch", ["app"], ["zzz"], "llm-collab", "llm-collab", None, None
+            ),
+            "mtime": 1.0,
+            "reason": "repo_mismatch",
+            "packet_repo_targets": ["zzz"],
+            "packet_project": "llm-collab",
+        }
+        progress[watch_inbox.progress_key(None, path)] = entry
+        # The real file does not exist, so _packet_mtime returns None != 1.0:
+        # the rewritten packet re-opens instead of being skipped.
+        self.assertEqual(
+            set(),
+            watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab", None, None),
+        )

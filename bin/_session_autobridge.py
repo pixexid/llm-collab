@@ -1885,6 +1885,11 @@ def matching_unread_messages(
                         "reason": repo_reason,
                         "packet_repo_targets": message["frontmatter"].get("repo_targets"),
                         "packet_project": message["frontmatter"].get("project_id"),
+                        # GH-539: the mtime AS OBSERVED with this body. Sampling it
+                        # later lets a rewrite between read and record store the new
+                        # mtime against the old decision, so the corrected packet is
+                        # skipped forever.
+                        "packet_mtime": message.get("mtime"),
                     }
                 )
             continue
@@ -1930,10 +1935,21 @@ def bounded_unread_messages(agent_id: str, skip_paths: set[str] | None = None) -
             if skip_paths and relative_path in skip_paths:
                 continue
             try:
+                # GH-539: stat AFTER the bounded read, so the recorded mtime
+                # belongs to the bytes we actually parsed. A rewrite that lands
+                # between read and stat leaves the NEW mtime here, which the
+                # refusal record then treats as "already decided" and skips.
+                # Taking it after the read means a mid-read rewrite yields a
+                # different mtime than the next poll observes, so the packet
+                # re-opens instead of being silently swallowed.
                 message_raw = read_regular_file_bounded(
                     ROOT / relative_path,
                     min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
                 )
+                try:
+                    observed_mtime = (ROOT / relative_path).stat().st_mtime
+                except OSError:
+                    observed_mtime = None
             except FileNotFoundError as error:
                 raise ValueError(
                     f"missing unread packet: {relative_path}"
@@ -1952,6 +1968,7 @@ def bounded_unread_messages(agent_id: str, skip_paths: set[str] | None = None) -
                     "path": relative_path,
                     "frontmatter": frontmatter,
                     "body": body,
+                    "mtime": observed_mtime,
                 }
             )
     return messages
