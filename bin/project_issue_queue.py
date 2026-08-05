@@ -415,10 +415,18 @@ def lane_reason(lane: dict) -> str:
         return "needs_refinement"
     if lane.get("needs_acceptance"):
         return "needs_acceptance"
+    if is_coordination_lane(lane):
+        return f"{COORDINATION_LANE_TYPE}:{lane.get('queue_state', 'unknown')}"
     return str(lane.get("queue_state", "unknown"))
 
 
 def lane_next_action(lane: dict) -> str:
+    # A coordination lane is a tracker: it is never selected and never activated,
+    # so it must not advertise an executable next action. Checked before every
+    # other branch — `activate` on a lane that can never be activated is exactly
+    # the "skipped implementation lane" misreading GH-527 AC4 forbids.
+    if is_coordination_lane(lane):
+        return COORDINATION_LANE_TYPE
     if lane.get("needs_refinement"):
         return "refine"
     if lane.get("needs_acceptance"):
@@ -735,9 +743,15 @@ def render_markdown(payload: dict) -> str:
         depends_on = ", ".join(lane.get("depends_on", [])) or "-"
         tier = lane["tier"] if lane.get("tier") is not None else "-"
         notes = str(lane.get("notes", "-")).replace("|", "/")
+        # Mark coordination in the state cell: a reader judges executability from
+        # Queue State, so an unmarked `queued` row reads as an implementation lane
+        # that was passed over rather than one that is never selectable.
+        queue_state = lane["queue_state"]
+        if is_coordination_lane(lane):
+            queue_state = f"{queue_state} ({COORDINATION_LANE_TYPE})"
         lines.append(
             f"| {lane['order']} | GH-{lane['issue']} | {lane['task_id']} | {lane['owner']} | "
-            f"{lane['task_status']} | {lane['queue_state']} | {tier} | {depends_on} | {notes} |"
+            f"{lane['task_status']} | {queue_state} | {tier} | {depends_on} | {notes} |"
         )
 
     return "\n".join(lines) + "\n"

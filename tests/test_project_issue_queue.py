@@ -1225,3 +1225,91 @@ class CoordinationLaneTest(unittest.TestCase):
             self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
         ]}
         self.assertIsNone(project_issue_queue.next_ready_lane(payload))
+
+    def test_v4_no_ready_lane_errors_reports_a_genuine_no_ready_diagnostic(self) -> None:
+        """V4/AC6. The early return at no_ready_lane_errors keys on {active, review};
+        once a coordination lane is excluded from suppression it can sit there
+        looking like work in flight, and the queue would report a healthy
+        'nothing to do' while every executable lane is blocked."""
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertTrue(
+            errors,
+            "a queue whose only non-blocked lane is coordination must not report healthy",
+        )
+
+    def test_v4_active_implementation_lane_still_suppresses_the_diagnostic(self) -> None:
+        """The unchanged direction for V4: a real active lane still means 'work in
+        flight', so no_ready_lane_errors stays quiet. Without this, an
+        always-report mutation would pass the test above."""
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertEqual([], errors)
+
+    def test_v6_coordination_token_survives_the_strict_direct_app_validator(self) -> None:
+        """V6/AC8. llm-collab does not set `ui_ux.direct_app_only`, so validating
+        there proves nothing — the collision would only appear on a strict
+        project. Inject one and check the token on that path.
+
+        The second half is what makes this non-vacuous: `coordination-spec` MUST
+        be rejected by the same fixture. Without it, a fixture where the policy
+        was simply off would pass the first assertion and prove nothing at all.
+        """
+        import task_contract
+
+        strict_project = {"id": "strictproj", "ui_ux": {"direct_app_only": True}}
+
+        def errors_for(lane_type):
+            frontmatter = {
+                "project_id": "strictproj",
+                "status": "open",
+                "lane_type": lane_type,
+            }
+            errors, _ = task_contract.validate_direct_app_policy(
+                frontmatter, project_override=strict_project
+            )
+            return errors
+
+        self.assertEqual(
+            [], errors_for("coordination"),
+            "bare `coordination` must be accepted under direct_app_only",
+        )
+        self.assertTrue(
+            errors_for("coordination-spec"),
+            "the fixture's policy must actually be strict, or the check above is vacuous",
+        )
+
+    def test_ac4_coordination_lane_never_advertises_an_executable_next_action(self) -> None:
+        """AC4. `activate` on a lane that can never be activated reads as an
+        implementation lane someone skipped."""
+        coordination = self._lane(1, 85, "ready", "coordination")
+        ordinary = self._lane(2, 93, "ready")
+        self.assertEqual("coordination", project_issue_queue.lane_next_action(coordination))
+        self.assertEqual("activate", project_issue_queue.lane_next_action(ordinary))
+
+    def test_ac4_show_queue_and_markdown_mark_the_coordination_row(self) -> None:
+        """AC4 at both rendered surfaces. show_queue must not print
+        `next=activate`, and the markdown row must carry the marker in the cell a
+        reader uses to judge executability."""
+        payload = {"project_id": "llm-collab", "project_name": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        shown = project_issue_queue.show_queue(payload)
+        coordination_row = [line for line in shown.splitlines() if "GH-85" in line][0]
+        ordinary_row = [line for line in shown.splitlines() if "GH-93" in line][0]
+        self.assertIn("next=coordination", coordination_row)
+        self.assertNotIn("next=activate", coordination_row)
+        self.assertIn("next=activate", ordinary_row)
+
+        markdown = project_issue_queue.render_markdown(payload)
+        md_coordination = [line for line in markdown.splitlines() if "GH-85" in line][0]
+        md_ordinary = [line for line in markdown.splitlines() if "GH-93" in line][0]
+        self.assertIn("(coordination)", md_coordination)
+        self.assertNotIn("(coordination)", md_ordinary)
