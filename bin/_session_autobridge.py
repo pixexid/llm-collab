@@ -1935,21 +1935,13 @@ def bounded_unread_messages(agent_id: str, skip_paths: set[str] | None = None) -
             if skip_paths and relative_path in skip_paths:
                 continue
             try:
-                # GH-539: stat AFTER the bounded read, so the recorded mtime
-                # belongs to the bytes we actually parsed. A rewrite that lands
-                # between read and stat leaves the NEW mtime here, which the
-                # refusal record then treats as "already decided" and skips.
-                # Taking it after the read means a mid-read rewrite yields a
-                # different mtime than the next poll observes, so the packet
-                # re-opens instead of being silently swallowed.
-                message_raw = read_regular_file_bounded(
+                # GH-539: bytes and identity from ONE descriptor. A separate
+                # stat after the read can observe a rewritten file and would
+                # certify content that was never parsed.
+                message_raw, observed_mtime = read_regular_file_bounded_with_identity(
                     ROOT / relative_path,
                     min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
                 )
-                try:
-                    observed_mtime = (ROOT / relative_path).stat().st_mtime
-                except OSError:
-                    observed_mtime = None
             except FileNotFoundError as error:
                 raise ValueError(
                     f"missing unread packet: {relative_path}"
@@ -3001,7 +2993,20 @@ class active_read_budget:
         return False
 
 
-def read_regular_file_bounded(path: Path, limit: int) -> bytes:
+def read_regular_file_bounded_with_identity(path: Path, limit: int) -> tuple[bytes, float | None]:
+    """Bytes plus the mtime from the SAME descriptor that produced them (GH-539).
+
+    read()-then-stat() is two operations on two possibly-different objects: a rewrite
+    landing between them yields metadata describing bytes the caller never parsed.
+    Anything that records "this content had this identity" must take both from one
+    descriptor, which is what the fstat below already does.
+    """
+    identity: dict = {}
+    payload = read_regular_file_bounded(path, limit, _identity_out=identity)
+    return payload, identity.get("mtime")
+
+
+def read_regular_file_bounded(path: Path, limit: int, *, _identity_out: dict | None = None) -> bytes:
     """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
 
     Every untrusted read in this codebase needs the same four things and gets them wrong
@@ -3021,6 +3026,10 @@ def read_regular_file_bounded(path: Path, limit: int) -> bytes:
         raise UnreadableFile(f"cannot open {path}: {error}") from error
     try:
         info = os.fstat(descriptor)
+        if _identity_out is not None:
+            # Same descriptor, same object: this mtime describes exactly the bytes
+            # returned below.
+            _identity_out["mtime"] = info.st_mtime
         if not stat.S_ISREG(info.st_mode):
             raise UnreadableFile(f"{path} is not a regular file; refusing to read it")
         if info.st_size > limit:

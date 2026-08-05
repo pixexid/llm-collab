@@ -516,7 +516,7 @@ class SkipBeforeReadTest(unittest.TestCase):
 
         reads: list = []
 
-        def fake_read(path, limit):
+        def fake_read(path, limit, **kwargs):
             reads.append(str(path))
             name = str(path)
             if name.endswith("inbox.json"):
@@ -581,46 +581,56 @@ class LoadedSessionScopeTest(unittest.TestCase):
 
 
 class RewriteBetweenReadAndRecordTest(unittest.TestCase):
-    """Codex P2 (TOCTOU): progress captured _packet_mtime(path) AFTER the packet
-    had already been read and refused. A rewrite landing in that window stored
-    the NEW mtime against the OLD decision, so the next poll saw a matching mtime
-    and skipped the corrected packet forever."""
+    """Codex P2 (TOCTOU): read()-then-stat() is two operations on two possibly
+    different objects. A rewrite landing between them yields a STABLE new mtime
+    that the next poll also observes, so the corrected packet is skipped forever.
 
-    def test_mtime_is_taken_with_the_parsed_bytes_not_later(self) -> None:
+    The earlier version of this test incremented every fake stat call, so the
+    "next poll" never saw a stable value — it could not model the actual failure.
+    """
+
+    def test_identity_comes_from_the_read_descriptor_not_a_later_stat(self) -> None:
         import _session_autobridge as sab
         from unittest.mock import patch
 
-        inbox = b'{"unread": ["Chats/x/p.md"]}'
-        packet = b"---\nproject_id: llm-collab\n---\n"
-        stat_calls: list = []
+        READ_MTIME, REWRITTEN_MTIME = 100.0, 200.0
 
-        real_stat_value = [100.0]
+        class FakeInfo:
+            st_mode = 0o100644
+            st_size = 64
+            st_mtime = READ_MTIME
 
-        class FakeStat:
-            @property
-            def st_mtime(self):
-                stat_calls.append(len(stat_calls))
-                # Simulate a rewrite landing after the body read: every later
-                # stat reports a NEW mtime.
-                return real_stat_value[0] + len(stat_calls)
+        def fake_open(path, flags):
+            return 99
 
-        def fake_read(path, limit):
-            return inbox if str(path).endswith("inbox.json") else packet
+        reads = [b"---\nproject_id: llm-collab\n---\n", b""]
 
-        with patch.object(sab, "read_regular_file_bounded", side_effect=fake_read), patch.object(
-            sab, "agent_inbox_path", return_value=Path("/tmp/inbox.json")
-        ), patch.object(Path, "stat", lambda self: FakeStat()):
-            messages = sab.bounded_unread_messages("claude")
+        def fake_read(fd, n):
+            return reads.pop(0) if reads else b""
 
-        self.assertEqual(1, len(messages))
-        recorded = messages[0]["mtime"]
-        self.assertIsNotNone(
-            recorded, "the packet read must publish the mtime it observed"
+        # Every path.stat() AFTER the read reports the rewritten value, and keeps
+        # reporting it — a stable observation the next poll would also see.
+        class StableRewrittenStat:
+            st_mtime = REWRITTEN_MTIME
+
+        with patch.object(sab.os, "open", side_effect=fake_open), patch.object(
+            sab.os, "fstat", return_value=FakeInfo()
+        ), patch.object(sab.os, "read", side_effect=fake_read), patch.object(
+            sab.os, "close"
+        ), patch.object(Path, "stat", lambda self: StableRewrittenStat()):
+            payload, identity = sab.read_regular_file_bounded_with_identity(
+                Path("/tmp/p.md"), 4096
+            )
+
+        self.assertEqual(
+            READ_MTIME,
+            identity,
+            "identity must come from the fstat on the read descriptor, not a later stat",
         )
-        # A later sample must differ, proving the record does not re-stat.
-        later = FakeStat().st_mtime
         self.assertNotEqual(
-            recorded, later, "fixture must actually simulate a rewrite"
+            REWRITTEN_MTIME,
+            identity,
+            "a stable post-read rewrite must not be certified as the parsed version",
         )
 
     def test_record_uses_the_supplied_mtime_over_a_fresh_stat(self) -> None:
