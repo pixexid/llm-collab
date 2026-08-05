@@ -162,7 +162,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `display_name` | string | Human-readable name |
 | `repos` | object | Map of repo ID → path (relative to `projects_root` or absolute) |
 | `default_branch_base` | string | Default git ref for worktree creation |
-| `preflight_command` | string[] or null | Command to validate before task integration |
+| `preflight_command` | string[] or null | Complete project-owned argv to validate before task integration; shared callers execute it exactly and append no project-specific arguments |
 | `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |

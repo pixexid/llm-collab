@@ -65,7 +65,7 @@ When defining projects, add at minimum:
     "docs": "amiga_house_cleaning_company_docs"
   },
   "default_branch_base": "main",
-  "preflight_command": ["pnpm", "preflight", "--json"],
+  "preflight_command": ["pnpm", "preflight", "--json", "--browser-check", "skip"],
   "github": {
     "enabled": true,
     "repo": "pixexid/amiga",
@@ -73,6 +73,11 @@ When defining projects, add at minimum:
   }
 }
 ```
+
+Existing installations registered before this change must update their
+gitignored `projects.json` entry as well: add `"--browser-check", "skip"` to
+the Amiga project's `preflight_command`. New registrations should carry the
+same two project-owned tokens; shared callers no longer add them.
 
 ---
 
