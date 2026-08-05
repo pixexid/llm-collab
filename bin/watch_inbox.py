@@ -209,7 +209,15 @@ def load_refusal_progress(agent_id: str) -> dict:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
-    return data.get("refused", {}) if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    refused = data.get("refused")
+    if not isinstance(refused, dict):
+        # Valid JSON of the wrong SHAPE (e.g. {"refused": []}) must degrade the
+        # same way as corrupt JSON: progress is an optimisation, never a gate,
+        # and a list here would blow up progress.get() in the watcher loop.
+        return {}
+    return {k: v for k, v in refused.items() if isinstance(k, str) and isinstance(v, str)}
 
 
 def save_refusal_progress(agent_id: str, refused: dict) -> None:
@@ -345,7 +353,12 @@ def dispatch_autobridge(
             )
             continue
         for refusal in result.get("repo_scope_refused", []):
-            if not record_refusal(refusal["path"], refusal["reason"]):
+            if not record_refusal(
+                refusal["path"],
+                refusal["reason"],
+                packet_repo_targets=refusal.get("packet_repo_targets"),
+                packet_project=refusal.get("packet_project"),
+            ):
                 continue
             emit(
                 {

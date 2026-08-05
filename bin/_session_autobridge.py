@@ -1868,8 +1868,17 @@ def matching_unread_messages(
         )
         if not repo_match:
             if repo_scope_refusals is not None:
+                # GH-539: carry the packet's routing inputs so a terminal-refusal
+                # fingerprint can distinguish "same decision" from "packet rerouted".
+                # Without these the fingerprint sees None and a corrected packet
+                # stays suppressed under the same subscriber decision.
                 repo_scope_refusals.append(
-                    {"path": message["path"], "reason": repo_reason}
+                    {
+                        "path": message["path"],
+                        "reason": repo_reason,
+                        "packet_repo_targets": message["frontmatter"].get("repo_targets"),
+                        "packet_project": message["frontmatter"].get("project_id"),
+                    }
                 )
             continue
         target_match, _ = message_targets_session(

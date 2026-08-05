@@ -118,5 +118,89 @@ class RefusalProgressStoreTest(unittest.TestCase):
             )
 
 
+
+class RefusalProgressShapeTest(unittest.TestCase):
+    """GH-539 review finding 3: valid JSON of the WRONG SHAPE must degrade like
+    corrupt JSON. `{"refused": []}` previously returned a list, and the watcher
+    loop then called .get() on it."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _patch_dir(self):
+        from unittest.mock import patch
+
+        return patch.object(watch_inbox, "agent_dir", return_value=self.root)
+
+    def _write(self, payload: str) -> None:
+        (self.root / "watcher-refusal-progress.json").write_text(payload)
+
+    def test_refused_as_list_degrades_to_empty_mapping(self) -> None:
+        with self._patch_dir():
+            self._write('{"refused": []}')
+            result = watch_inbox.load_refusal_progress("claude")
+            self.assertEqual({}, result)
+            self.assertIsInstance(result, dict)
+            self.assertIsNone(result.get("anything"))
+
+    def test_top_level_list_degrades_to_empty_mapping(self) -> None:
+        with self._patch_dir():
+            self._write('["a.md"]')
+            self.assertEqual({}, watch_inbox.load_refusal_progress("claude"))
+
+    def test_non_string_entries_are_dropped(self) -> None:
+        with self._patch_dir():
+            self._write('{"refused": {"a.md": "fp1", "b.md": 7, "9": null}}')
+            self.assertEqual({"a.md": "fp1"}, watch_inbox.load_refusal_progress("claude"))
+
+
+class BatchRefusalRoutingInputsTest(unittest.TestCase):
+    """GH-539 review finding 2: batch refusals must carry the packet's routing
+    inputs, or AC4 silently fails for that path — a rerouted packet keeps the same
+    fingerprint and stays suppressed."""
+
+    def test_packet_reroute_changes_the_fingerprint(self) -> None:
+        stale = watch_inbox.refusal_fingerprint(
+            "project_mismatch", ["app"], ["other"], "llm-collab", "amiga"
+        )
+        rerouted = watch_inbox.refusal_fingerprint(
+            "project_mismatch", ["app"], ["app"], "llm-collab", "llm-collab"
+        )
+        self.assertNotEqual(stale, rerouted)
+
+    def test_missing_packet_inputs_collapse_to_one_fingerprint(self) -> None:
+        """Documents WHY finding 2 mattered: without the carried fields every
+        packet fingerprints identically, so reroutes cannot re-open."""
+        a = watch_inbox.refusal_fingerprint("project_mismatch", ["app"], None, "llm-collab", None)
+        b = watch_inbox.refusal_fingerprint("project_mismatch", ["app"], None, "llm-collab", None)
+        self.assertEqual(a, b)
+
+    def test_matching_unread_messages_records_packet_routing_inputs(self) -> None:
+        import _session_autobridge as sab
+
+        session = {"agent_id": "claude", "project_id": "llm-collab", "chat_id": None}
+        message = {
+            "path": "Chats/x/2026-08-05T00-00-00_to-claude_x.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["other"],
+            },
+        }
+        refusals: list[dict] = []
+        from unittest.mock import patch
+
+        with patch.object(sab, "bounded_unread_messages", return_value=[message]), patch.object(
+            sab, "_session_repo_scope_matches", return_value=(False, "repo_mismatch")
+        ):
+            sab.matching_unread_messages(session, repo_scope_refusals=refusals)
+
+        self.assertEqual(1, len(refusals))
+        self.assertEqual(["other"], refusals[0]["packet_repo_targets"])
+        self.assertEqual("llm-collab", refusals[0]["packet_project"])
+
 if __name__ == "__main__":
     unittest.main()

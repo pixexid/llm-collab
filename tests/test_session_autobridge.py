@@ -9607,8 +9607,19 @@ class SessionAutobridgeTest(unittest.TestCase):
         ), patch.object(session_autobridge_lib, "append_event") as append_event:
             result = session_autobridge_lib.dispatch_session("SESSION-REFUSAL")
 
+        # GH-539: the refusal payload now also carries the packet's routing
+        # inputs so a terminal-refusal fingerprint can tell "same decision" from
+        # "packet rerouted". Asserting them here keeps the shape pinned rather
+        # than loosening the assertion.
         self.assertEqual(
-            [{"path": message["path"], "reason": "route_ambiguous"}],
+            [
+                {
+                    "path": message["path"],
+                    "reason": "route_ambiguous",
+                    "packet_repo_targets": message["frontmatter"].get("repo_targets"),
+                    "packet_project": message["frontmatter"].get("project_id"),
+                }
+            ],
             result["repo_scope_refused"],
         )
         self.assertTrue(
