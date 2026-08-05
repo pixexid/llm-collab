@@ -361,16 +361,32 @@ Use the mandatory one-pass GitHub Codex gate:
   permission for a second bot pass: locally prove the amended head or remain blocked.
   An ambiguous or removed reaction is non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
+- a connector-authored `+1` (`thumbs-up`) **at PR level, with no manual request
+  comment in existence**, is terminal CLEAN for the PR's automatic first pass.
+  Verify all five: the actor is the connector, that the automatic pass ran for this
+  PR, that the reaction post-dates the push of the current head, that the head has
+  not been amended since, and that **every other artifact class is empty** — no
+  review object, no top-level comment, no inline thread. That last condition is the
+  safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
+  what keeps this model from reading a pass over unresolved threads
+  (llm-collab#317). Any head change voids it, and it grants no second bot pass —
+  locally prove the amended head or remain blocked. A clean automatic `+1` never
+  justifies a second review request. The connector defines this protocol itself: if
+  it has suggestions it comments, otherwise it reacts `+1`. This model exists
+  because v9/v11 made the automatic pass primary while the two models above both
+  presuppose a manual request comment to carry the reaction; without it the
+  connector has nowhere to put a clean verdict but PR level, and requiring a posted
+  text review would deadlock every clean automatic pass
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
   mandatory final-head request, required local exact-head verification, mutation and
   verification evidence, and settle plus adjudication. Requiring a posted text
   review for Tier A would deadlock whenever the connector's clean protocol is
   reaction-only, and the request plus a connector-authored `+1` is already a durable
   GitHub artifact
-- the clean verdict and request-comment `+1` are the only two connector-authored
-  clean signal models. A completed non-clean review becomes a third terminal
-  gate outcome only after every thread it initiated has the accepted
-  dispositions defined below; nothing else in
+- the clean verdict, the request-comment `+1` and the automatic PR-level `+1` are
+  the only three connector-authored clean signal models. A completed non-clean
+  review becomes a fourth terminal gate outcome only after every thread it
+  initiated has the accepted dispositions defined below; nothing else in
   [the reviewed artifact set](#reviewed-artifact-set) is terminal
 - **a connector review body that lists no findings is not a clean verdict.** The
   connector posts its findings as inline review threads, and the review body can be
@@ -573,10 +589,20 @@ Codex review gate as complete when any of these holds:
   has **not been edited** since the reaction was left. The last two are not optional
   refinements: GitHub preserves reactions across an edit, so a request edited to swap
   an old SHA for the current one carries a `+1` for a review of the *old* head and the
-  first four checks all pass. A `+1` attributable only by timestamp, or sitting on any
-  other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
+  first four checks all pass. Within **this** model a `+1` attributable only by timestamp,
+  or sitting on any other artifact, is **not** terminal — the automatic model below is the
+  only PR-level exception, and it carries its own five conditions. That reaction is
+  terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict,
+  or
+- a connector-authored `+1` sits **at PR level** with no manual request comment in
+  existence, the automatic pass ran for this PR, the reaction post-dates the push of the
+  current head, the head has not been amended since, and **every other artifact class is
+  empty** — no review object, no top-level comment, no inline thread. A `+1` alongside any
+  finding artifact is not terminal. This is the automatic first pass's clean shape: the
+  connector comments when it has suggestions and reacts `+1` when it does not. It receives
+  the same settle and full re-read as a text verdict, and grants no second bot pass,
   or
 - the connector completed the PR's first pass clean on a prior OID (by text
   verdict or request-comment `+1`), and the amended current head has complete

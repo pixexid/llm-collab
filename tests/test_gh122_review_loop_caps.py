@@ -461,11 +461,41 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "a bare `eyes` reaction or the request comment itself is never a",
                 sources["review_policy"],
             )
+            # GH-549: a third clean model was added for the automatic pass, so the
+            # count moved 2 -> 3 and the adjudicated non-clean review moved 3 -> 4.
+            # The set stays CLOSED at the new count -- that exclusivity, not the
+            # number itself, is what this test defends.
             self.assertIn(
-                "only two connector-authored clean signal models",
+                "only three connector-authored clean signal models",
                 sources["review_policy"],
             )
-            self.assertIn("third terminal gate outcome", sources["review_policy"])
+            self.assertIn("fourth terminal gate outcome", sources["review_policy"])
+            # Every condition of the automatic model is pinned individually. A later
+            # edit that drops one would leave a `+1` terminal on weaker evidence than
+            # the model was adjudicated on, which is the failure this guards.
+            self.assertIn(
+                "at PR level, with no manual request comment in existence",
+                sources["review_policy"],
+            )
+            for condition in (
+                "the actor is the connector",
+                "that the automatic pass ran for this",
+                "that the reaction post-dates the push of the current head",
+                "that the head has not been amended since",
+                "every other artifact class is empty",
+            ):
+                self.assertIn(condition, sources["review_policy"])
+            # The empty-findings clause is the whole safeguard against the #317
+            # shape (clean-looking signal beside unresolved P1 threads), so pin the
+            # consequence, not just the condition.
+            self.assertIn(
+                "a `+1` alongside any finding artifact is **not** terminal",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "A clean automatic `+1` never justifies a second review request",
+                sources["review_policy"],
+            )
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
