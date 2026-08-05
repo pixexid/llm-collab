@@ -477,14 +477,41 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "at PR level, with no manual request comment in existence",
                 sources["review_policy"],
             )
+            self.assertIn("Verify all four", sources["review_policy"])
             for condition in (
                 "the actor is the connector",
-                "that the automatic pass ran for this",
                 "that the reaction post-dates the push of the current head",
                 "that the head has not been amended since",
                 "every other artifact class is empty",
             ):
                 self.assertIn(condition, sources["review_policy"])
+            # The model must NOT require separate proof that the automatic pass
+            # ran: on a clean pass the reaction is the only artifact the connector
+            # emits, so such a condition is circular and unsatisfiable. The
+            # adjudicated resolution is to define the reaction AS that artifact.
+            self.assertIn(
+                "That reaction is itself the automatic pass's clean artifact",
+                sources["review_policy"],
+            )
+            self.assertNotIn(
+                "that the automatic pass ran for this", sources["review_policy"]
+            )
+            # The model has to be reachable from every wait-gate path, not only the
+            # two enumerations that define it. A precedence rule that waits for a
+            # review object holds every clean automatic PR forever.
+            self.assertIn(
+                "pending until a clean review, a valid automatic PR-level `+1`",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "hold until the bot returns a terminal review or a valid automatic "
+                "PR-level `+1`",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "valid fallback-request `+1`, valid automatic PR-level `+1`",
+                sources["review_policy"],
+            )
             # The empty-findings clause is the whole safeguard against the #317
             # shape (clean-looking signal beside unresolved P1 threads), so pin the
             # consequence, not just the condition.
