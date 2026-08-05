@@ -60,9 +60,11 @@ class RefusalProgressStoreTest(unittest.TestCase):
             entry = {
                 "fp": "fp1",
                 "mtime": None,
+                "session_id": None,
                 "reason": "repo_mismatch",
                 "packet_repo_targets": ["other"],
                 "packet_project": "amiga",
+                "session_id": None,
             }
             watch_inbox.save_refusal_progress("claude", {"a.md": entry})
             self.assertEqual({"a.md": entry}, watch_inbox.load_refusal_progress("claude"))
@@ -144,6 +146,7 @@ class RefusalProgressShapeTest(unittest.TestCase):
                         "reason": "",
                         "packet_repo_targets": None,
                         "packet_project": None,
+                        "session_id": None,
                     }
                 },
                 watch_inbox.load_refusal_progress("claude"),
@@ -211,6 +214,7 @@ class TerminalRefusalSkipsWorkTest(unittest.TestCase):
                 "reason": reason,
                 "packet_repo_targets": packet_repo,
                 "packet_project": packet_project,
+                "session_id": None,
             }
         }
 
@@ -287,6 +291,7 @@ class RestartRoundTripTest(unittest.TestCase):
                 "reason": reason,
                 "packet_repo_targets": packet_repo,
                 "packet_project": packet_project,
+                "session_id": None,
             }
         }
         # skips before any restart
@@ -315,6 +320,7 @@ class RestartRoundTripTest(unittest.TestCase):
                 "reason": "repo_mismatch",
                 "packet_repo_targets": ["other"],
                 "packet_project": "amiga",
+                "session_id": None,
             }
         }
         with self._patch_dir():
@@ -323,6 +329,67 @@ class RestartRoundTripTest(unittest.TestCase):
         self.assertEqual(
             set(), watch_inbox.terminal_refusal_paths(reloaded, ["docs"], "llm-collab")
         )
+
+
+class BotReviewRegressionsTest(unittest.TestCase):
+    """PR #542 bot findings, all three real and all three mine."""
+
+    def test_refusal_from_one_session_does_not_skip_another(self) -> None:
+        """P1: one agent, two sessions, different repo scopes. A packet refused by
+        the `app` session must NOT be skipped before the `docs` session evaluates
+        it, or the message is stranded unread until mtime changes."""
+        path = "Chats/x/nonexistent.md"
+        fp_app = watch_inbox.refusal_fingerprint(
+            "repo_mismatch", ["app"], ["docs"], "llm-collab", "llm-collab", "SESSION-APP"
+        )
+        progress = {
+            path: {
+                "fp": fp_app,
+                "mtime": None,
+                "reason": "repo_mismatch",
+                "packet_repo_targets": ["docs"],
+                "packet_project": "llm-collab",
+                "session_id": "SESSION-APP",
+            }
+        }
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab", "SESSION-APP"),
+        )
+        self.assertEqual(
+            set(),
+            watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab", "SESSION-DOCS"),
+        )
+
+    def test_malformed_packet_repo_targets_do_not_raise(self) -> None:
+        """P2: a packet carrying [1, \"app\"] made sorted() raise TypeError, which
+        escaped the per-session handler and stalled the whole poll."""
+        fp = watch_inbox.refusal_fingerprint(
+            "repo_mismatch", ["app"], [1, "app"], "llm-collab", "amiga", "S"
+        )
+        self.assertIsInstance(fp, str)
+        same = watch_inbox.refusal_fingerprint(
+            "repo_mismatch", ["app"], ["app", 1], "llm-collab", "amiga", "S"
+        )
+        self.assertEqual(fp, same)  # still order-insensitive
+
+    def test_oversized_progress_store_degrades_to_empty(self) -> None:
+        """P2: an oversized store must not stall the watcher before it reaches the
+        durable inbox."""
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            big = '{"refused": {' + ",".join(
+                f'"p{i}.md": "x"' for i in range(120000)
+            ) + "}}"
+            (root / "watcher-refusal-progress.json").write_text(big)
+            self.assertGreater(
+                len(big.encode()), watch_inbox.MAX_REFUSAL_PROGRESS_BYTES
+            )
+            with patch.object(watch_inbox, "agent_dir", return_value=root):
+                self.assertEqual({}, watch_inbox.load_refusal_progress("claude"))
 
 
 if __name__ == "__main__":

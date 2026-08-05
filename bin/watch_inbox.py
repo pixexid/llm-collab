@@ -198,11 +198,25 @@ def refusal_progress_path(agent_id: str) -> Path:
     return agent_dir(agent_id) / "watcher-refusal-progress.json"
 
 
+MAX_REFUSAL_PROGRESS_BYTES = 1 << 20  # 1 MiB, mirrors the registry read budget
+
+
 def load_refusal_progress(agent_id: str) -> dict:
     path = refusal_progress_path(agent_id)
     try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+        # Bounded read: an oversized store must degrade to an empty cache, never
+        # stall the watcher before it reaches the durable inbox. Progress is an
+        # optimisation; the inbox is the job.
+        if path.stat().st_size > MAX_REFUSAL_PROGRESS_BYTES:
+            return {}
+        raw = path.read_text()
+    except OSError:
+        return {}
+    if len(raw.encode("utf-8")) > MAX_REFUSAL_PROGRESS_BYTES:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
         return {}
     if not isinstance(data, dict):
         return {}
@@ -234,6 +248,9 @@ def load_refusal_progress(agent_id: str) -> dict:
                 "packet_project": packet_project
                 if isinstance(packet_project, str) or packet_project is None
                 else None,
+                "session_id": value.get("session_id")
+                if isinstance(value.get("session_id"), str)
+                else None,
             }
         elif isinstance(value, str):  # pre-GH-539 shape: fingerprint only
             clean[key] = {
@@ -242,6 +259,7 @@ def load_refusal_progress(agent_id: str) -> dict:
                 "reason": "",
                 "packet_repo_targets": None,
                 "packet_project": None,
+                "session_id": None,
             }
     return clean
 
@@ -270,7 +288,7 @@ def _packet_mtime(message_path: str) -> float | None:
         return None
 
 
-def terminal_refusal_paths(progress: dict, repo_targets, project_id) -> set[str]:
+def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id: str | None = None) -> set[str]:
     """Paths whose repo-scope refusal is already terminal under the CURRENT
     subscriber decision AND whose packet file is unchanged. Either side moving
     re-opens eligibility (AC4): a changed subscriber decision changes the
@@ -283,6 +301,9 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id) -> set[str]
             entry.get("packet_repo_targets"),
             project_id,
             entry.get("packet_project"),
+            # The ASKING session, not the stored one: a decision made by another
+            # session must not satisfy this session's check (P1).
+            session_id,
         )
         if entry.get("fp") != expected:
             continue
@@ -292,16 +313,31 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id) -> set[str]
     return skip
 
 
-def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscriber_project, packet_project) -> str:
+def _stable_targets(value):
+    """Order-insensitive, type-safe. A malformed packet can carry a mixed list
+    (e.g. [1, "app"]); sorting that raises TypeError, which would escape the
+    per-session handler and stall the whole poll on one bad packet."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return sorted(repr(item) for item in value)
+    return repr(value)
+
+
+def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscriber_project, packet_project, session_id: str | None = None) -> str:
     """Bind terminality to the ROUTING DECISION, not just the path, so corrected
     routing re-opens eligibility instead of suppressing the message forever."""
     payload = json.dumps(
         {
             "reason": reason,
-            "repo_targets": sorted(repo_targets) if repo_targets else None,
-            "packet_repo_targets": sorted(packet_repo_targets) if isinstance(packet_repo_targets, list) else packet_repo_targets,
+            "repo_targets": _stable_targets(repo_targets),
+            "packet_repo_targets": _stable_targets(packet_repo_targets),
             "subscriber_project": subscriber_project,
             "packet_project": packet_project,
+            # P1: a refusal is a decision made by ONE session's repo scope. Without
+            # this, a packet refused by the `app` session would be skipped before
+            # the `docs` session ever evaluated it, stranding the message.
+            "session_id": session_id,
         },
         sort_keys=True,
     )
@@ -325,7 +361,8 @@ def dispatch_autobridge(
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
         fingerprint = refusal_fingerprint(
-            reason, repo_targets, packet_repo_targets, project_id, packet_project
+            reason, repo_targets, packet_repo_targets, project_id, packet_project,
+            session_id,
         )
         existing = progress.get(path) or {}
         if existing.get("fp") == fingerprint and existing.get("mtime") == _packet_mtime(path):
@@ -337,6 +374,7 @@ def dispatch_autobridge(
             "reason": reason,
             "packet_repo_targets": packet_repo_targets,
             "packet_project": packet_project,
+            "session_id": session_id,
         }
         stats["_new"] = stats.get("_new", 0) + 1
         return True
@@ -380,7 +418,9 @@ def dispatch_autobridge(
                 session_id,
                 project_id=project_id,
                 repo_targets=repo_targets,
-                skip_paths=terminal_refusal_paths(progress, repo_targets, project_id),
+                skip_paths=terminal_refusal_paths(
+                    progress, repo_targets, project_id, session_id
+                ),
             )
         except Exception as error:
             # Isolate per session: one session's failure (e.g. the save_session
