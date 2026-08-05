@@ -26,6 +26,8 @@ DEFAULT_PM2_TIMEOUT_SECONDS = 15
 PM2_JLIST_MAX_BYTES = 16 * 1024 * 1024
 PM2_JLIST_MAX_RECORDS = 10_000
 PM2_LIVE_STATUSES = frozenset({"online", "launching", "stopping", "waiting restart"})
+PM2_READINESS_TIMEOUT_SECONDS = 10.0
+PM2_READINESS_POLL_SECONDS = 0.25
 
 
 class DeployError(RuntimeError):
@@ -273,6 +275,31 @@ def reconcile_pm2(
     pm2_run(["startOrRestart", str(target / "pm2" / "ecosystem.config.cjs"), "--update-env"])
 
 
+def _process_is_ready(record: dict) -> bool:
+    environment = record.get("pm2_env")
+    return (
+        isinstance(environment, dict)
+        and environment.get("status") == "online"
+        and all(environment.get(field) is not None for field in ("pm_cwd", "script", "args"))
+    )
+
+
+def wait_for_managed_readiness(
+    owned_names: frozenset[str],
+    definitions: dict[str, dict],
+) -> dict[str, dict]:
+    deadline = time.monotonic() + PM2_READINESS_TIMEOUT_SECONDS
+    expected = set(definitions)
+    while True:
+        actual = managed_processes(pm2_jlist(), owned_names)
+        if expected.issubset(actual) and all(_process_is_ready(actual[name]) for name in expected):
+            return actual
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DeployError("PM2 managed process metadata did not become ready before the deadline")
+        time.sleep(min(PM2_READINESS_POLL_SECONDS, remaining))
+
+
 def verify_deployment(
     target: Path,
     head: str,
@@ -283,7 +310,7 @@ def verify_deployment(
         raise DeployError(f"target head does not match deployed head {head}")
     if git(target, "status", "--porcelain=v1", "--untracked-files=no"):
         raise DeployError("deployed target has tracked changes after reset")
-    actual = managed_processes(pm2_jlist(), owned_names)
+    actual = wait_for_managed_readiness(owned_names, definitions)
     expected = set(definitions)
     if set(actual) != expected:
         missing = sorted(expected - set(actual))
