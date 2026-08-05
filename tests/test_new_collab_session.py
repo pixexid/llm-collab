@@ -1,7 +1,9 @@
 import sys as _grsys; from pathlib import Path as _grPath
 _grsys.path.insert(0, str(_grPath(__file__).resolve().parent)); import _runtime_gate_testkit  # noqa: E402,F401  GH-503: deterministic gate-bypass install (any run form)
 import subprocess
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +12,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import new_collab_session as ncs
+import new_chat as new_chat_cli
+
+
+class PlainNewChatTest(unittest.TestCase):
+    def test_plain_new_chat_remains_ungated(self):
+        from contextlib import redirect_stdout
+        import io
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            chats = root / "Chats"
+            with patch.object(sys, "argv", [
+                "new_chat.py", "--title", "Plain chat", "--project", "llm-collab",
+            ]), patch.object(new_chat_cli, "ensure_project", return_value=None), \
+                 patch.object(new_chat_cli, "ROOT", root), \
+                 patch.object(new_chat_cli, "CHATS_DIR", chats), \
+                 patch.object(new_chat_cli, "chat_id", return_value="CHAT-PLAIN"), \
+                 patch.object(new_chat_cli, "date_prefix", return_value="2026-08-05"), \
+                 patch.object(new_chat_cli, "utc_iso", return_value="2026-08-05T00:00:00+00:00"), \
+                 redirect_stdout(io.StringIO()):
+                new_chat_cli.main()
+
+            chat_dirs = list(chats.iterdir())
+            self.assertEqual(1, len(chat_dirs))
+            self.assertEqual("CHAT-PLAIN", json.loads(
+                (chat_dirs[0] / "meta.json").read_text()
+            )["chat_id"])
 
 
 class WakeChannelTest(unittest.TestCase):
@@ -143,6 +172,7 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "ensure_project", return_value=None), \
              patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
              patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
              patch.object(ncs, "register_session", return_value=None), \
              patch.object(ncs, "subprocess") as sub:
             sub.run.return_value = type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-TEST9999"}', "stderr": ""})()
@@ -172,6 +202,52 @@ class MainPathTest(unittest.TestCase):
         initiator = out.split("SETUP PROMPT")[0]
         self.assertIn("watch_inbox.py", initiator)
 
+    def test_starter_refusal_happens_before_new_chat(self):
+        argv = ["--project", "p", "--title", "t", "--me", "claude",
+                "--my-runtime-session-id", "starter-native", "--my-runtime-family", "claude_app",
+                "--with", "codex:codex_app", "--repo-target", "app", "--skip-currency-check"]
+        with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+             patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+             patch.object(ncs, "preflight_starter_binding",
+                          side_effect=SystemExit("starter collision")), \
+             patch.object(ncs, "subprocess") as sub:
+            with self.assertRaisesRegex(SystemExit, "starter collision"):
+                ncs.main()
+            sub.run.assert_not_called()
+
+    def test_starter_preflight_uses_the_shared_native_scope_guard(self):
+        import session_autobridge
+
+        with patch.object(session_autobridge, "preflight_native_session_registration") as check:
+            ncs.preflight_starter_binding(
+                agent="claude", project="llm-collab",
+                runtime_session_id="starter-native", runtime_family="claude_app",
+            )
+        check.assert_called_once_with(
+            session_id="__pending-new-collab__claude__starter-native",
+            project_id="llm-collab", chat_id="__pending-new-collab__claude__starter-native",
+            native_session_id="starter-native", native_family="claude_app",
+        )
+
+    def test_starter_collision_keeps_actionable_guard_message(self):
+        import session_autobridge
+
+        with patch.object(
+            session_autobridge,
+            "preflight_native_session_registration",
+            side_effect=session_autobridge.NativeSessionOwnedElsewhere(
+                "deactivate the other lease or use a fresh native session"
+            ),
+        ), self.assertRaisesRegex(
+            SystemExit, "deactivate the other lease or use a fresh native session"
+        ):
+            ncs.preflight_starter_binding(
+                agent="claude", project="llm-collab",
+                runtime_session_id="starter-native", runtime_family="claude_app",
+            )
+
     def test_unsupported_coworker_family_is_refused_with_no_chat(self):
         argv = ["--project", "p", "--title", "t", "--me", "claude",
                 "--my-runtime-session-id", "3db9", "--my-runtime-family", "claude_app",
@@ -193,6 +269,7 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "ensure_project", return_value=None), \
              patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
              patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
              patch.object(ncs, "register_session", side_effect=RuntimeError("boom")), \
              patch.object(ncs, "shutil") as sh, \
              patch.object(ncs, "subprocess") as sub:
@@ -206,6 +283,7 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "ensure_project", return_value=None), \
              patch.object(ncs, "get_project", return_value=get_project_ret), \
              patch.object(ncs, "load_agents", return_value=agents), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
              patch.object(ncs, "register_session", return_value=None), \
              patch.object(ncs, "subprocess") as sub:
             with self.assertRaises(SystemExit):
@@ -272,6 +350,7 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "ensure_project", return_value=None), \
              patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
              patch.object(ncs, "load_agents", return_value=agents), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
              patch.object(ncs, "register_session", return_value=None), \
              patch.object(ncs, "subprocess") as sub:
             sub.run.return_value = type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-TEST9999"}', "stderr": ""})()

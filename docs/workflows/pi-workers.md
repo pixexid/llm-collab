@@ -84,6 +84,13 @@ creation and wake delivery untouched and reports the recovery condition clearly.
 
 ## Provisioning a new Pi worker
 
+- **Starter chat is a precondition:** `start-livecraft-pi` requires an active
+  binding for the starter in the exact `--project`/`--chat` scope. If the starter
+  already owns a binding, reuse that chat for the worker lane. A distinct
+  per-task chat requires a fresh native starter session; do not create a chat
+  with `new_chat.py` and only then discover that the starter session is already
+  routed elsewhere. `new_collab_session.py` preflights that native scope before
+  invoking `new_chat.py`; ordinary `new_chat.py` remains ungated.
 - **Livecraft first-start:** `bin/worker.py start-livecraft-pi` drives
   Livecraft `POST /api/sessions`, sets model/thinking through Pi RPC, verifies the exact
   native id/cwd/fingerprint, waits for a bootstrap marker from the snapshot API, then

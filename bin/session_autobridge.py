@@ -575,6 +575,24 @@ def refuse_native_session_active_elsewhere(
             )
 
 
+def preflight_native_session_registration(
+    *, session_id: str, project_id: str, chat_id: str,
+    native_session_id: str | None, native_family: str | None,
+    status: str = "active",
+) -> None:
+    """Check native-session scope ownership without writing a lease.
+
+    A caller that will create a chat before registering its starter needs the
+    same ownership refusal without first creating the chat. Keep the check on
+    the existing guard and lock; the later registration remains authoritative
+    if another writer wins the gap after this read-only preflight.
+    """
+    with _session_write_lock():
+        refuse_native_session_active_elsewhere(
+            session_id, project_id, chat_id, native_session_id, native_family, status,
+        )
+
+
 def register_session(args) -> dict:
     agent = get_agent(args.agent)
     now = now_utc()
