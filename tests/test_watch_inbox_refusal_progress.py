@@ -67,6 +67,7 @@ class RefusalProgressStoreTest(unittest.TestCase):
                 "session_id": None,
                 "path": "a.md",
                 "session_repo_targets": ["app"],
+                "session_scope": None,
             }
             key = watch_inbox.progress_key(None, "a.md")
             watch_inbox.save_refusal_progress("claude", {key: entry})
@@ -152,6 +153,7 @@ class RefusalProgressShapeTest(unittest.TestCase):
                         "session_id": None,
                         "path": None,
                         "session_repo_targets": None,
+                        "session_scope": None,
                     }
                 },
                 watch_inbox.load_refusal_progress("claude"),
@@ -531,3 +533,48 @@ class SkipBeforeReadTest(unittest.TestCase):
             "skipped packet body was read and charged against the budget",
         )
         self.assertTrue(any("keep" in r for r in reads), "eligible packet was not reached")
+
+
+class LoadedSessionScopeTest(unittest.TestCase):
+    """Codex: _session_repo_scope_matches consults BOTH the loaded session scope
+    and the invocation scope. My previous regression varied the INVOCATION scope,
+    so it never exercised the loaded-session correction path — the defect it was
+    meant to catch would have passed."""
+
+    def _entry(self, path, session_scope):
+        return {
+            "path": path,
+            "session_id": "SESSION-A",
+            "session_repo_targets": ["app"],          # invocation scope, held FIXED
+            "session_scope": watch_inbox._stable_targets(session_scope),
+            "fp": watch_inbox.refusal_fingerprint(
+                "repo_mismatch", ["app"], ["zzz"], "llm-collab", "llm-collab",
+                "SESSION-A", session_scope,
+            ),
+            "mtime": None,
+            "reason": "repo_mismatch",
+            "packet_repo_targets": ["zzz"],
+            "packet_project": "llm-collab",
+        }
+
+    def test_unchanged_loaded_scope_stays_terminal(self) -> None:
+        path = "Chats/x/p.md"
+        progress = {watch_inbox.progress_key("SESSION-A", path): self._entry(path, ["app"])}
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(
+                progress, ["app"], "llm-collab", "SESSION-A", ["app"]
+            ),
+        )
+
+    def test_only_the_stored_session_scope_changes_and_it_reopens(self) -> None:
+        """Invocation scope stays 'app' throughout; only session[repo_targets]
+        moves app -> docs. That is the case the previous test could not reach."""
+        path = "Chats/x/p.md"
+        progress = {watch_inbox.progress_key("SESSION-A", path): self._entry(path, ["app"])}
+        self.assertEqual(
+            set(),
+            watch_inbox.terminal_refusal_paths(
+                progress, ["app"], "llm-collab", "SESSION-A", ["docs"]
+            ),
+        )

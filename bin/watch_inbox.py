@@ -251,6 +251,7 @@ def load_refusal_progress(agent_id: str) -> dict:
                 if isinstance(value.get("session_id"), str)
                 else None,
                 "path": value.get("path") if isinstance(value.get("path"), str) else None,
+                "session_scope": value.get("session_scope"),
                 "session_repo_targets": value.get("session_repo_targets")
                 if isinstance(value.get("session_repo_targets"), list)
                 or value.get("session_repo_targets") is None
@@ -266,6 +267,7 @@ def load_refusal_progress(agent_id: str) -> dict:
                 "session_id": None,
                 "path": None,
                 "session_repo_targets": None,
+                "session_scope": None,
             }
     return clean
 
@@ -301,7 +303,7 @@ def progress_key(session_id: str | None, path: str) -> str:
     return f"{session_id or ''}\u0000{path}"
 
 
-def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id: str | None = None) -> set[str]:
+def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id: str | None = None, session_scope=None) -> set[str]:
     """Paths whose repo-scope refusal is already terminal under the CURRENT
     subscriber decision AND whose packet file is unchanged. Either side moving
     re-opens eligibility (AC4): a changed subscriber decision changes the
@@ -310,6 +312,10 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id:
     for key, entry in progress.items():
         if entry.get("session_id") != session_id:
             continue  # another session's decision never satisfies this one
+        if entry.get("session_scope") != _stable_targets(session_scope):
+            # The SAME session was re-registered with a different stored scope:
+            # the old decision no longer describes what would happen now.
+            continue
         if entry.get("session_repo_targets") != repo_targets:
             # The session was re-registered with a corrected scope: the stored
             # decision was made under the OLD scope and must be re-evaluated.
@@ -324,6 +330,9 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id:
             # The ASKING session, not the stored one: a decision made by another
             # session must not satisfy this session's check (P1).
             session_id,
+            # ...and the CURRENTLY loaded session scope, which
+            # _session_repo_scope_matches also consults.
+            session_scope,
         )
         if entry.get("fp") != expected:
             continue
@@ -344,7 +353,7 @@ def _stable_targets(value):
     return repr(value)
 
 
-def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscriber_project, packet_project, session_id: str | None = None) -> str:
+def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscriber_project, packet_project, session_id: str | None = None, session_scope=None) -> str:
     """Bind terminality to the ROUTING DECISION, not just the path, so corrected
     routing re-opens eligibility instead of suppressing the message forever."""
     payload = json.dumps(
@@ -358,6 +367,13 @@ def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscrib
             # this, a packet refused by the `app` session would be skipped before
             # the `docs` session ever evaluated it, stranding the message.
             "session_id": session_id,
+            # _session_repo_scope_matches consults BOTH the loaded session scope
+            # and the invocation scope, so a decision is only identical when both
+            # are. Omitting the session scope let a re-registered session reuse a
+            # stale refusal while the invocation scope stayed put.
+            "session_scope": _stable_targets(
+                session_scope
+            ),
         },
         sort_keys=True,
     )
@@ -377,13 +393,14 @@ def dispatch_autobridge(
     progress = refusal_progress if refusal_progress is not None else {}
     stats = refusal_stats if refusal_stats is not None else {}
 
-    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None) -> bool:
+    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None) -> bool:
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
         fingerprint = refusal_fingerprint(
             reason, repo_targets, packet_repo_targets, project_id, packet_project,
             session_id,
-        )  # repo_targets here IS the asking session's effective scope
+            session_scope,
+        )
         key = progress_key(session_id, path)
         existing = progress.get(key) or {}
         if existing.get("fp") == fingerprint and existing.get("mtime") == _packet_mtime(path):
@@ -392,6 +409,7 @@ def dispatch_autobridge(
         progress[key] = {
             "path": path,
             "session_repo_targets": repo_targets,
+            "session_scope": _stable_targets(session_scope),
             "fp": fingerprint,
             "mtime": _packet_mtime(path),
             "reason": reason,
@@ -437,12 +455,16 @@ def dispatch_autobridge(
             )
             continue
         try:
+            try:
+                session_scope = (load_session(session_id) or {}).get("repo_targets")
+            except Exception:
+                session_scope = None
             result = dispatch_session(
                 session_id,
                 project_id=project_id,
                 repo_targets=repo_targets,
                 skip_paths=terminal_refusal_paths(
-                    progress, repo_targets, project_id, session_id
+                    progress, repo_targets, project_id, session_id, session_scope
                 ),
             )
         except Exception as error:
@@ -469,6 +491,7 @@ def dispatch_autobridge(
                 refusal["reason"],
                 packet_repo_targets=refusal.get("packet_repo_targets"),
                 packet_project=refusal.get("packet_project"),
+                session_scope=session_scope,
             ):
                 continue
             emit(
@@ -531,6 +554,7 @@ def dispatch_autobridge(
                         repo_reason,
                         packet_repo_targets=frontmatter.get("repo_targets"),
                         packet_project=frontmatter.get("project_id"),
+                        session_scope=session_scope,
                     ):
                         emit(
                             {
