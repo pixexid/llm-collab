@@ -275,7 +275,7 @@ def reconcile_pm2(
     pm2_run(["startOrRestart", str(target / "pm2" / "ecosystem.config.cjs"), "--update-env"])
 
 
-PM2_TERMINAL_FAILURE_STATUSES = frozenset({"errored", "stopped"})
+PM2_TERMINAL_FAILURE_STATUSES = frozenset({"errored"})
 
 
 def _process_is_populated(record: dict) -> bool:
