@@ -216,10 +216,13 @@ The GitHub Codex gate is complete when the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
 manual-review request comment while the head still equals the SHA that request
-named, or the connector completed an exact-head review and every thread it
-initiated has a thread-linked disposition accepted by the lane owner and
-release-gate worker. A bare `eyes` reaction is accepted-and-in-progress, never
-a verdict. Each outcome is terminal for the bot wait on that head. Their
+named, or a connector-authored `+1` sits at PR level with no manual request
+comment in existence — the automatic first pass's clean model, whose conditions
+are defined in `commit-push-prs.md` — or the connector completed an exact-head
+review and every thread it initiated has a thread-linked disposition accepted by
+the lane owner and release-gate worker. A bare `eyes` reaction is
+accepted-and-in-progress, never a verdict. Each outcome is terminal for the bot
+wait on that head. Their
 post-signal handling differs. A terminal outcome stops waiting for further
 artifacts only; it does not waive the handling below:
 

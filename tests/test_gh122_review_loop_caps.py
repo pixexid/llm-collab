@@ -1818,6 +1818,35 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertNotIn("external reviewer for later exact heads", text)
         self.assertNotIn("connector as the external reviewer for the new exact head", text)
 
+    def test_prior_oid_completion_path_recognizes_the_automatic_clean_model(self):
+        """GH-549: the prior-OID completion path must recognize a first pass that
+        was clean via the automatic PR-level `+1`, not only text verdict or
+        request-comment `+1`. A clean automatic first pass followed by an amended
+        head is the one-pass case the terminal list must still recognize, because
+        the rule says local verification replaces a second bot pass."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "completed the PR's first pass clean on a prior OID (by text verdict, "
+            "request-comment `+1`, or automatic PR-level `+1`)",
+            text,
+        )
+
+    def test_compact_wait_gate_names_the_automatic_pr_level_clean_model(self):
+        """GH-549: the worker-facing GitHub Codex gate completion enumeration in
+        review-and-handoff.md must name the automatic PR-level `+1` clean model.
+        Without it a worker reading only this runbook holds a clean automatic PR,
+        because the enumeration lists only the text verdict, request-comment `+1`,
+        and disposed review."""
+        def check(case, sources):
+            handoff = sources["handoff_wait"]
+            self.assertIn(
+                "a connector-authored `+1` sits at PR level with no manual request "
+                "comment in existence",
+                handoff,
+            )
+            self.assertIn("the automatic first pass's clean model", handoff)
+        self.assert_scenario_cases("compact_wait_gate", check)
+
 
 if __name__ == "__main__":
     unittest.main()

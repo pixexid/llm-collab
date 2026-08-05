@@ -621,10 +621,10 @@ Codex review gate as complete when any of these holds:
   the same settle and full re-read as a text verdict, and grants no second bot pass,
   or
 - the connector completed the PR's first pass clean on a prior OID (by text
-  verdict or request-comment `+1`), and the amended current head has complete
-  local exact-head verification. The original artifact remains the one bot pass;
-  every change since its reviewed/requested OID must be included in the local
-  proof, and no arriving finding may remain unadjudicated, or
+  verdict, request-comment `+1`, or automatic PR-level `+1`), and the amended
+  current head has complete local exact-head verification. The original artifact
+  remains the one bot pass; every change since its reviewed/requested OID must be
+  included in the local proof, and no arriving finding may remain unadjudicated, or
 - the connector completed the PR's first review with findings and every thread
   it initiated has a thread-linked disposition accepted by the lane owner and
   release-gate worker. Any amended current head also needs local exact-head proof.
