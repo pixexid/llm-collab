@@ -292,14 +292,12 @@ orphaned. A PR whose branch follows the `…/gh<N>-…` convention is treated as
 squash — GitHub reads the PR body). If the PR intentionally leaves that issue open,
 that is fine — the check below only warns.
 
-- Before requesting review: `python bin/issue_link_check.py --pr <N> --gh-autolink` —
-  warns if the branch's issue is referenced but not closed (advisory, never blocking;
-  bare `#N` mentions elsewhere are reported as informational, never auto-closed).
-  Pass `--gh-autolink` because this repo defines a `GH-N` autolink; it is off by
-  default, since a bare `GH-N` is not assumed for any repo.
-- Periodic backstop: `python bin/issue_link_check.py --sweep --gh-autolink` — lists
-  open issues referenced by recently merged PRs, so orphans get closed or explicitly
-  re-marked `Related`. (Umbrella/epic issues intentionally stay open — filter those.)
+- Before requesting review: `python bin/issue_link_check.py --pr <N>` — warns if the
+  branch's issue is referenced but not closed (advisory, never blocking; bare `#N`
+  mentions elsewhere are reported as informational, never auto-closed).
+- Periodic backstop: `python bin/issue_link_check.py --sweep` — lists open issues
+  referenced by recently merged PRs, so orphans get closed or explicitly re-marked
+  `Related`. (Umbrella/epic issues intentionally stay open — filter those.)
 
 ## PR Review Wait Gate
 
