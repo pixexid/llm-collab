@@ -1143,3 +1143,85 @@ accepted_by: null
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoordinationLaneTest(unittest.TestCase):
+    """GH-527: a coordination-only tracker must stay visible but never select and
+    never suppress. Both exclusions are load-bearing — either alone leaves half
+    the deadlock (GH-85 blocked everything either way)."""
+
+    def _lane(self, order, issue, state, lane_type=None, task=None, depends_on=None):
+        return {
+            "order": order,
+            "issue": issue,
+            "task_id": task or f"TASK-{issue}",
+            "owner": "codex",
+            "task_status": "open",
+            "queue_state": state,
+            "lane_type": lane_type,
+            "depends_on": depends_on or [],
+            "blocked_by": [],
+        }
+
+    def _fm(self, payload):
+        """normalize_lanes blocks a lane when direct-app policy evidence is
+        unavailable; supply minimal frontmatter so these fixtures exercise the
+        coordination logic rather than that unrelated gate."""
+        return {
+            lane["task_id"]: {
+                "project_id": "llm-collab",
+                "status": lane.get("task_status", "open"),
+                "lane_type": lane.get("lane_type"),
+            }
+            for lane in payload["lanes"]
+        }
+
+    def test_coordination_lane_is_never_the_ready_lane(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        self.assertEqual(93, project_issue_queue.next_ready_lane(payload)["issue"])
+
+    def test_active_coordination_lane_does_not_suppress(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        by_issue = {l["issue"]: l for l in payload["lanes"]}
+        self.assertEqual("ready", by_issue[93]["queue_state"])
+
+    def test_coordination_lane_is_not_promoted_from_queued(self) -> None:
+        """The site my own refinement missed: when nothing is ready the queue
+        promotes the first `queued` lane, which would hand GH-85 straight back."""
+        payload = {"project_id": "llm-collab", "lanes": [self._lane(1, 85, "queued", "coordination")]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        self.assertEqual("queued", payload["lanes"][0]["queue_state"])
+        self.assertIsNone(project_issue_queue.next_ready_lane(payload))
+
+    def test_coordination_lane_stays_visible(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        self.assertIn(85, {l["issue"] for l in payload["lanes"]})
+
+    def test_ordinary_lane_types_are_unaffected(self) -> None:
+        """AC5 regression — the one that matters most: every non-coordination
+        value must behave exactly as before."""
+        for lane_type in (None, "design", "design-spec", "template-implementation"):
+            with self.subTest(lane_type=lane_type):
+                payload = {"project_id": "llm-collab", "lanes": [
+                    self._lane(1, 85, "ready", lane_type),
+                    self._lane(2, 93, "ready"),
+                ]}
+                self.assertEqual(85, project_issue_queue.next_ready_lane(payload)["issue"])
+
+    def test_dependency_blocking_is_unaffected(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        self.assertIsNone(project_issue_queue.next_ready_lane(payload))

@@ -428,11 +428,29 @@ def lane_next_action(lane: dict) -> str:
     return lane_reason(lane)
 
 
+COORDINATION_LANE_TYPE = "coordination"
+
+
+def is_coordination_lane(lane: dict) -> bool:
+    """A coordination-only tracker: visible in the projection, never selected as
+    the ready lane, and never suppressing other lanes.
+
+    GH-527: `lane_type` was already carried onto every lane record and read back
+    nowhere, so the queue could express this and never acted on it. GH-85 was the
+    live consequence — activating it stopped every worker, leaving it open blocked
+    everything behind it.
+    """
+    return str(lane.get("lane_type") or "").strip().lower() == COORDINATION_LANE_TYPE
+
+
 def no_ready_lane_errors(project_id: str, payload: dict) -> tuple[list[str], list[str]]:
     lanes = [lane for lane in payload.get("lanes", []) if isinstance(lane, dict)]
     if next_ready_lane(payload) is not None:
         return [], []
-    if any(lane.get("queue_state") in {"active", "review"} for lane in lanes):
+    if any(
+        lane.get("queue_state") in {"active", "review"} and not is_coordination_lane(lane)
+        for lane in lanes
+    ):
         return [], []
     if not lanes:
         return [], []
@@ -655,7 +673,14 @@ def render_markdown(payload: dict) -> str:
     source_issue_label = f"`GH-{source_issue}`" if isinstance(source_issue, int) else "none"
     source_task_label = f"`{source_task}`" if source_task else "none"
 
-    ready_lane = next((lane for lane in lanes if lane.get("queue_state") == "ready"), None)
+    ready_lane = next(
+        (
+            lane
+            for lane in lanes
+            if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
+        ),
+        None,
+    )
     lines = [
         f"# {project_name} Ordered Issue Queue",
         "",
@@ -753,7 +778,7 @@ def next_ready_lane(payload: dict) -> dict | None:
         (
             lane
             for lane in sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
-            if lane.get("queue_state") == "ready"
+            if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
         ),
         None,
     )
@@ -849,9 +874,15 @@ def normalize_lanes(
         lane["order"] = index
 
     active_like = [
-        lane for lane in lanes if lane.get("queue_state") in {"active", "review"}
+        lane
+        for lane in lanes
+        if lane.get("queue_state") in {"active", "review"} and not is_coordination_lane(lane)
     ]
-    ready_lanes = [lane for lane in lanes if lane.get("queue_state") == "ready"]
+    ready_lanes = [
+        lane
+        for lane in lanes
+        if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
+    ]
 
     if active_like:
         for lane in ready_lanes:
@@ -868,7 +899,11 @@ def normalize_lanes(
 
     if canonical_ready is None:
         canonical_ready = next(
-            (lane for lane in lanes if lane.get("queue_state") == "queued"),
+            (
+                lane
+                for lane in lanes
+                if lane.get("queue_state") == "queued" and not is_coordination_lane(lane)
+            ),
             None,
         )
         if canonical_ready is not None:
