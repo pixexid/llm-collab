@@ -42,8 +42,10 @@ from _helpers import (
 )
 from _session_autobridge import (
     CanonicalBindingNativeMismatch,
+    UnreadableFile,
     active_read_budget,
     dispatch_session,
+    read_regular_file_bounded,
     iter_sessions,
     load_session,
     repo_scope_matches,
@@ -204,19 +206,16 @@ MAX_REFUSAL_PROGRESS_BYTES = 1 << 20  # 1 MiB, mirrors the registry read budget
 def load_refusal_progress(agent_id: str) -> dict:
     path = refusal_progress_path(agent_id)
     try:
-        # Bounded read: an oversized store must degrade to an empty cache, never
-        # stall the watcher before it reaches the durable inbox. Progress is an
-        # optimisation; the inbox is the job.
-        if path.stat().st_size > MAX_REFUSAL_PROGRESS_BYTES:
-            return {}
-        raw = path.read_text()
-    except OSError:
-        return {}
-    if len(raw.encode("utf-8")) > MAX_REFUSAL_PROGRESS_BYTES:
+        # stat-then-read is two different objects and a growth race, and a plain
+        # open() on a writer-less FIFO blocks forever BEFORE any cap applies.
+        # read_regular_file_bounded does the non-blocking open, fstats the SAME
+        # descriptor, requires a regular file, and caps the read loop.
+        raw = read_regular_file_bounded(path, MAX_REFUSAL_PROGRESS_BYTES)
+    except (FileNotFoundError, UnreadableFile, OSError):
         return {}
     try:
-        data = json.loads(raw)
-    except ValueError:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -251,6 +250,11 @@ def load_refusal_progress(agent_id: str) -> dict:
                 "session_id": value.get("session_id")
                 if isinstance(value.get("session_id"), str)
                 else None,
+                "path": value.get("path") if isinstance(value.get("path"), str) else None,
+                "session_repo_targets": value.get("session_repo_targets")
+                if isinstance(value.get("session_repo_targets"), list)
+                or value.get("session_repo_targets") is None
+                else None,
             }
         elif isinstance(value, str):  # pre-GH-539 shape: fingerprint only
             clean[key] = {
@@ -260,6 +264,8 @@ def load_refusal_progress(agent_id: str) -> dict:
                 "packet_repo_targets": None,
                 "packet_project": None,
                 "session_id": None,
+                "path": None,
+                "session_repo_targets": None,
             }
     return clean
 
@@ -288,16 +294,26 @@ def _packet_mtime(message_path: str) -> float | None:
         return None
 
 
+def progress_key(session_id: str | None, path: str) -> str:
+    """Progress is per (deciding session, path). Keying on path alone let two
+    sessions refusing the SAME packet in one poll overwrite each other, so the
+    loser repeated its refusal on every later poll."""
+    return f"{session_id or ''}\u0000{path}"
+
+
 def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id: str | None = None) -> set[str]:
     """Paths whose repo-scope refusal is already terminal under the CURRENT
     subscriber decision AND whose packet file is unchanged. Either side moving
     re-opens eligibility (AC4): a changed subscriber decision changes the
     fingerprint, a rerouted packet changes its mtime."""
     skip: set[str] = set()
-    for path, entry in progress.items():
+    for key, entry in progress.items():
+        if entry.get("session_id") != session_id:
+            continue  # another session's decision never satisfies this one
+        path = entry.get("path") or key.split("\u0000", 1)[-1]
         expected = refusal_fingerprint(
             entry.get("reason", ""),
-            repo_targets,
+            entry.get("session_repo_targets") if entry.get("session_repo_targets") is not None else repo_targets,
             entry.get("packet_repo_targets"),
             project_id,
             entry.get("packet_project"),
@@ -363,12 +379,15 @@ def dispatch_autobridge(
         fingerprint = refusal_fingerprint(
             reason, repo_targets, packet_repo_targets, project_id, packet_project,
             session_id,
-        )
-        existing = progress.get(path) or {}
+        )  # repo_targets here IS the asking session's effective scope
+        key = progress_key(session_id, path)
+        existing = progress.get(key) or {}
         if existing.get("fp") == fingerprint and existing.get("mtime") == _packet_mtime(path):
             stats[reason] = stats.get(reason, 0) + 1
             return False
-        progress[path] = {
+        progress[key] = {
+            "path": path,
+            "session_repo_targets": repo_targets,
             "fp": fingerprint,
             "mtime": _packet_mtime(path),
             "reason": reason,

@@ -65,9 +65,12 @@ class RefusalProgressStoreTest(unittest.TestCase):
                 "packet_repo_targets": ["other"],
                 "packet_project": "amiga",
                 "session_id": None,
+                "path": "a.md",
+                "session_repo_targets": ["app"],
             }
-            watch_inbox.save_refusal_progress("claude", {"a.md": entry})
-            self.assertEqual({"a.md": entry}, watch_inbox.load_refusal_progress("claude"))
+            key = watch_inbox.progress_key(None, "a.md")
+            watch_inbox.save_refusal_progress("claude", {key: entry})
+            self.assertEqual({key: entry}, watch_inbox.load_refusal_progress("claude"))
 
     def test_missing_store_is_empty_not_an_error(self) -> None:
         with self._patch_dir():
@@ -147,6 +150,8 @@ class RefusalProgressShapeTest(unittest.TestCase):
                         "packet_repo_targets": None,
                         "packet_project": None,
                         "session_id": None,
+                        "path": None,
+                        "session_repo_targets": None,
                     }
                 },
                 watch_inbox.load_refusal_progress("claude"),
@@ -208,7 +213,8 @@ class TerminalRefusalSkipsWorkTest(unittest.TestCase):
             reason, repo_targets, packet_repo, project_id, packet_project
         )
         return {
-            path: {
+            watch_inbox.progress_key(None, path): {
+                "path": path,
                 "fp": fp,
                 "mtime": mtime,
                 "reason": reason,
@@ -285,7 +291,8 @@ class RestartRoundTripTest(unittest.TestCase):
             reason, repo_targets, packet_repo, project_id, packet_project
         )
         live = {
-            path: {
+            watch_inbox.progress_key(None, path): {
+                "path": path,
                 "fp": fp,
                 "mtime": None,
                 "reason": reason,
@@ -314,7 +321,8 @@ class RestartRoundTripTest(unittest.TestCase):
             "repo_mismatch", ["app"], ["other"], "llm-collab", "amiga"
         )
         live = {
-            path: {
+            watch_inbox.progress_key(None, path): {
+                "path": path,
                 "fp": fp,
                 "mtime": None,
                 "reason": "repo_mismatch",
@@ -343,7 +351,8 @@ class BotReviewRegressionsTest(unittest.TestCase):
             "repo_mismatch", ["app"], ["docs"], "llm-collab", "llm-collab", "SESSION-APP"
         )
         progress = {
-            path: {
+            watch_inbox.progress_key("SESSION-APP", path): {
+                "path": path,
                 "fp": fp_app,
                 "mtime": None,
                 "reason": "repo_mismatch",
@@ -394,3 +403,66 @@ class BotReviewRegressionsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TwoSessionsSamePathTest(unittest.TestCase):
+    """Codex residual finding 1: keying progress on path alone let two sessions
+    refusing the SAME packet in one poll overwrite each other, so the loser
+    repeated its refusal on every later poll."""
+
+    def _entry(self, path, session_id, repo_targets):
+        return {
+            "path": path,
+            "session_id": session_id,
+            "session_repo_targets": repo_targets,
+            "fp": watch_inbox.refusal_fingerprint(
+                "repo_mismatch", repo_targets, ["zzz"], "llm-collab", "llm-collab", session_id
+            ),
+            "mtime": None,
+            "reason": "repo_mismatch",
+            "packet_repo_targets": ["zzz"],
+            "packet_project": "llm-collab",
+        }
+
+    def test_both_sessions_skip_on_the_next_poll(self) -> None:
+        path = "Chats/x/shared.md"
+        progress = {
+            watch_inbox.progress_key("SESSION-A", path): self._entry(path, "SESSION-A", ["app"]),
+            watch_inbox.progress_key("SESSION-B", path): self._entry(path, "SESSION-B", ["docs"]),
+        }
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab", "SESSION-A"),
+        )
+        self.assertEqual(
+            {path},
+            watch_inbox.terminal_refusal_paths(progress, ["docs"], "llm-collab", "SESSION-B"),
+        )
+
+    def test_a_third_session_still_evaluates(self) -> None:
+        """The accepting session must not inherit either refusal."""
+        path = "Chats/x/shared.md"
+        progress = {
+            watch_inbox.progress_key("SESSION-A", path): self._entry(path, "SESSION-A", ["app"]),
+        }
+        self.assertEqual(
+            set(),
+            watch_inbox.terminal_refusal_paths(progress, ["other"], "llm-collab", "SESSION-C"),
+        )
+
+
+class BoundedReadSeamTest(unittest.TestCase):
+    """Codex residual finding 2: stat-then-read is two objects and a growth race,
+    and a plain open() on a writer-less FIFO blocks forever BEFORE any cap."""
+
+    def test_non_regular_file_degrades_to_empty(self) -> None:
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fifo = root / "watcher-refusal-progress.json"
+            os.mkfifo(fifo)
+            with patch.object(watch_inbox, "agent_dir", return_value=root):
+                self.assertEqual({}, watch_inbox.load_refusal_progress("claude"))
