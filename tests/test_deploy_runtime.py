@@ -201,6 +201,159 @@ class DeployRuntimeTest(unittest.TestCase):
 
         pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
 
+    def test_verify_waits_for_unpopulated_pm2_metadata(self):
+        unpopulated = {"name": "fixture-new", "pm2_env": {"status": "online", "script": None}}
+        ready = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", side_effect=[[unpopulated], [ready]]) as pm2_jlist,
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+            patch.object(deploy_runtime.time, "monotonic", side_effect=[0.0, 0.0]),
+            patch.object(deploy_runtime.time, "sleep") as sleep,
+        ):
+            deploy_runtime.verify_deployment(
+                Path("/deployed/runtime"),
+                "new-sha",
+                frozenset({"fixture-new"}),
+                {
+                    "fixture-new": {
+                        "cwd": "/deployed/runtime",
+                        "script": "python3",
+                        "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                    }
+                },
+            )
+
+        self.assertEqual(2, pm2_jlist.call_count)
+        sleep.assert_called_once_with(deploy_runtime.PM2_READINESS_POLL_SECONDS)
+        pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
+
+    def test_verify_times_out_on_unpopulated_pm2_metadata(self):
+        unpopulated = {"name": "fixture-new", "pm2_env": {"status": "online", "script": None}}
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", side_effect=[[unpopulated], [unpopulated], [unpopulated]]) as pm2_jlist,
+            patch.object(deploy_runtime.time, "monotonic", side_effect=[0.0, 0.0, 0.25, 10.0]),
+            patch.object(deploy_runtime.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(
+                deploy_runtime.DeployError,
+                r"not_ready=fixture-new: status='online' missing=pm_cwd,script,args",
+            ):
+                deploy_runtime.verify_deployment(
+                    Path("/deployed/runtime"),
+                    "new-sha",
+                    frozenset({"fixture-new"}),
+                    {
+                        "fixture-new": {
+                            "cwd": "/deployed/runtime",
+                            "script": "python3",
+                            "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                        }
+                    },
+                )
+
+        self.assertEqual(3, pm2_jlist.call_count)
+        self.assertEqual(2, sleep.call_count)
+
+    def test_verify_fails_fast_on_populated_wrong_metadata(self):
+        wrong = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "node",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[wrong]) as pm2_jlist,
+            patch.object(deploy_runtime.time, "monotonic", return_value=0.0),
+        ):
+            with self.assertRaisesRegex(deploy_runtime.DeployError, "script mismatch"):
+                deploy_runtime.verify_deployment(
+                    Path("/deployed/runtime"),
+                    "new-sha",
+                    frozenset({"fixture-new"}),
+                    {
+                        "fixture-new": {
+                            "cwd": "/deployed/runtime",
+                            "script": "python3",
+                            "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                        }
+                    },
+                )
+
+        pm2_jlist.assert_called_once_with()
+
+    def test_verify_fails_fast_on_populated_terminal_pm2_process(self):
+        for status in ("errored", "stopped"):
+            with self.subTest(status=status):
+                terminal = {
+                    "name": "fixture-new",
+                    "pm2_env": {
+                        "status": status,
+                        "pm_cwd": "/deployed/runtime",
+                        "script": "python3",
+                        "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                    },
+                }
+                with (
+                    patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+                    patch.object(deploy_runtime, "pm2_jlist", return_value=[terminal]) as pm2_jlist,
+                    patch.object(deploy_runtime.time, "monotonic", return_value=0.0),
+                    patch.object(deploy_runtime.time, "sleep") as sleep,
+                ):
+                    with self.assertRaisesRegex(deploy_runtime.DeployError, "not online"):
+                        deploy_runtime.verify_deployment(
+                            Path("/deployed/runtime"),
+                            "new-sha",
+                            frozenset({"fixture-new"}),
+                            {
+                                "fixture-new": {
+                                    "cwd": "/deployed/runtime",
+                                    "script": "python3",
+                                    "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                                }
+                            },
+                        )
+
+                pm2_jlist.assert_called_once_with()
+                sleep.assert_not_called()
+
+    def test_verify_timeout_names_missing_pm2_process(self):
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[]) as pm2_jlist,
+            patch.object(deploy_runtime.time, "monotonic", side_effect=[0.0, 10.0]),
+            patch.object(deploy_runtime.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(deploy_runtime.DeployError, r"missing=\['fixture-new'\]"):
+                deploy_runtime.verify_deployment(
+                    Path("/deployed/runtime"),
+                    "new-sha",
+                    frozenset({"fixture-new"}),
+                    {
+                        "fixture-new": {
+                            "cwd": "/deployed/runtime",
+                            "script": "python3",
+                            "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+                        }
+                    },
+                )
+
+        pm2_jlist.assert_called_once_with()
+        sleep.assert_not_called()
+
     def test_managed_processes_does_not_match_related_workspace_names(self):
         records = [
             {"name": "foo-worker"},
