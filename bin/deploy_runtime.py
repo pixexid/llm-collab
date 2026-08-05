@@ -275,13 +275,26 @@ def reconcile_pm2(
     pm2_run(["startOrRestart", str(target / "pm2" / "ecosystem.config.cjs"), "--update-env"])
 
 
-def _process_is_ready(record: dict) -> bool:
+PM2_TERMINAL_FAILURE_STATUSES = frozenset({"errored", "stopped"})
+
+
+def _process_is_populated(record: dict) -> bool:
     environment = record.get("pm2_env")
     return (
         isinstance(environment, dict)
-        and environment.get("status") == "online"
+        and isinstance(environment.get("status"), str)
         and all(environment.get(field) is not None for field in ("pm_cwd", "script", "args"))
     )
+
+
+def _process_is_ready(record: dict) -> bool:
+    environment = record.get("pm2_env")
+    return _process_is_populated(record) and environment["status"] == "online"
+
+
+def _process_is_terminal_failure(record: dict) -> bool:
+    environment = record.get("pm2_env")
+    return _process_is_populated(record) and environment["status"] in PM2_TERMINAL_FAILURE_STATUSES
 
 
 def wait_for_managed_readiness(
@@ -292,11 +305,43 @@ def wait_for_managed_readiness(
     expected = set(definitions)
     while True:
         actual = managed_processes(pm2_jlist(), owned_names)
+        if any(
+            _process_is_terminal_failure(actual[name])
+            for name in expected.intersection(actual)
+        ):
+            return actual
         if expected.issubset(actual) and all(_process_is_ready(actual[name]) for name in expected):
             return actual
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise DeployError("PM2 managed process metadata did not become ready before the deadline")
+            details = []
+            missing = sorted(expected - set(actual))
+            if missing:
+                details.append(f"missing={missing!r}")
+            not_ready = []
+            for name in sorted(expected.intersection(actual)):
+                environment = actual[name].get("pm2_env")
+                if not isinstance(environment, dict):
+                    not_ready.append(f"{name}: missing pm2_env")
+                    continue
+                status = environment.get("status")
+                missing_fields = [
+                    field
+                    for field in ("pm_cwd", "script", "args")
+                    if environment.get(field) is None
+                ]
+                if status != "online" or missing_fields:
+                    detail = f"{name}: status={status!r}"
+                    if missing_fields:
+                        detail += f" missing={','.join(missing_fields)}"
+                    not_ready.append(detail)
+            if not_ready:
+                details.append("not_ready=" + "; ".join(not_ready))
+            suffix = f" ({', '.join(details)})" if details else ""
+            raise DeployError(
+                "PM2 managed process metadata did not become ready before the deadline"
+                + suffix
+            )
         time.sleep(min(PM2_READINESS_POLL_SECONDS, remaining))
 
 
