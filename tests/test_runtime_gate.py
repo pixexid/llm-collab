@@ -12,7 +12,10 @@ test_current_runtime.py; here we drive the gate above it.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -32,6 +35,43 @@ def _stale(msg="runtime must be exact origin/main; origin/main=aaa HEAD=bbb"):
 
 
 class RuntimeGateTest(unittest.TestCase):
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _make_stale_runtime_fixture(self, root: Path, branch: str) -> None:
+        """Create a clean, fetchable checkout whose HEAD differs from origin/main."""
+        shutil.copytree(
+            REPO_ROOT / "bin",
+            root / "bin",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        shutil.copy2(REPO_ROOT / "AGENTS.md", root / "AGENTS.md")
+        origin = root.parent / f"{root.name}-origin.git"
+        self._git(origin.parent, "init", "--bare", str(origin))
+        self._git(root, "init")
+        self._git(root, "config", "user.email", "fixture@example.test")
+        self._git(root, "config", "user.name", "runtime-gate-fixture")
+        self._git(root, "add", "AGENTS.md", "bin")
+        self._git(root, "-c", "commit.gpgsign=false", "commit", "-m", "fixture base")
+        self._git(root, "branch", "-M", branch)
+        self._git(root, "remote", "add", "origin", str(origin))
+        self._git(root, "push", "origin", f"{branch}:main")
+        self._git(
+            root,
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture stale head",
+        )
+
     # ---- the five required cases ----
 
     def test_exact_current_success_passes(self):
@@ -164,21 +204,49 @@ class RuntimeGateTest(unittest.TestCase):
             os.unlink(path)
 
     def test_direct_production_subprocess_cannot_bypass(self):
-        # codex's required proof: a direct mutator with NO test token/sentinel and NO
-        # recovery waiver, from this feature-branch worktree, is refused with exit 78.
-        import subprocess
-        bin_deliver = REPO_ROOT / "bin" / "deliver.py"
+        # The subprocess runs from controlled stale git fixtures, not from the caller's
+        # branch. The two fixture branch names prove the refusal is independent of that
+        # branch, while the caller checkout remains byte-for-byte state-identical.
         clean = {
             k: v for k, v in os.environ.items()
             if k not in (current_runtime.TEST_TOKEN_ENV, current_runtime.TEST_SENTINEL_ENV,
                          current_runtime.RECOVERY_WAIVER_ENV)
         }
-        proc = subprocess.run(
-            [sys.executable, str(bin_deliver)], env=clean,
-            capture_output=True, text=True, timeout=60,
+        caller_state_before = self._git_state(REPO_ROOT)
+        with tempfile.TemporaryDirectory(prefix="runtime-gate-") as raw_parent:
+            parent = Path(raw_parent)
+            for branch in ("main", "feature/runtime-gate"):
+                with self.subTest(branch=branch):
+                    fixture = parent / branch.replace("/", "-")
+                    fixture.mkdir()
+                    self._make_stale_runtime_fixture(fixture, branch)
+                    proc = subprocess.run(
+                        [sys.executable, str(fixture / "bin" / "deliver.py")],
+                        cwd=fixture,
+                        env=clean,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(
+                        current_runtime.RUNTIME_GATE_REFUSED, proc.returncode, proc.stderr
+                    )
+                    self.assertIn("runtime-gate", proc.stderr)
+        self.assertEqual(caller_state_before, self._git_state(REPO_ROOT))
+
+    def _git_state(self, cwd: Path) -> tuple[str, str, str]:
+        def output(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(cwd), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
+
+        return output("rev-parse", "HEAD"), output("branch", "--show-current"), output(
+            "status", "--porcelain=v1", "--untracked-files=all"
         )
-        self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, proc.returncode, proc.stderr)
-        self.assertIn("runtime-gate", proc.stderr)
 
     # ---- direct-entrypoint coverage: mutation gates, read-only does not ----
 

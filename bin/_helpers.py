@@ -549,7 +549,6 @@ def run_project_preflight(
     project_id: str | None,
     *,
     cwd: Path | None = None,
-    extra_args: list[str] | None = None,
 ) -> dict:
     if not project_id:
         return {"ran": False, "reason": "task/message has no project_id"}
@@ -563,9 +562,8 @@ def run_project_preflight(
         return {"ran": False, "reason": f"project {project_id} preflight_command must be list[str]"}
 
     run_cwd = (cwd or resolve_project_repo_path(project_id, "app") or ROOT).resolve()
-    full_command = [*command, *(extra_args or [])]
-    command_path = _resolve_command_path(full_command[0], run_cwd)
-    executed_command = [command_path, *full_command[1:]]
+    command_path = _resolve_command_path(command[0], run_cwd)
+    executed_command = [command_path, *command[1:]]
     result = subprocess.run(
         executed_command,
         cwd=run_cwd,

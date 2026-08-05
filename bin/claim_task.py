@@ -462,7 +462,7 @@ def main():
                 sys.exit(1)
 
     if args.status in ("in_progress", "review") and not args.skip_preflight:
-        preflight = run_project_preflight(project_id, extra_args=["--browser-check", "skip"])
+        preflight = run_project_preflight(project_id)
         if preflight.get("ran"):
             preflight_summary = {
                 "ran": True,

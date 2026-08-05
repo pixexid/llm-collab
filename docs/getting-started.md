@@ -166,7 +166,10 @@ procedures. This getting-started guide does not duplicate them.
 ## Troubleshooting
 
 **Task claim triggered browser checks unexpectedly**
-`claim_task.py` now forces preflight `--browser-check skip` for `in_progress`/`review` transitions. Browser checks should run in preview/review gates for runtime/UI changes only.
+`claim_task.py` executes the exact registered project `preflight_command` for
+`in_progress`/`review` transitions. Project-specific flags such as Amiga's
+`--browser-check skip` belong in that project's registry entry; shared callers never
+append them. Browser checks should run in preview/review gates for runtime/UI changes only.
 
 **Worker says the branch/worktree does not exist**
 For isolated implementation lanes, branch/worktree provisioning is orchestrator-owned. The worker should treat a missing lane as a blocker and report it immediately instead of inventing local lane state unless the task explicitly says self-provision is allowed.

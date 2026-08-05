@@ -185,7 +185,9 @@ If a broad issue mixes design and code, split it into a design task first and cr
 ## Preflight gate split
 
 - task-claim preflight (`claim_task.py` to `in_progress` or `review`) is a tooling/env gate, not a browser gate
-- `claim_task.py` appends `--browser-check skip` when it runs project preflight
+- `claim_task.py` runs each project's complete registered `preflight_command` argv
+  without appending cross-project flags; Amiga's browser-skip tokens, when required,
+  belong in the Amiga registry entry.
 - browser validation should run later only for runtime/UI-impact lanes
 
 ## Python Runtime

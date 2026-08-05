@@ -154,6 +154,14 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
 
 Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
 
+`preflight_command` is the complete argv for that project. Shared workflow callers
+execute the registered list exactly; project-specific flags belong in that project's
+registration and are never appended by a generic helper. For example, an Amiga
+registration that skips browser checks during task claims includes
+`"--browser-check", "skip"` in its own command list. Other projects keep their
+commands unchanged, including shell commands whose `-lc` argument already consumes
+the command string.
+
 For UI/UX projects, set `ui_ux.required_design_docs` to the project's own
 canonical design sources. Set `ui_ux.required_design_skills` when the project
 requires a particular design-skill family; the task-contract helper uses that
