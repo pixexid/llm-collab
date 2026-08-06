@@ -706,11 +706,12 @@ class BbClient:
                 if result.exit_code != 0:
                     # The bound is checked before the exit code so an oversized
                     # stream never reaches a detail string — but the exit code is
-                    # still known, and a nonzero exit is a reported failure, not a
-                    # success. Reporting it as malformed would let _task_call()
-                    # map an ordinary rejection with a large diagnostic into an
-                    # ambiguous outcome, crossing a boundary that was never
-                    # crossed. The detail stays bounded; only the reason changes.
+                    # still known. This preserves the pre-existing transport-failure
+                    # classification for a nonzero exit; it does not claim the call
+                    # had no side effect, which stays unestablished pending GH-570.
+                    # Without it the size bound would silently broaden that
+                    # classification into ambiguous via _task_call(). The detail
+                    # stays bounded; only the reason changes.
                     return BbRefusal(
                         REFUSAL_TRANSPORT_FAILED, f"exit {result.exit_code}: {detail}"
                     )

@@ -453,11 +453,12 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertLess(len(outcome.detail), 200)
 
     def test_an_oversized_nonzero_task_response_stays_a_transport_failure(self):
-        """No success-or-timeout boundary was crossed, so nothing is ambiguous.
+        """The size bound must not broaden the transport-failure classification.
 
-        An ordinary spawn rejection carrying a large diagnostic must not become
-        retry-suppressing — that would contradict the rule this lane just added,
-        which puts native nonzero exits outside it.
+        A nonzero exit keeps the classification it already had; that is not a
+        claim it had no side effect, which stays unestablished pending GH-570.
+        Without this, an ordinary spawn rejection carrying a large diagnostic
+        would silently become retry-suppressing.
         """
         oversized = "x" * (MAX_RESPONSE_CHARS + 1)
         for stream, response in (
