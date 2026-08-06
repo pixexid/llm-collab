@@ -485,7 +485,12 @@ def no_ready_lane_errors(project_id: str, payload: dict) -> tuple[list[str], lis
     genuinely_blocked = [
         lane
         for lane in lanes
-        if lane.get("queue_state") == "blocked" and (lane.get("blocked_by") or lane.get("depends_on"))
+        if lane.get("queue_state") == "blocked"
+        and (
+            lane.get("task_status") == "blocked"
+            or lane.get("blocked_by")
+            or lane.get("depends_on")
+        )
     ]
     if len(genuinely_blocked) == len(lanes):
         return [], []

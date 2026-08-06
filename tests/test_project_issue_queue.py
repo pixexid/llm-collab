@@ -1308,6 +1308,14 @@ class CoordinationLaneTest(unittest.TestCase):
             "a queue whose only non-blocked lane is coordination must not report healthy",
         )
 
+    def test_explicitly_blocked_lane_satisfies_no_ready_health_check(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 94, "blocked"),
+        ]}
+        payload["lanes"][0]["task_status"] = "blocked"
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertEqual([], errors)
+
     def test_v4_active_implementation_lane_still_suppresses_the_diagnostic(self) -> None:
         """The unchanged direction for V4: a real active lane still means 'work in
         flight', so no_ready_lane_errors stays quiet. Without this, an
