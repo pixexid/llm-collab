@@ -388,11 +388,11 @@ class TaskContractInvalidDbImpactTest(unittest.TestCase):
         original = {"project_id": "llm-collab", "db_impact": "additive_schema"}
         body = "Wire the adapter against the local sqlite ledger schema."
         synced, _changed = task_contract.sync_db_contract(original, body)
-        self.assertNotEqual(
-            "additive_schema",
-            synced["db_impact"],
-            "precondition: sync must have replaced the invalid value",
-        )
+        # GH-580 changed this precondition deliberately: sync used to substitute a
+        # valid value here, which is exactly what erased the defect on a second
+        # sync. It now KEEPS the invalid value, so the defect is still present in
+        # what a lifecycle caller hands to validation.
+        self.assertEqual("additive_schema", synced["db_impact"])
 
         # #when — validate the SYNCED frontmatter, as claim_task.py does
         errors, _summary = task_contract.validate_db_contract(
@@ -415,12 +415,53 @@ class TaskContractInvalidDbImpactTest(unittest.TestCase):
             frontmatter, "Rename a helper and tidy its docstring."
         )
 
-        # #then — recorded, but not promoted to shared-supabase-required
-        self.assertEqual("none", impact)
-        self.assertEqual("auto", detection)
+        # #then — kept as the defect it is, and NOT promoted to
+        # shared-supabase-required. GH-580: the value is preserved rather than
+        # substituted, so `impact` is the invalid original and the detection mode
+        # says so, instead of a plausible-looking classification the author never
+        # chose.
+        self.assertEqual("additive_schema", impact)
+        self.assertEqual("invalid", detection)
         self.assertTrue(
             any(reason.startswith(task_contract.DB_IMPACT_INVALID_REASON_PREFIX) for reason in reasons)
         )
+
+    def test_the_invalid_value_survives_any_number_of_syncs(self) -> None:
+        """GH-580: the defect must not be erased by the act of normalising.
+
+        The first fix recorded a marker in db_impact_detection_reasons, which
+        detect_db_contract recomputes on every call — so a second sync saw the
+        substituted valid value, took the manual branch, and replaced the reasons.
+        Validation then reported nothing. Derived state cannot carry a fact that
+        must outlive its own recomputation, so the value itself is kept.
+        """
+        # #given
+        current = {"project_id": "llm-collab", "db_impact": "additive_schema"}
+        body = "Local ledger work."
+
+        # #when — sync repeatedly, as two lifecycle transitions would
+        for iteration in range(1, 6):
+            current, _changed = task_contract.sync_db_contract(current, body)
+            errors, _summary = task_contract.validate_db_contract(
+                current, body, stage="review"
+            )
+
+            # #then — every iteration still names the original invalid value
+            with self.subTest(sync=iteration):
+                self.assertEqual("additive_schema", current["db_impact"])
+                self.assertTrue(
+                    any("additive_schema" in error for error in errors),
+                    f"sync {iteration} lost the defect signal; got {errors}",
+                )
+
+    def test_repeated_sync_is_idempotent_for_an_invalid_value(self) -> None:
+        """A sync that keeps changing the record would churn every mirror."""
+        first, _ = task_contract.sync_db_contract(
+            {"project_id": "llm-collab", "db_impact": "additive_schema"}, "Ledger."
+        )
+        second, changed = task_contract.sync_db_contract(first, "Ledger.")
+        self.assertEqual(first["db_impact"], second["db_impact"])
+        self.assertNotIn("db_impact", changed)
 
     def test_valid_explicit_db_impact_still_passes_through(self) -> None:
         """The guard must reject only non-members — every real value still works."""

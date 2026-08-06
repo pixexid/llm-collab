@@ -771,11 +771,25 @@ def detect_db_contract(
     auto_impact = "shared-supabase-required" if reasons else "none"
 
     if explicit_impact:
-        # A non-member explicit value is a defect, not a missing value. Record it so
-        # the signal survives synchronization: callers that sync before validating
-        # would otherwise see only the automatic classification this discarded value
-        # produced, and validate a task the author never actually classified.
-        reasons = [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons]
+        # A non-member explicit value is a defect, not a missing value — and it must
+        # SURVIVE synchronization, so the value itself is kept rather than a marker
+        # recorded alongside a substitute.
+        #
+        # GH-580: recording the marker in the reasons list was not enough, because
+        # `detect_db_contract` recomputes that list on every call. The first sync
+        # substituted a valid value and recorded the marker; the second saw the now
+        # valid value, took the manual branch, and replaced the reasons with
+        # ["manual override"] — after which validation was silent. Derived state
+        # cannot carry a fact that must outlive its own recomputation.
+        #
+        # Keeping the invalid value in place makes every later sync a no-op and every
+        # later validation report the same defect, for any number of syncs.
+        return (
+            explicit_impact,
+            "invalid",
+            [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons],
+            schema_change_detected,
+        )
 
     return auto_impact, "auto", reasons, schema_change_detected
 
