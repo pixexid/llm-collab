@@ -1713,6 +1713,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "as a text verdict",
                 handoff,
             )
+            # GH-549 P2: the automatic PR-level +1 outcome takes the same settle too.
+            self.assertIn(
+                "An automatic PR-level connector `+1` (no manual request comment in existence) "
+                "receives the same approximately five-minute post-clean settle",
+                handoff,
+            )
             self.assertNotIn(
                 "report it immediately and do not wait out the remainder", handoff,
                 "the reaction path must not be exempt from the settle again",
@@ -1862,6 +1868,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertIn("passes all four for H2 though H1 was reviewed", text)
         self.assertIn(
             "route it through the prior-OID path below and locally prove every amendment",
+            text,
+        )
+
+    def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
+        """GH-549 P1 (canonical list): the merge-driving automatic PR-level +1 bullet
+        must carry the same head-binding as the review-policy enumeration -- a PR-level
+        reaction has no SHA, so the four checks do not bind it to the reviewed head.
+        Require a trustworthy connector pickup artifact (eyes) proving the pass started
+        after the current head's push with no push in between, and route an
+        ambiguous/prior-head +1 through the prior-OID local proof."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "terminal on this path only when a trustworthy existing connector pickup "
+            "artifact (its `eyes` reaction) proves the pass started after the current "
+            "head's push with no push between pickup and `+1`",
+            text,
+        )
+        self.assertIn(
+            "an ambiguous or prior-head `+1` is not terminal here — fall back to the "
+            "prior-OID clause below with local proof of every amendment",
             text,
         )
 

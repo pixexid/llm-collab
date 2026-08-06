@@ -245,6 +245,11 @@ artifacts only; it does not waive the handling below:
 - A disposed-review completion receives the same approximately five-minute
   settle and full artifact re-read. Any new or unadjudicated finding cancels
   that completion.
+- An automatic PR-level connector `+1` (no manual request comment in existence)
+  receives the same approximately five-minute post-clean settle and full re-read
+  of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) as a
+  text verdict, for the same reaction-only-CLEAN rationale as the request-comment
+  `+1` above; matching detail lives in `commit-push-prs.md`.
 
 Whether a missing automatic trigger needs the one manual fallback request is the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),

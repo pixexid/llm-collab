@@ -620,7 +620,12 @@ Codex review gate as complete when any of these holds:
 - a connector-authored `+1` sits **at PR level** with no manual request comment in
   existence, the reaction post-dates the push of the
   current head, the head has not been amended since, and **every other artifact class is
-  empty** — no review object, no top-level comment, no inline thread. The reaction is
+  empty** — no review object, no top-level comment, no inline thread. A PR-level reaction
+  has no SHA, so those checks do not by themselves bind it to the reviewed head: the `+1`
+  is terminal on this path only when a trustworthy existing connector pickup artifact
+  (its `eyes` reaction) proves the pass started after the current head's push with no push
+  between pickup and `+1`; an ambiguous or prior-head `+1` is not terminal here — fall
+  back to the prior-OID clause below with local proof of every amendment. The reaction is
   itself the automatic pass's clean artifact; do not look for a separate proof that the
   pass ran. A `+1` alongside any
   finding artifact is not terminal. This is the automatic first pass's clean shape: the
