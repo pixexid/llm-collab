@@ -92,8 +92,9 @@ PM2 and manual `watch_inbox.py --me codex` dispatch both honor that sender-aware
 guard, leave the packet unread for durable recovery, and never runtime-trigger
 a Codex session from it. The watcher also excludes older `from: codex` /
 `to: codex` packets created before the persistent flag existed. External
-Claude/ZCode-to-Codex packets do not receive the guard and keep their normal AX
-or registered-runtime activation behavior.
+Claude/ZCode-to-Codex packets do not receive the guard and keep their ordinary
+activation behavior: routine exact-session dispatch when the binding dispatches,
+and the AX doorbell only as the fallback `deliver.py` selects.
 
 Native subagents use native subagent coordination for bounded local support.
 Do not route them through AX or Computer Use. Attended Computer Use is reserved

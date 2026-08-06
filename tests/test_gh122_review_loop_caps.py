@@ -1931,6 +1931,8 @@ class AxIsNeverPrimaryDocTest(unittest.TestCase):
         "non-Codex watcher-backed",
         "primary for a Codex recipient",
         "avoid registering the matching dispatchable autobridge",
+        "ax remains the routine doorbell",
+        "it is the normal transport",
     )
 
     def test_no_doc_makes_ax_the_primary_wake(self):
@@ -1938,10 +1940,17 @@ class AxIsNeverPrimaryDocTest(unittest.TestCase):
         # the pickup guidance every new collaboration session is onboarded with,
         # and a docs-only scan stayed green while it still taught the retired
         # model (PR #559 r3725690813).
+        # Worker-facing Markdown is not only under docs/: the root README and
+        # tools/axbridge/README.md both taught the AX-primary model while a
+        # docs-only scan stayed green (PR #559 r3725733643). Chats/, Tasks/ and
+        # State/ are excluded because packets legitimately QUOTE these phrases
+        # when reporting them.
         roots = [
             REPO_ROOT / "AGENTS.md",
+            REPO_ROOT / "README.md",
             REPO_ROOT / "bin" / "new_collab_session.py",
             *(REPO_ROOT / "docs").rglob("*.md"),
+            *(REPO_ROOT / "tools").rglob("*.md"),
         ]
         offenders = []
         for path in roots:

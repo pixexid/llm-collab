@@ -293,8 +293,8 @@ For GitHub-backed projects:
 | Activation | Behavior |
 |---|---|
 | Dispatchable runtime session | Message can be routed to the bound runtime session |
-| Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT) | `deliver.py` prints the only permitted AX doorbell command |
-| Non-Codex worker with `watcher_enabled: true` | Durable packet is written; the worker's watcher owns pickup |
+| Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT), **and no dispatchable binding** | `deliver.py` prints the only permitted AX doorbell command; a dispatchable binding takes precedence and suppresses it |
+| Watcher-backed worker with `watcher_enabled: true`, Codex included | Durable packet is written; the worker's watcher owns pickup |
 | `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
 | `human_relay` | Prints a human handoff prompt |

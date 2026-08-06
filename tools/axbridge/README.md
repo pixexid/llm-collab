@@ -270,11 +270,12 @@ its durable packet and background inbox watcher remain the only target-side path
 
 ## Computer Use supervision
 
-AX remains the routine doorbell between distinct external collaborator apps,
-including an external worker ringing root Codex. It is the normal transport
-after a durable `deliver.py` packet for those routes and should not be disabled
-or bypassed merely because an external desktop app needs recovery. It is never
-a Codex-to-Codex or root-self transport.
+AX is the **fallback** doorbell between distinct external collaborator apps,
+including an external worker ringing root Codex — taken only when `deliver.py`
+prints the command, because routine exact-session dispatch is the wake whenever
+the recipient's binding dispatches (contract v12). Where it is printed it should
+not be disabled or bypassed merely because an external desktop app needs
+recovery. It is never a Codex-to-Codex or root-self transport.
 
 Codex exclusively owns attended Computer Use control of external collaborator
 desktop apps. Use that supervisory path when an external app requires visible

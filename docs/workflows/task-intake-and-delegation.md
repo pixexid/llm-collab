@@ -141,8 +141,15 @@ AX command printed by `deliver.py`; a supported `ax_attended_only` target report
 `ax_attended_recovery_required` instead — route control to Codex-attended
 recovery, never a routine ring. A terminal-only
 CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
-included, is woken by its durable packet and its own watcher, and `deliver.py`
-reports `watcher_pickup_ready`. Treat `activation_unavailable` as a configuration blocker, record it
+included, is woken by its durable packet and its own watcher.
+
+Do not read `watcher_pickup_ready` as the signal for that. It requires
+`wake_fallback_allowed` **and** `is_watcher_only_target`, so a dispatchable
+binding turns it off for every recipient, and it excludes Codex besides. A
+healthy bound delivery reports `autobridge_ready: true` with
+`watcher_pickup_ready: false` — that pair is the routine success case, not a
+missing-pickup diagnosis. `watcher_pickup_ready` marks the *unbound* non-Codex
+watcher fallback. Treat `activation_unavailable` as a configuration blocker, record it
 precisely, and do not misreport it as routine operator relay.
 
 There should be one active queue-runner heartbeat for a project loop. A
@@ -498,8 +505,10 @@ built and the orchestrator waits for work it never assigned.
 
 - **Confirm the worker is alive before treating silence as waiting.** A worker
   with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
-  turn awaiting a doorbell, and a stopped or lease-expired session hears a re-ring
-  as silence forever. The orchestrator confirms the session is active (or
+  turn awaiting its next wake — routine exact-session dispatch for a
+  watcher-backed worker, the `deliver.py`-selected doorbell only when dispatch is
+  unavailable — and a stopped or lease-expired session, or a stopped watcher,
+  hears a re-drive as silence forever. The orchestrator confirms the session is active (or
   reactivates it) and that the ring/delivery actually landed — a silently-failed
   delivery is its own defect, not "no progress" — before re-driving. An open lane
   with nobody acting is a defect, and the orchestrator that owns the lane is who
@@ -507,10 +516,10 @@ built and the orchestrator waits for work it never assigned.
 - **Then keep the loop alive — through the recipient's own transport.**
   Re-driving is a *new durable packet* plus only the wake action `deliver.py`
   reports for that recipient — never a hand-chosen ring. For a watcher-backed
-  recipient (Claude, Pi workers) deliver durably and stop; its watcher owns
-  pickup, so never ring it. For a doorbell worker (Codex) run only the exact
-  AX command `deliver.py` prints, and never re-ring a `QUEUED (UNCONFIRMED)`
-  attempt. Re-driving a question just yields another answer. (See AGENTS.md
+  recipient — Claude, the Pi workers, and Codex alike — deliver durably and stop;
+  its watcher owns pickup, so never ring it. Only when `deliver.py` actually
+  prints an AX command (Codex, with no dispatchable binding) run exactly that
+  command, and never re-ring a `QUEUED (UNCONFIRMED)` attempt. Re-driving a question just yields another answer. (See AGENTS.md
   contract v10 and `## Delegation message requirements`.)
 
 ## Delegation message requirements

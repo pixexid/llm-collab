@@ -260,8 +260,9 @@ Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
 block. Run only its exact printed command, and only when it is
-printed. For any watcher-backed recipient, `watcher_pickup_ready` means the
-watcher owns pickup. `deliver.py`
+printed. `watcher_pickup_ready` marks the unbound non-Codex watcher fallback
+only — a bound recipient reports `autobridge_ready: true` with
+`watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
 exit 0 means the durable packet is written and the reply is complete.
 
 ## 5. Verify it actually dispatched
