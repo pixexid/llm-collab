@@ -702,10 +702,19 @@ class BbClient:
         # still claims to be a response is worse than no response.
         for name, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
             if len(stream) > MAX_RESPONSE_CHARS:
-                return BbRefusal(
-                    REFUSAL_MALFORMED_RESPONSE,
-                    f"{name} is {len(stream)} chars, over the {MAX_RESPONSE_CHARS} bound",
-                )
+                detail = f"{name} is {len(stream)} chars, over the {MAX_RESPONSE_CHARS} bound"
+                if result.exit_code != 0:
+                    # The bound is checked before the exit code so an oversized
+                    # stream never reaches a detail string — but the exit code is
+                    # still known, and a nonzero exit is a reported failure, not a
+                    # success. Reporting it as malformed would let _task_call()
+                    # map an ordinary rejection with a large diagnostic into an
+                    # ambiguous outcome, crossing a boundary that was never
+                    # crossed. The detail stays bounded; only the reason changes.
+                    return BbRefusal(
+                        REFUSAL_TRANSPORT_FAILED, f"exit {result.exit_code}: {detail}"
+                    )
+                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, detail)
         if result.exit_code != 0:
             return BbRefusal(
                 REFUSAL_TRANSPORT_FAILED,

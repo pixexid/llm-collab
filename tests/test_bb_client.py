@@ -438,13 +438,38 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIn("over the", outcome.detail)
 
     def test_oversized_stderr_is_bounded_before_it_reaches_a_detail_string(self):
+        """The invariant here is the bounded detail; a nonzero exit is a transport failure.
+
+        The size bound is checked before the exit code so the stream never reaches
+        a detail string — but the exit code is known either way, and reporting a
+        reported failure as malformed would let the task seam convert it.
+        """
         client, _ = enabled_client(
             {"thread show": BbTransportResult(1, "", "e" * (MAX_RESPONSE_CHARS + 1))}
         )
         outcome = client.thread_state(SHOWN_THREAD)
         self.assertIsInstance(outcome, BbRefusal)
-        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+        self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
         self.assertLess(len(outcome.detail), 200)
+
+    def test_an_oversized_nonzero_task_response_stays_a_transport_failure(self):
+        """No success-or-timeout boundary was crossed, so nothing is ambiguous.
+
+        An ordinary spawn rejection carrying a large diagnostic must not become
+        retry-suppressing — that would contradict the rule this lane just added,
+        which puts native nonzero exits outside it.
+        """
+        oversized = "x" * (MAX_RESPONSE_CHARS + 1)
+        for stream, response in (
+            ("stdout", BbTransportResult(1, oversized, "")),
+            ("stderr", BbTransportResult(1, "", oversized)),
+        ):
+            with self.subTest(stream=stream):
+                client, _ = spawning_client(**{"thread spawn": response})
+                outcome = spawn(client)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
+                self.assertLess(len(outcome.detail), 200)
 
     def test_deeply_nested_json_becomes_a_typed_refusal(self):
         """Unconverted, this escapes the refusal contract as a bare RecursionError."""
