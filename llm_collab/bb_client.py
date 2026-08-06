@@ -179,6 +179,13 @@ class BbTransportResult:
 # A transport takes argv (without the `bb` prefix) plus a deadline and returns a
 # BbTransportResult, or raises BbTransportTimeout. Injecting it is what lets the
 # Slice 1A tests run entirely on recorded fixtures with no live bb server.
+#
+# A transport OWNS its own read bound: by the time it returns, both streams are
+# already materialized, so the client's MAX_RESPONSE_CHARS check can refuse an
+# oversized response but cannot prevent one from being read into memory. A
+# transport that reads a real subprocess must stop at MAX_RESPONSE_CHARS + 1 and
+# raise rather than accumulate. No such transport ships in Slice 1A — every
+# caller here injects one — and the production reader is tracked separately.
 BbTransport = Callable[[Sequence[str], float], BbTransportResult]
 
 
@@ -643,7 +650,19 @@ class BbClient:
         result = self._task_call(argv)
         if isinstance(result, BbRefusal):
             return result
-        return self._decode(result)
+        decoded = self._decode(result)
+        if isinstance(decoded, BbRefusal):
+            # bb exited 0, so the thread was created or the message queued; only
+            # the report of it was unreadable. Reporting that as a clean
+            # malformed-response failure invites the retry that a task-bearing
+            # call must never invite. A read can safely call this malformed; a
+            # task cannot.
+            return BbRefusal(
+                REFUSAL_AMBIGUOUS,
+                f"{' '.join(argv)} succeeded but its response was unreadable "
+                f"({decoded.detail}); the operation may have been performed",
+            )
+        return decoded
 
     def _call(self, argv: Sequence[str]) -> BbTransportResult | BbRefusal:
         try:
@@ -677,4 +696,13 @@ class BbClient:
             # escapes the refusal contract entirely as a bare interpreter error.
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE, "response nesting exceeded the decoder limit"
+            )
+        except ValueError as exc:
+            # A JSON integer longer than sys.get_int_max_str_digits() (4300 by
+            # default, far under MAX_RESPONSE_CHARS) raises a BARE ValueError,
+            # not a JSONDecodeError — so the size bound never sees it and the
+            # JSONDecodeError clause above does not catch it. Ordered last:
+            # JSONDecodeError subclasses ValueError and keeps its own message.
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE, f"response exceeded a decoder limit: {exc}"
             )

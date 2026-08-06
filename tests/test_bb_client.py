@@ -8,6 +8,7 @@ the response/failure contract Slice 1B will call.
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
 
@@ -432,6 +433,39 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
+    def test_an_overlong_json_integer_becomes_a_typed_refusal(self):
+        """A bare ValueError, not a JSONDecodeError — the size bound never sees it.
+
+        sys.get_int_max_str_digits() is 4300 by default, far below
+        MAX_RESPONSE_CHARS, so this arrives as a well-formed response that the
+        decoder refuses on a limit of its own.
+        """
+        self.assertLess(sys.get_int_max_str_digits(), MAX_RESPONSE_CHARS)
+        client, _ = enabled_client(
+            {"thread show": BbTransportResult(0, "1" * 5000, "")}
+        )
+        outcome = client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+
+    def test_an_undecodable_task_response_is_ambiguous_not_a_clean_failure(self):
+        """bb exited 0, so the thread exists; only its report was unreadable.
+
+        Calling this malformed would invite the retry that creates a second real
+        thread, which is the whole reason task-bearing calls are never retried.
+        """
+        client, _ = spawning_client(**{"thread spawn": BbTransportResult(0, "not json", "")})
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_an_undecodable_read_response_stays_malformed(self):
+        """A read performed nothing, so there is nothing to be ambiguous about."""
+        client, _ = enabled_client({"thread show": BbTransportResult(0, "not json", "")})
+        outcome = client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+
 
 class EventReplayTest(unittest.TestCase):
     def _log_client(self, payload: object, **kwargs):
@@ -541,13 +575,17 @@ class SendTest(unittest.TestCase):
         self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
 
     def test_send_refuses_unvalidated_text(self):
-        """BbClient is the sole response validator; raw stdout is not a result."""
+        """BbClient is the sole response validator; raw stdout is not a result.
+
+        Ambiguous rather than malformed: `tell` is task-bearing, so an exit-0
+        response we cannot read means the message may already be queued.
+        """
         client, _ = enabled_client(
             {"thread tell": BbTransportResult(0, "Thread thr_x updated", "")}
         )
         outcome = client.send(thread_id=SPAWNED_THREAD, message="m")
         self.assertIsInstance(outcome, BbRefusal)
-        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
 
     def test_send_refuses_a_response_that_does_not_report_ok(self):
         payload = json.loads(fixture("thread_tell_queued.json"))
