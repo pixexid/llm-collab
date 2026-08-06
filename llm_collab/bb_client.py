@@ -36,6 +36,9 @@ the installed 0.35.1 CLI, not from docs:
 from __future__ import annotations
 
 import json
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -744,3 +747,85 @@ class BbClient:
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE, f"response exceeded a decoder limit: {exc}"
             )
+
+
+class BbResponseTooLarge(Exception):
+    """A native stream exceeded MAX_RESPONSE_CHARS while it was being read.
+
+    Distinct from the client's own size refusal: this is raised by the transport
+    at the read boundary, so the oversized bytes are never accumulated. The
+    client's check remains as a second layer for injected transports that do not
+    bound themselves.
+    """
+
+
+def _read_bounded(stream, limit: int) -> str:
+    """Read at most ``limit + 1`` characters, then raise rather than accumulate.
+
+    The +1 is what makes the bound detectable: reading exactly ``limit`` cannot
+    distinguish "fits" from "truncated here", and a truncated response that still
+    claims to be a response is the failure this exists to prevent. Reading in
+    chunks keeps a single enormous line from defeating the bound, which a
+    line-oriented read would not.
+    """
+    chunks: list[str] = []
+    remaining = limit + 1
+    while remaining > 0:
+        chunk = stream.read(min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    text = "".join(chunks)
+    if len(text) > limit:
+        raise BbResponseTooLarge(f"native stream exceeded {limit} chars while reading")
+    return text
+
+
+def subprocess_transport(
+    bb_executable: Sequence[str], *, max_response_chars: int = MAX_RESPONSE_CHARS
+) -> BbTransport:
+    """The production transport: one bb subprocess per call, bounded while reading.
+
+    Slice 1A shipped no production transport, so GH-570 is discharged here rather
+    than deferred: both streams are bounded at the read boundary, and an overflow
+    kills the child and raises instead of returning a truncated result.
+
+    A deadline is enforced with ``communicate``-free manual reads so the bound
+    applies before the whole stream is materialized; on timeout the child is
+    killed and ``BbTransportTimeout`` is raised, which the client maps to an
+    AMBIGUOUS outcome for task-bearing calls.
+    """
+
+    def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
+        process = subprocess.Popen(
+            [*bb_executable, *argv],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                out = pool.submit(_read_bounded, process.stdout, max_response_chars)
+                err = pool.submit(_read_bounded, process.stderr, max_response_chars)
+                stdout = out.result(timeout=timeout_seconds)
+                stderr = err.result(timeout=timeout_seconds)
+            exit_code = process.wait(timeout=timeout_seconds)
+        except FuturesTimeout as exc:
+            process.kill()
+            raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
+        except BbResponseTooLarge:
+            # Kill before re-raising: the child is still writing, and leaving it
+            # running would keep producing output nobody will read.
+            process.kill()
+            raise
+        finally:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+        return BbTransportResult(exit_code, stdout, stderr)
+
+    return transport
