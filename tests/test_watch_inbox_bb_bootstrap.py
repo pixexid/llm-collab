@@ -26,9 +26,37 @@ class BbWatcherBootstrapTest(unittest.TestCase):
                 "project_id": "project-one",
                 "chat_id": "CHAT-ONE",
                 "canonical_message_id": canonical_message_id,
+                # Every real packet declares its repo scope -- deliver.py has
+                # required --repo-targets since #309 -- and a scoped subscriber
+                # refuses an undeclared packet as route_ambiguous. Omitting it
+                # here would encode a shape dispatch itself would never accept.
+                "repo_targets": ["app"],
             },
             "body": "start the worker",
         }
+
+    def scoped_packet(self, repo_targets: list[str]) -> dict:
+        packet = self.packet()
+        packet["frontmatter"] = {**packet["frontmatter"], "repo_targets": repo_targets}
+        return packet
+
+    def test_a_foreign_repo_packet_is_not_a_bootstrap_candidate(self) -> None:
+        """Bootstrap runs BEFORE dispatch_session's repo gate.
+
+        Without the scope check here a packet addressed to another repository in
+        the same project would spawn a real bb thread and execute its prompt.
+        The in-scope control is asserted alongside it so this cannot pass by
+        excluding everything.
+        """
+        foreign = watch_inbox._bb_first_packets(
+            "glmpi", "project-one", [self.scoped_packet(["other"])], ["app"]
+        )
+        self.assertEqual({}, foreign, "a packet scoped to another repo reached bootstrap")
+
+        in_scope = watch_inbox._bb_first_packets(
+            "glmpi", "project-one", [self.scoped_packet(["app"])], ["app"]
+        )
+        self.assertIn("CHAT-ONE", in_scope, "the scope filter excluded a legitimate packet")
 
     def test_disabled_gate_does_not_read_project_or_start(self) -> None:
         with patch.object(watch_inbox, "config_get", return_value=False), patch.object(

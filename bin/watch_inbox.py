@@ -413,6 +413,7 @@ def _bb_first_packets(
     agent_id: str,
     project_id: str,
     messages: Mapping[str, dict] | Sequence[dict] | None,
+    repo_targets: list[str] | None = None,
 ) -> dict[str, dict]:
     source = (
         list(messages.values())
@@ -427,6 +428,19 @@ def _bb_first_packets(
             continue
         frontmatter = message.get("frontmatter")
         if not isinstance(frontmatter, Mapping) or frontmatter.get("project_id") != project_id:
+            continue
+        # Bootstrap runs BEFORE dispatch_session's repo-scope gate, so without
+        # this a packet scoped to another repository in the same project would
+        # spawn a real bb thread and execute its prompt. The project check above
+        # is kept deliberately: repo_scope_matches short-circuits to True when
+        # the subscriber is unscoped, without comparing projects.
+        scope_ok, _scope_reason = repo_scope_matches(
+            repo_targets,
+            frontmatter.get("repo_targets"),
+            subscriber_project=project_id,
+            packet_project=frontmatter.get("project_id"),
+        )
+        if not scope_ok:
             continue
         chat_id = frontmatter.get("chat_id")
         path = message.get("path")
@@ -519,7 +533,7 @@ def _bootstrap_bb_before_dispatch(
 ) -> list[str]:
     if project_id is None or not bb_bootstrap_enabled():
         return []
-    packets = _bb_first_packets(agent_id, project_id, messages)
+    packets = _bb_first_packets(agent_id, project_id, messages, repo_targets)
     if not packets:
         return []
     project = get_project(project_id)

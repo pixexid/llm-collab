@@ -1796,10 +1796,22 @@ def execute_bb_bootstrap_plan(
                 "binding_generation": int(result["binding"]["generation"]),
                 "endpoint_id": result["binding"]["endpoint_id"],
             }
-            with _session_write_lock():
-                if update_binding_from_session(session, existing={}) is None:
-                    raise ValueError("bb session cannot produce a binding record")
-                save_session(session)
+            # Past this point the native thread EXISTS and its id is recoverable.
+            # A publication failure that escaped as a generic error would reach
+            # execute_bootstrap as BOOTSTRAP_FAILED — clean and retryable-looking —
+            # and strand the real thread while inviting a second one. An orphan
+            # carrying the id is the only honest outcome here.
+            try:
+                with _session_write_lock():
+                    if update_binding_from_session(session, existing={}) is None:
+                        raise ValueError("bb session cannot produce a binding record")
+                    save_session(session)
+            except Exception as error:
+                raise ManagedStartOrphaned(
+                    f"bb thread {native_thread_id} started but its session could not be "
+                    f"published: {error}",
+                    native_session_id=native_thread_id,
+                ) from error
             return native_thread_id
 
         return execute_bootstrap(
