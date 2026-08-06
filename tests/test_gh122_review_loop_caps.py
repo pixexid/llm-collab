@@ -1362,8 +1362,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 11 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 12 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
+
+        # GH-556: pinning the marker alone let the marker and the body disagree.
+        # A v12 block was added while the marker still read 11, the suite stayed
+        # green at 2483, and startup/drift reported v11 against a v12 contract.
+        # Derive the expected marker from the body instead of pinning both
+        # independently, so the next version bump cannot repeat it.
+        newest_in_body = max(
+            int(match) for match in re.findall(r"^Contract v(\d+) \(", text, re.M)
+        )
+        marker = re.search(r"<!-- CONTRACT_VERSION: (\d+) -->", text)
+        self.assertIsNotNone(marker, "AGENTS.md must carry a CONTRACT_VERSION marker")
+        self.assertEqual(
+            newest_in_body,
+            int(marker.group(1)),
+            "CONTRACT_VERSION marker must equal the newest `Contract vN` block in "
+            "the body; a mismatch makes startup and drift checks report a stale "
+            "contract version",
+        )
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
@@ -1889,6 +1907,71 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "an ambiguous or prior-head `+1` is not terminal here — fall back to the "
             "prior-OID clause below with local proof of every amendment",
             text,
+        )
+
+
+class AxIsNeverPrimaryDocTest(unittest.TestCase):
+    """v12 says routine exact-session dispatch is the wake for every
+    watcher-backed recipient, Codex included, and AX is the fallback
+    `deliver.py` selects.
+
+    This is a regression guard, not a general detector: each phrase below is one
+    that actually shipped and had to be corrected. The class survived four review
+    rounds on GH-556 because a hand sweep kept finding the named file and missing
+    the next one — the last miss was a bullet beginning "primary for a Codex
+    recipient only", which no grep pairing "AX" with "primary" on one line could
+    see."""
+
+    FORBIDDEN = (
+        "no background event pickup",
+        "no background pickup",
+        "no native session watcher",
+        "no native session event watcher",
+        "no native watcher",
+        "non-Codex watcher-backed",
+        "primary for a Codex recipient",
+        "avoid registering the matching dispatchable autobridge",
+        "ax remains the routine doorbell",
+        "it is the normal transport",
+    )
+
+    def test_no_doc_makes_ax_the_primary_wake(self):
+        # Generated worker instructions count: bin/new_collab_session.py prints
+        # the pickup guidance every new collaboration session is onboarded with,
+        # and a docs-only scan stayed green while it still taught the retired
+        # model (PR #559 r3725690813).
+        # Worker-facing Markdown is not only under docs/: the root README and
+        # tools/axbridge/README.md both taught the AX-primary model while a
+        # docs-only scan stayed green (PR #559 r3725733643). Chats/, Tasks/ and
+        # State/ are excluded because packets legitimately QUOTE these phrases
+        # when reporting them.
+        roots = [
+            REPO_ROOT / "AGENTS.md",
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "bin" / "new_collab_session.py",
+            *(REPO_ROOT / "docs").rglob("*.md"),
+            *(REPO_ROOT / "tools").rglob("*.md"),
+        ]
+        offenders = []
+        for path in roots:
+            text = path.read_text(encoding="utf-8")
+            # Whitespace-normalized: these phrases live in wrapped prose and
+            # docstrings, so a raw substring test silently misses any instance
+            # that happens to straddle a line break — which is how the pm2.md
+            # bullet survived three sweeps.
+            lowered = " ".join(text.lower().split())
+            for phrase in self.FORBIDDEN:
+                # Case-insensitive: the sentence-initial "No native session
+                # watcher" is the same claim as the mid-sentence one, and a
+                # case-only miss is exactly how this class kept surviving.
+                if phrase.lower() in lowered:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}: {phrase!r}")
+        self.assertEqual(
+            [],
+            offenders,
+            "these phrasings tell a worker that Codex lacks routine pickup, or that "
+            "AX is its primary wake, both of which contract v12 retired:\n"
+            + "\n".join(offenders),
         )
 
 

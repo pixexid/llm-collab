@@ -6,13 +6,19 @@ project/chat so future messages can be routed to that parked worker session.
 Use it to reduce short manual relays. Do not use it to make workers fully
 autonomous.
 
-## Status: provisional safety-fuse, not the primary wake
+## Status: the primary wake (contract v12)
+
+Routine exact-session dispatch through session autobridge is **the** routine wake
+for every watcher-backed recipient. Bounded polling and heartbeat observation are
+a separate thing and remain a safety-fuse; do not read the limits on those as
+limits on dispatch.
 
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
 the busy-safe **bidirectional AX doorbell**, and only through the exact command
-printed by `deliver.py`. Every non-Codex watcher-backed worker is woken by its
-durable packet and its own watcher. See
+printed by `deliver.py`. Every watcher-backed worker, Codex included, is woken
+by its durable packet and its own watcher; AX is reached only when that dispatch
+is unavailable. See
 `claude-code-desktop-computer-use-bridge.md`. **GH-470: composer content and
 `AXValue` readability are never a sender-side hold, and neither is a busy/running
 recipient.** The recipient never types into its own composer, so any value there
@@ -37,7 +43,8 @@ the recovery path when AX cannot safely resolve the native composer target.
 **deprecated** as the primary wake — it wastes tokens and a heartbeat set on
 guessed timing can fire into changed context.
 
-Session autobridge and PM2/heartbeat polling survive only as a bounded,
+PM2/heartbeat **polling and observation** — not session autobridge dispatch,
+which is the primary wake — survive only as a bounded,
 **provisional/experimental safety-fuse**, on trial, with hard constraints:
 
 - only when a doorbell attempt is blocked, or a worker is visibly running and a
@@ -52,7 +59,7 @@ Session autobridge and PM2/heartbeat polling survive only as a bounded,
 - must be fixed or removed if it misbehaves on real tasks
 
 If the safety-fuse causes stale-context or duplicate-wake issues in practice,
-remove it and rely on the doorbell + mailbox-drain self-heal.
+remove it and rely on exact-session dispatch plus the mailbox-drain self-heal.
 
 ## Safety Defaults
 
@@ -358,8 +365,8 @@ Because a transport failure may occur after runtime acceptance, an automatic
 retry is not a proven exactly-once contract. Use disposable sessions for tests
 and do not target an active operator thread. Transactional busy deferral,
 coalescing, and broad ambiguous-delivery reconciliation belong to the planned
-[Thread Event Runner](thread-event-runner-rfc.md), not this provisional
-autobridge.
+[Thread Event Runner](thread-event-runner-rfc.md), not to autobridge dispatch as
+it stands today.
 
 If a message is intentionally abandoned, clear it explicitly by marking it read:
 

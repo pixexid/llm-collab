@@ -180,13 +180,14 @@ Operational rule:
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- when no matching dispatchable session autobridge exists and `deliver.py`
-  reports `ax_doorbell_required: true`, the primary wake for Codex is the
-  **bidirectional AX doorbell** (see
+- routine exact-session dispatch is the wake for every watcher-backed worker,
+  Codex included. Only when no matching dispatchable session autobridge exists
+  and `deliver.py` reports `ax_doorbell_required: true` does Codex fall back to
+  the **bidirectional AX doorbell** (see
   `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
   dispatchable runtime binding
-- every non-Codex worker with a background inbox watcher is woken by the durable
-  packet and that watcher alone, never by AX. Preserve the packet and let the
+- every worker other than a Codex on that fallback path is woken by the durable
+  packet and its own watcher alone, never by AX. Preserve the packet and let the
   watcher own pickup. See
   `session-autobridge-runbook.md` for the full rule
 - attended Computer Use is fallback/recovery when AX cannot safely target or
@@ -198,11 +199,10 @@ Current Phase 1 routing gives a matching dispatchable session autobridge
 precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
 suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
 uses the separately documented session-autobridge path and its retry limitations.
-Do not describe AX as primary for that packet. If the workflow requires AX as
-the primary wake, avoid registering the matching dispatchable autobridge or
-deactivate it before calling `deliver.py` (see
-`session-autobridge-runbook.md#deactivate-a-session`), then verify the delivery
-result actually reports `ax_doorbell_required: true`.
+Do not describe AX as primary for that packet, and **never deactivate a working
+binding to obtain an AX wake** — that removes the routine dispatch v12 requires
+in order to reach a fallback. If `deliver.py` does not print an AX command, the
+answer is to repair or diagnose dispatch, not to disable it.
 
 Safest task-grade workflow for desktop-app agents:
 

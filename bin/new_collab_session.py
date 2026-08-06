@@ -23,13 +23,12 @@ It:
   3. Creates the chat.
   4. Registers ONLY the initiator's own, explicitly-supplied native session.
   5. Prints the initiator's own pickup command, branched by its wake channel
-     (a watcher-backed initiator arms an inbox watcher; Codex, with no native
-     watcher, gets poll/AX guidance) — do it, a packet you never see is a packet
-     you never answer.
+     (every watcher-backed initiator arms an inbox watcher, Codex included) — do
+     it, a packet you never see is a packet you never answer.
   6. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
-     plus the pickup command for that worker's real wake channel (watcher-backed
-     workers watch; Codex has no native watcher and is woken by the sender's AX
-     doorbell, so it polls).
+     plus the pickup command for that worker's real wake channel. Contract v12:
+     routine exact-session dispatch is the wake for every watcher-backed worker,
+     and AX is only the fallback deliver.py selects.
 
 Usage:
   python bin/new_collab_session.py \
@@ -152,16 +151,20 @@ def agent_activation(agents: dict, agent_id: str) -> dict:
 
 
 def wake_channel(activation: dict) -> str:
-    """How this worker actually receives a packet. Keyed off real capability,
-    not the aspirational `watcher_enabled` flag (Codex carries both an ax_app
-    and watcher_enabled=True, but has no native session watcher — the ax_app
-    wins)."""
+    """How this worker actually receives a packet.
+
+    Contract v12: routine exact-session dispatch is the wake for every
+    watcher-backed worker, Codex included, so `watcher_enabled` wins over
+    `ax_app`. This ordering was inverted until 2026-08-06, on a premise about
+    Codex pickup that the app-server delivery proof disproved. An `ax_app` now
+    means only that AX is available as the fallback `deliver.py` selects, never
+    that the worker lacks pickup."""
+    if activation.get("type") == "cli_session" and activation.get("watcher_enabled"):
+        return "watcher"
     if activation.get("ax_attended_only"):
         return "ax_attended"
     if activation.get("ax_app"):
         return "ax_doorbell"
-    if activation.get("type") == "cli_session" and activation.get("watcher_enabled"):
-        return "watcher"
     if activation.get("type") == "human_relay":
         return "relay"
     return "unknown"
@@ -228,11 +231,49 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
     )
 
 
-def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family) -> list[str]:
-    """How THIS agent picks up packets, keyed to its real wake channel. A
-    persistent native watcher is printed only for watcher-backed workers; Codex
-    has no native session watcher, so it gets polling/AX guidance instead of a
-    watcher it cannot run."""
+def needs_dispatch_wake(activation: dict) -> bool:
+    """True when this worker's turn is STARTED by autobridge dispatch rather
+    than by reading an announcement — today, a worker carrying an `ax_app`
+    (Codex). Such a worker must run the agent-wide dispatching watcher, because
+    an exact-session watcher never calls dispatch_autobridge."""
+    return bool((activation or {}).get("ax_app"))
+
+
+def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family,
+                 needs_dispatch: bool = False) -> list[str]:
+    """How THIS agent picks up packets, keyed to its real wake channel. Every
+    watcher-backed worker arms a persistent native watcher — Codex included,
+    per contract v12; the polling block below is for a worker that genuinely has
+    no watcher to arm.
+
+    Two watcher shapes, and the difference is not cosmetic. An exact-session
+    watcher (`--session`) OBSERVES: watch_inbox.py runs dispatch_autobridge only
+    when `--session` is absent, so it announces `new_message` and stops. That is
+    right for a worker that reads its own inbox on the announcement. A worker
+    whose turn is STARTED by autobridge dispatch — one carrying an `ax_app`,
+    i.e. Codex — needs the agent-wide dispatching watcher instead; give it the
+    exact-session command and a bound packet would suppress AX while nothing
+    ever wakes it."""
+    if channel == "watcher" and needs_dispatch:
+        return [
+            "# 1) Ensure the TRANSPORT first. A binding that dispatches while",
+            "#    the app-server sidecar is missing suppresses AX and has",
+            "#    nowhere to send the turn — that is the 20-hour silent outage",
+            "#    of 2026-08-05. This fails closed (exit 2) with the exact",
+            "#    remedy when the token is absent or insecure, so a failure",
+            "#    here means STOP, not continue:",
+            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
+            "",
+            "# 2) Then ensure the MANAGED dispatching watcher (one per agent,",
+            "#    not per chat). Your turn is started by autobridge dispatch,",
+            "#    and watch_inbox only dispatches when --session is absent —",
+            "#    but a raw second poller alongside the PM2 one would",
+            "#    double-dispatch: both read processed_messages before invoking",
+            "#    the runtime and record after, so each can issue turn/start for",
+            "#    the same unread packet. `ensure` is idempotent: it starts the",
+            "#    singleton only if missing.",
+            f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
+        ]
     if channel == "watcher":
         return [
             "# Arm your own inbox watcher in a persistent Monitor:",
@@ -240,9 +281,10 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
         ]
     if channel == "ax_doorbell":
         return [
-            "# You have NO native session watcher. A bound session receives",
-            "# autobridge dispatch; between turns, poll your inbox — senders wake",
-            "# you with the AX doorbell deliver.py prints when you are unbound:",
+            "# This activation has no watcher to arm. A bound session receives",
+            "# autobridge dispatch; between turns, poll your inbox — senders",
+            "# wake you with the AX doorbell deliver.py prints when you are",
+            "# unbound:",
             f"{LAUNCH} inbox.py --me {agent} --project {project} --chat {chat} \\",
             f"  --session {session} --repo-target {repo_target} --peek --limit 5",
         ]
@@ -252,7 +294,8 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ]
 
 
-def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
+def coworker_prompt(agent, channel, project, chat, repo_target, family,
+                    needs_dispatch: bool = False) -> str:
     session = f"SESSION-{agent.upper()}-{chat.split('-')[-1]}"
     # claude_app discovery refuses an unscoped read (it could pick another
     # project's session), so the worker must pass its own checkout path.
@@ -281,7 +324,8 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
         "",
         "# 3. Pick up packets on YOUR wake channel:",
     ]
-    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>", family)
+    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>",
+                          family, needs_dispatch)
     return "\n".join(lines)
 
 
@@ -397,15 +441,18 @@ def main():
 
     print(f"chat_id: {chat}")
     print(f"initiator session: {my_session} ({args.me} / {args.my_runtime_session_id})")
-    my_channel = wake_channel(agent_activation(agents, args.me))
+    my_activation = agent_activation(agents, args.me)
+    my_channel = wake_channel(my_activation)
     print("\n=== YOUR OWN PICKUP (do this now) ===")
     print("\n".join(pickup_block(my_channel, args.me, args.project, chat,
                                  my_session, args.repo_target, args.my_runtime_session_id,
-                                 args.my_runtime_family)))
+                                 args.my_runtime_family, needs_dispatch_wake(my_activation))))
     for agent_id, family in coworkers:
-        channel = wake_channel(agent_activation(agents, agent_id))
+        activation = agent_activation(agents, agent_id)
+        channel = wake_channel(activation)
         print(f"\n=== SETUP PROMPT — share with {agent_id} ===")
-        print(coworker_prompt(agent_id, channel, args.project, chat, args.repo_target, family))
+        print(coworker_prompt(agent_id, channel, args.project, chat, args.repo_target, family,
+                              needs_dispatch_wake(activation)))
 
 
 if __name__ == "__main__":

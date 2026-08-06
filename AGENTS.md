@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 11 -->
+<!-- CONTRACT_VERSION: 12 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,43 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v12 (2026-08-06) makes the **durable packet plus session-autobridge
+dispatch the routine wake for every watcher/monitor-backed recipient, Codex
+included**, and demotes AX to the fallback. This supersedes only the routing half
+of v10: AX is still Codex-only, and still only ever the exact command
+`deliver.py` prints — what changes is *when* it is used, never *who* may receive
+it.
+
+`deliver.py` has behaved this way for some time; the contract text was the part
+out of date. A dispatchable autobridge target takes precedence and suppresses the
+doorbell (`wake_fallback_allowed = not autobridge_ready and not
+dispatch_scope_refused`). Read that predicate literally rather than enumerating
+cases from it: AX is available whenever **no dispatchable target resolved and the
+refusal was not terminal**. Missing and inactive bindings are the common shapes,
+but they are not the whole set — an explicit target that contradicts the
+recipient's binding refuses with `exact_binding_mismatch` and leaves the fallback
+allowed too.
+
+Exactly two states are **terminal** and suppress every wake lane: an
+**unreadable** binding and a **scope refusal**. Both set
+`dispatch_scope_refused`, which makes `wake_fallback_allowed` false, because no
+lane may wake a recipient whose authoritative record could not be read or whose
+scope forbids the packet. Those are repairs; do not try to ring through them.
+
+**An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
+with `autobridge_refusal_reason: exact_binding_required` is not an error and
+prints no warning, so the absence of a doorbell is *not* evidence that dispatch
+happened — read the `deliver.py` result rather than inferring from quiet. Every
+delivery to Codex on 2026-08-05 took the AX fallback for this reason and nobody
+noticed, because the contract said AX was the Codex path anyway.
+
+Why it is worth the change: while AX was the only route to Codex, no Pi worker
+could reach it — Pi workers cannot ring AX — so every reply had to be relayed by
+a Claude thread. On 2026-08-05 that cost 35 minutes with two GH-549 packets
+unread behind a single relay. With the recipient bound, any worker's `deliver.py`
+reaches Codex directly and the relay hop disappears. Mechanics in
+`docs/workflows/session-autobridge-runbook.md`.
 
 Contract v11 (2026-08-03) ends idle standoffs at their real cause: bad
 delegation. A question and a task delegation are different acts — a question gets
@@ -203,10 +240,66 @@ rather than opening a parallel lane. The mailbox is the only channel between
 workers — a PR comment is not a message, and a GitHub verdict is not a substitute
 for draining the inbox before you open a PR or merge.
 
-AX is not a general worker wake. Only a Codex/ChatGPT recipient may receive it,
-and only through the exact command `deliver.py` prints. For every non-Codex
-watcher/monitor-backed recipient, including Claude, write the durable packet and
-stop; never invent an `axsend` command or bypass the recipient's watcher.
+**Write the durable packet and let dispatch wake the recipient.** For every
+watcher/monitor-backed recipient — Claude, the Pi workers, and Codex once it is
+bound — a matching session-autobridge target takes precedence and suppresses the
+doorbell.
+
+**`autobridge_ready: true` is send-time routability, not delivery.** It means a
+dispatchable binding existed when the packet was written. Nothing in the
+`deliver.py` result observes the recipient's watcher, so a post-send watcher or
+transport failure is invisible to the sender: **delivery is unconfirmed until a
+dispatch or acceptance receipt exists** for that packet. Never read
+`autobridge_ready: true` with `ax_doorbell_required: false` as "the recipient has
+it". Where no receipt exists, **preserve the packet and diagnose** — binding,
+watcher, sidecar — and do not reach for AX. A ready binding suppresses the
+doorbell, so in exactly that state `deliver.py` prints no AX command and there is
+nothing legitimate to run. AX becomes available only when a **fresh**
+`deliver.py` result prints it, which happens only after the exact binding is
+absent or nondispatchable.
+
+The recovery is concrete, so a stranded packet is never a dead end:
+
+1. read the recipient's watcher log for its `new_message` / `autobridge_dispatch`
+   / `autobridge_consumed` lifecycle, and its adapter sidecar for a live endpoint;
+2. reconcile whatever the log names — a pointer to a deleted packet aborts
+   enumeration before message selection, and a stale unread backlog will flush
+   into a live thread on restart;
+3. restart the recipient's watcher on a clean baseline;
+4. re-dispatch **one fresh probe packet** and require its receipt before treating
+   the channel as repaired;
+5. only then consider the stranded packet — and **do not resend it by reflex**.
+   `deliver.py` mints a fresh timestamped path on every send while dispatch dedup
+   is keyed by message path, so a resend is a *new* packet to the runtime and can
+   produce a second turn. Resend only when the original is proven to have failed
+   **before** runtime acceptance and is still unread. Where acceptance is
+   ambiguous, or the packet was marked read with no processed evidence, record
+   the ambiguous delivery and reconcile explicitly instead.
+
+The recipient owns its own watcher and binding, so steps 2-3 belong to it; a
+sender that cannot reach it says so in the durable mailbox rather than inventing
+a wake. That sequence is what actually repaired the outage below.
+
+This is not hypothetical. On 2026-08-05 every packet to Codex reported
+`autobridge_ready: true` / `ax_doorbell_required: false` while its watcher failed
+on **every poll for roughly twenty hours** — a deleted-packet pointer made
+`bounded_unread_messages` raise before message selection, and the deployed
+sidecar token was absent so no external WS endpoint existed at all. The sender
+saw success throughout. Two independent faults, zero sender-visible signal.
+
+AX is the **fallback**, not the routine path, and it is still Codex-only: no
+other worker is ever an AX ring target, and it is only ever the exact command
+`deliver.py` prints — never an invented `axsend`, and never a way around a
+recipient's watcher. Ring only when `deliver.py` asks for it — which is whenever
+no dispatchable target resolved and the refusal was not terminal, not a fixed
+list of causes you can recite. The two terminal ones, an unreadable binding and a
+scope refusal, suppress the doorbell and are repairs rather than rings.
+
+Treat a missing doorbell as information, not permission: an unbound recipient
+refuses dispatch **silently** (`autobridge_refusal_reason:
+exact_binding_required`), so quiet means "unrouted", not "delivered". If a
+recipient you expect to be bound is not, that is the defect to fix — the
+recipient registers its own session, since only it knows its exact runtime id.
 
 ## Shared Checkout Safety
 

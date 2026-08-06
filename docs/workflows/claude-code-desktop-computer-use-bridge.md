@@ -5,7 +5,9 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 `/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
 `claude -p`, and other CLI/session-file flows.
 
-> Claude may ring Codex after writing a durable packet. Codex never rings
+> Claude may ring Codex after writing a durable packet, but only when
+> `deliver.py` prints the command — routine exact-session dispatch is the wake
+> whenever Codex's binding dispatches. Codex never rings
 > Claude: Claude is woken by its durable packet and the Claude app's own
 > background inbox watcher. The heartbeat survives only as a bounded,
 > provisional **safety-fuse** (see below), not as the primary path.
@@ -90,8 +92,9 @@ PM2 and manual `watch_inbox.py --me codex` dispatch both honor that sender-aware
 guard, leave the packet unread for durable recovery, and never runtime-trigger
 a Codex session from it. The watcher also excludes older `from: codex` /
 `to: codex` packets created before the persistent flag existed. External
-Claude/ZCode-to-Codex packets do not receive the guard and keep their normal AX
-or registered-runtime activation behavior.
+Claude/ZCode-to-Codex packets do not receive the guard and keep their ordinary
+activation behavior: routine exact-session dispatch when the binding dispatches,
+and the AX doorbell only as the fallback `deliver.py` selects.
 
 Native subagents use native subagent coordination for bounded local support.
 Do not route them through AX or Computer Use. Attended Computer Use is reserved
@@ -207,10 +210,12 @@ a different failure class and are not TCC update-survival evidence.
 The mailbox is the record; the doorbell is the notification. A doorbell with no
 corresponding mailbox packet is not valid for task-grade work.
 
-The doorbell exists for a worker that has no background event pickup of its own —
-Codex today. **Claude is not rung.** Its runtime carries its own inbox watcher,
-so the durable packet is the whole wake path; a Claude packet that is not being
-picked up is a watcher or binding defect to report, not a reason to reach for AX.
+The doorbell exists for the case where routine exact-session dispatch is
+unavailable for a Codex packet — not because Codex lacks background pickup. It
+has a watcher like every other worker, and that watcher is its routine wake.
+**Claude is not rung**, and neither is a Codex whose binding dispatches: the
+durable packet is the whole wake path, and a packet that is not being picked up
+is a watcher or binding defect to report, not a reason to reach for AX.
 See `session-autobridge-runbook.md`.
 
 ## Sender identifier convention
