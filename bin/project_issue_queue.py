@@ -375,7 +375,12 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
                 f"lane {order} depends_on mismatch for {task_id}: queue {depends_on!r} vs task {task_depends!r}"
             )
 
-        if queue_state == "blocked" and not lane.get("blocked_by") and not depends_on:
+        if (
+            queue_state == "blocked"
+            and lane.get("task_status") != "blocked"
+            and not lane.get("blocked_by")
+            and not depends_on
+        ):
             warnings.append(f"lane {order} is blocked but has no blocked_by/depends_on evidence")
 
     if queue_orders and sorted(queue_orders) != list(range(1, len(queue_orders) + 1)):
