@@ -49,6 +49,12 @@ AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES = {
     "supabase_amiga.get_advisors",
 }
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
+# Marker recorded in db_impact_detection_reasons when an explicit db_impact is not a
+# member. It has to survive `sync_db_contract`, because lifecycle callers sync BEFORE
+# they validate — `bin/claim_task.py:361` syncs straight after parsing and only
+# validates at :612/:632 — so a check that reads the raw frontmatter alone never fires
+# on the path that actually persists the transition.
+DB_IMPACT_INVALID_REASON_PREFIX = "invalid explicit db_impact: "
 PRODUCTION_SCHEMA_GUARD_STAGES = {"assignment", "review", "pr", "done"}
 DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
 DB_LOCAL_SCHEMA_ONLY_APPROVER = "operator"
@@ -759,7 +765,18 @@ def detect_db_contract(
     if explicit_impact in DB_IMPACT_VALUES:
         return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected
 
+    # Classify from the DETECTED markers only. The invalid-value marker below is a
+    # defect record, not evidence of database work, so it must not turn a task with
+    # no markers into `shared-supabase-required`.
     auto_impact = "shared-supabase-required" if reasons else "none"
+
+    if explicit_impact:
+        # A non-member explicit value is a defect, not a missing value. Record it so
+        # the signal survives synchronization: callers that sync before validating
+        # would otherwise see only the automatic classification this discarded value
+        # produced, and validate a task the author never actually classified.
+        reasons = [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons]
+
     return auto_impact, "auto", reasons, schema_change_detected
 
 
@@ -1179,6 +1196,20 @@ def validate_db_contract(
         body,
         project_override=project,
     )
+    if not invalid_explicit_impact:
+        # The caller may have synced before validating — `bin/claim_task.py:361` does,
+        # then validates at :612/:632 — in which case the raw read above sees the
+        # already-substituted value and the defect is invisible.
+        #
+        # Read the reason off the INCOMING frontmatter, not off `fm`. Re-synchronising
+        # an already-synchronised record sees a now-valid `db_impact`, takes the manual
+        # branch, and replaces the reasons with ["manual override"] — so the marker
+        # exists only on what the caller handed us.
+        for reason in _normalize_list(frontmatter.get("db_impact_detection_reasons")):
+            if reason.startswith(DB_IMPACT_INVALID_REASON_PREFIX):
+                raw_impact = reason[len(DB_IMPACT_INVALID_REASON_PREFIX) :]
+                invalid_explicit_impact = True
+                break
     db_impact = _normalize_text(fm.get("db_impact"))
     raw_project_ref = _normalize_text(frontmatter.get("db_project_ref"))
     summary = {

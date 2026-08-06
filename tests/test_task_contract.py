@@ -376,6 +376,52 @@ class TaskContractInvalidDbImpactTest(unittest.TestCase):
             f"invalid db_impact must not produce further diagnostics; got {collateral}",
         )
 
+    def test_invalid_db_impact_is_rejected_even_after_a_caller_pre_syncs(self) -> None:
+        """The lifecycle path syncs BEFORE it validates, so the raw read is not enough.
+
+        `bin/claim_task.py:361` runs `sync_task_contract` immediately after parsing and
+        only validates at :612/:632. By then the invalid value has been replaced by the
+        automatic classification, so a guard that reads only the raw frontmatter never
+        fires on the path that actually persists the transition.
+        """
+        # #given — exactly what a lifecycle caller hands to validation
+        original = {"project_id": "llm-collab", "db_impact": "additive_schema"}
+        body = "Wire the adapter against the local sqlite ledger schema."
+        synced, _changed = task_contract.sync_db_contract(original, body)
+        self.assertNotEqual(
+            "additive_schema",
+            synced["db_impact"],
+            "precondition: sync must have replaced the invalid value",
+        )
+
+        # #when — validate the SYNCED frontmatter, as claim_task.py does
+        errors, _summary = task_contract.validate_db_contract(
+            synced, body, stage="assignment"
+        )
+
+        # #then — the defect is still named, recovered from the recorded reason
+        self.assertTrue(
+            any("additive_schema" in error for error in errors),
+            f"invalid db_impact must survive synchronization; got {errors}",
+        )
+
+    def test_invalid_db_impact_marker_does_not_itself_classify_as_database_work(self) -> None:
+        """The defect record is not evidence of database work."""
+        # #given — an invalid value on a task with no database markers at all
+        frontmatter = {"project_id": "llm-collab", "db_impact": "additive_schema"}
+
+        # #when — a body with no marker words at all ("database" is itself a marker)
+        impact, detection, reasons, _schema = task_contract.detect_db_contract(
+            frontmatter, "Rename a helper and tidy its docstring."
+        )
+
+        # #then — recorded, but not promoted to shared-supabase-required
+        self.assertEqual("none", impact)
+        self.assertEqual("auto", detection)
+        self.assertTrue(
+            any(reason.startswith(task_contract.DB_IMPACT_INVALID_REASON_PREFIX) for reason in reasons)
+        )
+
     def test_valid_explicit_db_impact_still_passes_through(self) -> None:
         """The guard must reject only non-members — every real value still works."""
         for value in sorted(task_contract.DB_IMPACT_VALUES):
