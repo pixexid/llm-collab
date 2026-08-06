@@ -42,12 +42,22 @@ class PlainNewChatTest(unittest.TestCase):
 
 
 class WakeChannelTest(unittest.TestCase):
-    def test_codex_is_ax_not_watcher_despite_watcher_enabled(self):
-        # The whole bug-class: codex carries watcher_enabled=True but has no
-        # native session watcher. The ax_app must win, or it gets classified
-        # as watcher-backed and the AX wake is dropped.
+    def test_codex_is_watcher_backed_despite_carrying_an_ax_app(self):
+        # Contract v12 reverses the earlier ordering. Codex carries an ax_app
+        # AND watcher_enabled=True; the watcher wins, because routine
+        # exact-session dispatch is its wake and AX is only the fallback
+        # deliver.py selects. Classifying it as ax_doorbell taught every new
+        # Codex session to poll and await a ring instead of arming pickup.
         codex = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
-        self.assertEqual(ncs.wake_channel(codex), "ax_doorbell")
+        self.assertEqual(ncs.wake_channel(codex), "watcher")
+
+    def test_ax_app_without_a_watcher_still_resolves_to_the_doorbell(self):
+        # The ax_doorbell branch is not dead: an activation with an ax_app and
+        # no watcher still has no pickup of its own.
+        self.assertEqual(
+            ncs.wake_channel({"type": "cli_session", "ax_app": "Codex"}),
+            "ax_doorbell",
+        )
 
     def test_watcher_backed_worker(self):
         claude = {"type": "cli_session", "watcher_enabled": True}
@@ -61,12 +71,13 @@ class WakeChannelTest(unittest.TestCase):
 
 
 class CoworkerPromptTest(unittest.TestCase):
-    def test_codex_prompt_says_poll_not_watch(self):
-        p = ncs.coworker_prompt("codex", "ax_doorbell", "llm-collab",
-                                "CHAT-ABCD1234", "app", "codex_app")
-        self.assertIn("NO native session watcher", p)
-        self.assertIn("inbox.py", p)
-        self.assertNotIn("watch_inbox.py", p)
+    def test_codex_prompt_arms_the_watcher(self):
+        # A Codex co-worker is onboarded onto routine dispatch, not polling.
+        p = ncs.coworker_prompt("codex", ncs.wake_channel(
+            {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}),
+            "llm-collab", "CHAT-ABCD1234", "app", "codex_app")
+        self.assertIn("watch_inbox.py", p)
+        self.assertNotIn("NO native session watcher", p)
         self.assertIn("SESSION-CODEX-ABCD1234", p)
 
     def test_watcher_prompt_arms_watcher(self):
@@ -115,14 +126,21 @@ class CoworkerPromptTest(unittest.TestCase):
 
 
 class PickupBlockTest(unittest.TestCase):
-    def test_codex_pickup_never_arms_a_watcher(self):
-        # Codex has no native watcher: the initiator/self output must not tell it
-        # to arm one (codex ruling).
+    def test_codex_pickup_arms_a_watcher(self):
+        # Contract v12: Codex is watcher-backed like every other worker, so its
+        # activation resolves to the watcher channel and the printed pickup arms
+        # a real watcher. This reverses the earlier ruling that Codex had no
+        # native session watcher; it has one, and that watcher delivered the
+        # app-server proof on 2026-08-06.
+        channel = ncs.wake_channel(
+            {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
+        )
+        self.assertEqual("watcher", channel)
         block = "\n".join(ncs.pickup_block(
-            "ax_doorbell", "codex", "llm-collab", "CHAT-ABCD1234",
+            channel, "codex", "llm-collab", "CHAT-ABCD1234",
             "SESSION-CODEX", "app", "019f-native", "codex_app"))
-        self.assertNotIn("watch_inbox.py", block)
-        self.assertIn("inbox.py", block)
+        self.assertIn("watch_inbox.py", block)
+        self.assertNotIn("NO native session watcher", block)
 
     def test_watcher_pickup_arms_a_watcher(self):
         block = "\n".join(ncs.pickup_block(
@@ -180,9 +198,10 @@ class MainPathTest(unittest.TestCase):
                 ncs.main()
             return out.getvalue(), sub
 
-    def test_codex_initiator_gets_poll_not_watcher(self):
-        # P1: the initiator self-pickup must branch by wake channel — a Codex
-        # initiator must never be told to arm a persistent native watcher.
+    def test_codex_initiator_gets_a_watcher(self):
+        # Contract v12: a Codex initiator arms the routine watcher like anyone
+        # else. The old expectation (poll, await AX) taught every new Codex
+        # collaboration session the routing model v12 retired.
         out, _ = self._main([
             "--project", "p", "--title", "t", "--me", "codex",
             "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
@@ -190,8 +209,8 @@ class MainPathTest(unittest.TestCase):
         ])
         # initiator (codex) section is before the coworker section.
         initiator = out.split("SETUP PROMPT")[0]
-        self.assertIn("NO native session watcher", initiator)
-        self.assertNotIn("watch_inbox.py", initiator)
+        self.assertIn("watch_inbox.py", initiator)
+        self.assertNotIn("NO native session watcher", initiator)
 
     def test_claude_initiator_arms_watcher(self):
         out, _ = self._main([

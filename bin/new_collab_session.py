@@ -23,13 +23,12 @@ It:
   3. Creates the chat.
   4. Registers ONLY the initiator's own, explicitly-supplied native session.
   5. Prints the initiator's own pickup command, branched by its wake channel
-     (a watcher-backed initiator arms an inbox watcher; Codex, with no native
-     watcher, gets poll/AX guidance) — do it, a packet you never see is a packet
-     you never answer.
+     (every watcher-backed initiator arms an inbox watcher, Codex included) — do
+     it, a packet you never see is a packet you never answer.
   6. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
-     plus the pickup command for that worker's real wake channel (watcher-backed
-     workers watch; Codex has no native watcher and is woken by the sender's AX
-     doorbell, so it polls).
+     plus the pickup command for that worker's real wake channel. Contract v12:
+     routine exact-session dispatch is the wake for every watcher-backed worker,
+     and AX is only the fallback deliver.py selects.
 
 Usage:
   python bin/new_collab_session.py \
@@ -152,16 +151,20 @@ def agent_activation(agents: dict, agent_id: str) -> dict:
 
 
 def wake_channel(activation: dict) -> str:
-    """How this worker actually receives a packet. Keyed off real capability,
-    not the aspirational `watcher_enabled` flag (Codex carries both an ax_app
-    and watcher_enabled=True, but has no native session watcher — the ax_app
-    wins)."""
+    """How this worker actually receives a packet.
+
+    Contract v12: routine exact-session dispatch is the wake for every
+    watcher-backed worker, Codex included, so `watcher_enabled` wins over
+    `ax_app`. This ordering was inverted until 2026-08-06, on a premise about
+    Codex pickup that the app-server delivery proof disproved. An `ax_app` now
+    means only that AX is available as the fallback `deliver.py` selects, never
+    that the worker lacks pickup."""
+    if activation.get("type") == "cli_session" and activation.get("watcher_enabled"):
+        return "watcher"
     if activation.get("ax_attended_only"):
         return "ax_attended"
     if activation.get("ax_app"):
         return "ax_doorbell"
-    if activation.get("type") == "cli_session" and activation.get("watcher_enabled"):
-        return "watcher"
     if activation.get("type") == "human_relay":
         return "relay"
     return "unknown"
@@ -229,10 +232,10 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
 
 
 def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family) -> list[str]:
-    """How THIS agent picks up packets, keyed to its real wake channel. A
-    persistent native watcher is printed only for watcher-backed workers; Codex
-    has no native session watcher, so it gets polling/AX guidance instead of a
-    watcher it cannot run."""
+    """How THIS agent picks up packets, keyed to its real wake channel. Every
+    watcher-backed worker arms a persistent native watcher — Codex included,
+    per contract v12; the polling block below is for a worker that genuinely has
+    no watcher to arm."""
     if channel == "watcher":
         return [
             "# Arm your own inbox watcher in a persistent Monitor:",
@@ -240,9 +243,10 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
         ]
     if channel == "ax_doorbell":
         return [
-            "# You have NO native session watcher. A bound session receives",
-            "# autobridge dispatch; between turns, poll your inbox — senders wake",
-            "# you with the AX doorbell deliver.py prints when you are unbound:",
+            "# This activation has no watcher to arm. A bound session receives",
+            "# autobridge dispatch; between turns, poll your inbox — senders",
+            "# wake you with the AX doorbell deliver.py prints when you are",
+            "# unbound:",
             f"{LAUNCH} inbox.py --me {agent} --project {project} --chat {chat} \\",
             f"  --session {session} --repo-target {repo_target} --peek --limit 5",
         ]

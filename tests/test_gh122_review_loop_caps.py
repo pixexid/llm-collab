@@ -1927,18 +1927,35 @@ class AxIsNeverPrimaryDocTest(unittest.TestCase):
         "no background pickup",
         "no native session watcher",
         "no native session event watcher",
+        "no native watcher",
         "non-Codex watcher-backed",
         "primary for a Codex recipient",
         "avoid registering the matching dispatchable autobridge",
     )
 
     def test_no_doc_makes_ax_the_primary_wake(self):
-        roots = [REPO_ROOT / "AGENTS.md", *(REPO_ROOT / "docs").rglob("*.md")]
+        # Generated worker instructions count: bin/new_collab_session.py prints
+        # the pickup guidance every new collaboration session is onboarded with,
+        # and a docs-only scan stayed green while it still taught the retired
+        # model (PR #559 r3725690813).
+        roots = [
+            REPO_ROOT / "AGENTS.md",
+            REPO_ROOT / "bin" / "new_collab_session.py",
+            *(REPO_ROOT / "docs").rglob("*.md"),
+        ]
         offenders = []
         for path in roots:
             text = path.read_text(encoding="utf-8")
+            # Whitespace-normalized: these phrases live in wrapped prose and
+            # docstrings, so a raw substring test silently misses any instance
+            # that happens to straddle a line break — which is how the pm2.md
+            # bullet survived three sweeps.
+            lowered = " ".join(text.lower().split())
             for phrase in self.FORBIDDEN:
-                if phrase in text:
+                # Case-insensitive: the sentence-initial "No native session
+                # watcher" is the same claim as the mid-sentence one, and a
+                # case-only miss is exactly how this class kept surviving.
+                if phrase.lower() in lowered:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}: {phrase!r}")
         self.assertEqual(
             [],
