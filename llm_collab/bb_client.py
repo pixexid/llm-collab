@@ -431,25 +431,29 @@ class BbClient:
         )
         if isinstance(payload, BbRefusal):
             return payload
+
+        # Everything below runs AFTER bb exited 0, so the message may already be
+        # queued and bb has no idempotency at any layer. A response we cannot
+        # validate tells us nothing about whether the send happened — only that
+        # we cannot confirm it — so no check down here may report a clean
+        # failure a caller would retry into a second enqueue. Mirrors spawn(),
+        # where the same class surfaces as an orphan because a native id exists;
+        # here there is no such id, so ambiguous is the honest surface.
+        def performed(detail: str) -> BbRefusal:
+            return BbRefusal(REFUSAL_AMBIGUOUS, f"{detail}; the message may have been queued")
+
         if not isinstance(payload, Mapping):
-            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "tell envelope is not an object")
+            return performed("tell envelope is not an object")
         if payload.get("ok") is not True:
-            return BbRefusal(
-                REFUSAL_MALFORMED_RESPONSE,
-                f"tell envelope did not report ok=true: {payload.get('ok')!r}",
-            )
+            return performed(f"tell envelope did not report ok=true: {payload.get('ok')!r}")
         reported_thread = _require_str(payload, "threadId")
         if reported_thread != thread_id:
-            return BbRefusal(
-                REFUSAL_IDENTITY_MISMATCH,
-                f"told thread {thread_id!r}; bb reported {reported_thread!r}",
+            return performed(
+                f"told thread {thread_id!r}; bb reported {reported_thread!r}"
             )
         reported_mode = _require_str(payload, "mode")
         if reported_mode != "queue":
-            return BbRefusal(
-                REFUSAL_MALFORMED_RESPONSE,
-                f"requested queue mode; bb reported {reported_mode!r}",
-            )
+            return performed(f"requested queue mode; bb reported {reported_mode!r}")
         return BbQueued(thread_id=thread_id, mode=reported_mode)
 
     def thread_state(self, thread_id: str) -> BbThread | BbRefusal:
