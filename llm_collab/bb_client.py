@@ -661,6 +661,17 @@ class BbClient:
                 REFUSAL_AMBIGUOUS,
                 f"{' '.join(argv)} timed out; the operation may have been performed",
             )
+        if isinstance(result, BbRefusal) and result.reason == REFUSAL_MALFORMED_RESPONSE:
+            # The only malformed refusal _call() raises is its size bound, and it
+            # is checked before the exit code — so an exit-0 oversized response
+            # reached here having ALREADY performed the operation. Left clean it
+            # bypasses both the decode conversion and spawn()'s orphan seam, which
+            # is how an oversized spawn response could invite a duplicate spawn.
+            # Read paths never come through here and stay malformed.
+            return BbRefusal(
+                REFUSAL_AMBIGUOUS,
+                f"{result.detail}; the operation may have been performed",
+            )
         return result
 
     def _task_json(self, argv: Sequence[str]) -> Any | BbRefusal:

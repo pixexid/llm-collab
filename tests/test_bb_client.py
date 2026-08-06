@@ -469,6 +469,32 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
+    def test_an_oversized_task_response_is_ambiguous_on_either_stream(self):
+        """The size bound is checked before the exit code, so exit-0 reaches it.
+
+        Left clean this bypasses both the decode conversion and spawn()'s orphan
+        seam, so an oversized spawn response could invite a duplicate spawn.
+        """
+        oversized = "x" * (MAX_RESPONSE_CHARS + 1)
+        for stream, response in (
+            ("stdout", BbTransportResult(0, oversized, "")),
+            ("stderr", BbTransportResult(0, "{}", oversized)),
+        ):
+            with self.subTest(stream=stream):
+                client, _ = spawning_client(**{"thread spawn": response})
+                outcome = spawn(client)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_an_oversized_read_response_stays_malformed(self):
+        """A read performed nothing, so its size bound is not ambiguous."""
+        client, _ = enabled_client(
+            {"thread show": BbTransportResult(0, "x" * (MAX_RESPONSE_CHARS + 1), "")}
+        )
+        outcome = client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+
     def test_an_undecodable_task_response_is_ambiguous_not_a_clean_failure(self):
         """bb exited 0, so the thread exists; only its report was unreadable.
 

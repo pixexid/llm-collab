@@ -483,14 +483,11 @@ that suppresses retries only on the ambiguous reason duplicates a real operation
 a second thread, a second enqueue.
 
 Clean refusals are legitimate before that success-or-ambiguity boundary —
-arguments, gates, an unsupported mode rejected before the call, a transport
-failure the call itself reported — and on read-only paths, which performed
-nothing.
+arguments, gates, an unsupported mode rejected before the call — and on read-only
+paths, which performed nothing.
 
-The rule is deliberately scoped to what has been observed. Whether a *nonzero*
-exit from a task-bearing call can leave a side effect behind is not established
-here, so this rule neither permits nor condemns a clean refusal on that path;
-establish it with evidence before tightening.
+Native nonzero exits are outside this rule until evidence establishes their
+side-effect contract.
 
 Safe path: route every post-execution failure through one seam per call site, and
 make that seam — not just its call sites — produce the retry-suppressing surface.
