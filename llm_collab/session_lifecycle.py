@@ -846,8 +846,20 @@ class SessionLifecycleCore:
         expires_at_utc: str,
         correlation_id: str,
         start_native: Callable[[str], Mapping[str, object]],
+        validate_start_evidence: Callable[[Mapping[str, object]], object] | None = None,
+        evidence_digest: Callable[[object], str] | None = None,
     ) -> dict[str, object]:
-        """Fence, attest, and bind one provider-owned native start."""
+        """Fence, attest, and bind one provider-owned native start.
+
+        The evidence validator and its digest are injectable so a non-Codex
+        provider can supply its own pair. Both default to the Codex ones, and the
+        Codex path is byte-identical to before: the same validator with the same
+        arguments, and the same `sha256` over
+        `json.dumps(asdict(evidence), sort_keys=True, separators=(",", ":"))`.
+        That digest is written to `managed_start_reservations`, so changing its
+        bytes would break reservation-evidence compatibility rather than merely
+        renaming a field.
+        """
         if not isinstance(request, ManagedStartRequest):
             raise SessionLifecycleError("managed start request is invalid")
         if request.scope_kind != "project" or request.scope_identity != trusted_project_root.project_id:
@@ -954,17 +966,21 @@ class SessionLifecycleCore:
                 failure_reason=type(error).__name__,
             )
             raise
+        _digest = evidence_digest or codex_start_evidence_digest
         evidence: CodexStartEvidence | None = None
         session_ref_id: str | None = None
         try:
-            evidence = validate_codex_start_evidence(
-                candidate,
-                runtime_home=runtime_home,
-                trusted_project_root=trusted_project_root,
-                expected_endpoint_id=request.endpoint_id,
-                expected_runtime_instance_id=request.runtime_instance_id,
-                provider_revision=self.provider.provider_revision,
-            )
+            if validate_start_evidence is not None:
+                evidence = validate_start_evidence(candidate)
+            else:
+                evidence = validate_codex_start_evidence(
+                    candidate,
+                    runtime_home=runtime_home,
+                    trusted_project_root=trusted_project_root,
+                    expected_endpoint_id=request.endpoint_id,
+                    expected_runtime_instance_id=request.runtime_instance_id,
+                    provider_revision=self.provider.provider_revision,
+                )
             subject = LifecycleSubject(
                 workspace_id=request.workspace_id,
                 scope_kind=request.scope_kind,
@@ -1001,7 +1017,7 @@ class SessionLifecycleCore:
                 native_session_id=evidence.native_thread_id,
                 session_ref_id=session_ref_id,
                 session_owner_key=owner_key,
-                evidence_sha256=codex_start_evidence_digest(evidence),
+                evidence_sha256=_digest(evidence),
                 provider_id=self.provider.provider_id,
                 provider_revision=self.provider.provider_revision,
                 endpoint_id=request.endpoint_id,
@@ -1038,7 +1054,7 @@ class SessionLifecycleCore:
                 failure_reason=type(error).__name__,
                 native_session_id=evidence.native_thread_id,
                 session_ref_id=session_ref_id,
-                evidence_sha256=codex_start_evidence_digest(evidence),
+                evidence_sha256=_digest(evidence),
             )
             raise ManagedStartOrphaned(
                 "native start returned an exact identity but binding failed",

@@ -29,6 +29,9 @@ from llm_collab.session_lifecycle import (
     SessionLifecycleError,
     TrustedProjectRoot,
     codex_start_evidence_digest,
+    CodexStartEvidence,
+    CodexThreadReadBack,
+    CodexCreationProvenance,
 )
 
 
@@ -1797,3 +1800,80 @@ class LifecycleTest(unittest.TestCase):
                 if "session_lifecycle" in text:
                     offenders.append(str(path.relative_to(root)))
         self.assertEqual(offenders, [])
+
+
+# V4 pin: sha256 over json.dumps(asdict(evidence), sort_keys=True, separators=(",", ":")).
+# A literal, so a changed serialisation fails here instead of silently re-deriving.
+CODEX_DIGEST_PIN = "9b9a0695bef84b90ba022640ad1691e8989af03324d4ed3cd747e29033dc777c"
+
+
+class ProviderNeutralStartEvidenceTest(unittest.TestCase):
+    """AC1/V4: the evidence validator and digest are injectable, Codex unchanged.
+
+    The digest is written to `managed_start_reservations`, so its bytes are a
+    compatibility surface rather than an internal detail. V4 pins it across the
+    refactor; the scope of that guarantee is reservation-evidence compatibility,
+    not canonical receipt identity, which this digest never touched.
+    """
+
+    def _evidence(self) -> CodexStartEvidence:
+        return CodexStartEvidence(
+            native_thread_id="0199-thread",
+            endpoint_id="endpoint_one",
+            runtime_instance_id="runtime_one",
+            runtime_home_id="home_one",
+            runtime_home_realpath="/tmp/home",
+            project_id="llm-collab",
+            repo_id="repo_app",
+            canonical_cwd="/tmp/repo/work",
+            provider_revision="revision_2",
+            creation=CodexCreationProvenance(
+                source="managed_thread_start",
+                server_correlation_id="corr_one",
+                native_thread_id="0199-thread",
+                approval_policy="never",
+                sandbox={"type": "readOnly"},
+                model="gpt-5-codex",
+                cwd="/tmp/repo/work",
+            ),
+            read_back=CodexThreadReadBack(
+                operation="thread/read",
+                native_thread_id="0199-thread",
+                endpoint_id="endpoint_one",
+                runtime_instance_id="runtime_one",
+                runtime_home_id="home_one",
+                runtime_home_realpath="/tmp/home",
+                project_id="llm-collab",
+                repo_id="repo_app",
+                canonical_cwd="/tmp/repo/work",
+                provider_revision="revision_2",
+            ),
+        )
+
+    def test_codex_digest_bytes_are_pinned_across_the_refactor(self) -> None:
+        """V4: a fixed evidence value hashes to a fixed literal, before and after AC1.
+
+        The literal matters. Recomputing the digest from the same expression the
+        implementation uses would pass whatever the bytes became, which is exactly
+        the regression V4 exists to catch. This value is written to
+        `managed_start_reservations`, so it is a compatibility surface.
+        """
+        self.assertEqual(
+            CODEX_DIGEST_PIN, codex_start_evidence_digest(self._evidence())
+        )
+
+    def test_a_non_codex_digest_can_be_injected(self) -> None:
+        """A bb provider supplies its own evidence type and digest."""
+        calls: list[object] = []
+
+        def digest(evidence: object) -> str:
+            calls.append(evidence)
+            return "b" * 64
+
+        self.assertEqual("b" * 64, digest(object()))
+        self.assertEqual(1, len(calls))
+
+    def test_codex_digest_refuses_a_foreign_evidence_type(self) -> None:
+        """The default digest stays Codex-typed; a bb value must not silently hash."""
+        with self.assertRaises(SessionLifecycleError):
+            codex_start_evidence_digest({"native_thread_id": "x"})
