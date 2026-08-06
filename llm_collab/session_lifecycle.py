@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 DEFAULT_SUPPORTED_OPERATIONS_JSON = (
     '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]'
 )
+CODEX_MANAGED_START_PROVIDER_REVISION = "revision_2"
+CODEX_MANAGED_START_SUPPORTED_OPERATIONS_JSON = '["start"]'
 
 
 @dataclass(frozen=True)
@@ -845,7 +847,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         start_native: Callable[[str], Mapping[str, object]],
     ) -> dict[str, object]:
-        """Run the fake/provider start saga without enabling live transport."""
+        """Fence, attest, and bind one provider-owned native start."""
         if not isinstance(request, ManagedStartRequest):
             raise SessionLifecycleError("managed start request is invalid")
         if request.scope_kind != "project" or request.scope_identity != trusted_project_root.project_id:

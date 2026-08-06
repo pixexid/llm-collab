@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""worker.py — read-only `llm-collab worker show|list` over the canonical ledger (GH-396).
+"""Worker inspection and explicitly gated lifecycle commands.
 
-No provider mutation, no runtime injection; the report comes from the existing
-canonical resolver/operator inspection via a query-only reader.
+The show/list report comes from the canonical resolver through a query-only
+reader. Mutation commands consume the existing lifecycle authority.
 
   python bin/worker.py list --project llm-collab
   python bin/worker.py show worker_<id> --project llm-collab
@@ -80,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     attach.add_argument("--token", default=None)
     attach.add_argument("--repo-id", default="app")
     attach.add_argument("--timeout-seconds", type=float, default=180.0)
+    import worker_codex as _codex
+    _codex.add_worker_codex_arguments(commands)
     import worker_livecraft_pi as _livecraft_pi
     _livecraft_pi.add_start_livecraft_pi_arguments(
         commands.add_parser("start-livecraft-pi", help="Start an explicitly authorized Livecraft Pi worker"))
@@ -88,6 +90,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "start-livecraft-pi":
         return _livecraft_pi.run_start_livecraft_pi(args)
+
+    if args.command in {"approve-codex-start", "start-codex"}:
+        try:
+            if args.command == "approve-codex-start":
+                return _codex.approve_codex_start(args)
+            return _codex.start_codex(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = str(exc).replace("\x00", "")[:512]
+            print(f"[error] {detail}", file=sys.stderr)
+            return 1
 
     if args.command == "send":
         from _session_autobridge import iter_sessions

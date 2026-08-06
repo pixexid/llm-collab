@@ -418,6 +418,40 @@ class LifecycleTest(unittest.TestCase):
             )
         self.assertEqual(starts, [True])
 
+    def test_managed_start_refuses_an_unverified_existing_binding_before_native_io(self) -> None:
+        active_subject = subject(native_session_id="native_existing")
+        native_calls = []
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+            challenge = self.core.reserve(
+                store, active_subject, runtime_home=self.runtime_home,
+                created_at_utc=NOW, expires_at_utc=AT_EXPIRY,
+                correlation_id="corr_existing", trusted_project_root=self.trusted_root,
+            )
+            binding = self.core.consume(
+                store, active_subject, challenge, runtime_home=self.runtime_home,
+                consumed_at_utc=NOW, correlation_id="corr_existing",
+                trusted_project_root=self.trusted_root,
+            )
+            store.update_conversation_binding_state(
+                workspace_id=active_subject.workspace_id,
+                scope_kind=active_subject.scope_kind,
+                scope_identity=active_subject.scope_identity,
+                conversation_id=active_subject.conversation_id,
+                participant_id=active_subject.participant_id,
+                binding_id=str(binding["binding_id"]),
+                generation=int(binding["generation"]),
+                state="unverified",
+            )
+            with self.assertRaisesRegex(CanonicalConflictError, "unresolved binding"):
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_duplicate",
+                    start_native=lambda _start_id: native_calls.append(True),
+                )
+        self.assertEqual([], native_calls)
+
     def test_managed_start_lost_response_is_ambiguous_and_blocks_retry(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
@@ -780,6 +814,25 @@ class LifecycleTest(unittest.TestCase):
                     provider_descriptor=altered.descriptor(),
                     created_at_utc=NOW,
                 )
+
+    def test_register_lifecycle_provider_accepts_a_start_only_descriptor(self) -> None:
+        provider = FakeLifecycleProvider(
+            provider_revision="revision_start_only",
+            supported_operations_json='["start"]',
+        )
+        with LedgerStore.open_writer(self.paths) as store:
+            store.register_lifecycle_provider(
+                workspace_id=WORKSPACE,
+                provider_descriptor=provider.descriptor(),
+                created_at_utc=NOW,
+            )
+            self.assertTrue(
+                store.has_lifecycle_provider(
+                    workspace_id=WORKSPACE,
+                    provider_id=provider.provider_id,
+                    provider_revision=provider.provider_revision,
+                )
+            )
 
     def test_register_conversation_participant_rejects_an_unregistered_project(self) -> None:
         # A well-formed but unregistered project_id must not create a participant row.
@@ -1662,6 +1715,10 @@ class LifecycleTest(unittest.TestCase):
             Path("llm_collab/worker.py"),
             # worker start verb (#271) drives register->reserve->consume->active.
             Path("bin/worker.py"),
+            # The worker command keeps the Codex-specific transport and exact
+            # worktree proof in a bounded subcommand module; it is the same
+            # worker start verb, not a second runtime consumer.
+            Path("bin/worker_codex.py"),
             # Codex delivery (#94) calls provider.attest as the exact-thread
             # identity proof before one idle-thread turn; it never drives
             # reserve/consume/retire lifecycle state in this slice.

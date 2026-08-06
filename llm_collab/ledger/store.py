@@ -6594,7 +6594,7 @@ class LedgerStore:
             supported_operations_json,
             challenge_algorithm,
             challenge_ttl_seconds,
-        ) = _provider_descriptor(provider_descriptor, required_operations=frozenset({"reserve"}))
+        ) = _provider_descriptor(provider_descriptor, required_operations=frozenset())
         created_at_utc = _utc_timestamp(created_at_utc, "created_at_utc")
         existing = self._connection.execute(
             """
@@ -6724,13 +6724,19 @@ class LedgerStore:
                 SELECT 1 FROM conversation_bindings
                 WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ?
                   AND conversation_id = ? AND participant_id = ?
-                  AND mutation_capable = 1 AND state IN ('active', 'draining')
+                  AND mutation_capable = 1
+                  AND state IN (
+                      'reserved', 'registering', 'active', 'draining',
+                      'unverified', 'quarantined'
+                  )
                 LIMIT 1
                 """,
                 (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
             ).fetchone()
             if active is not None:
-                raise CanonicalConflictError("participant already has an active binding")
+                raise CanonicalConflictError(
+                    "participant already has a live or unresolved binding"
+                )
             try:
                 self._connection.execute(
                     """

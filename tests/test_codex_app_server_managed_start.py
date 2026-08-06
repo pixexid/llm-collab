@@ -44,7 +44,12 @@ def start_result(thread_id=THREAD_ID):
 
 
 class FakeAppServer:
-    def __init__(self, *, start=None, read=None, start_response_id=None, read_response_id=None):
+    def __init__(self, *, initialize=None, start=None, read=None,
+                 start_response_id=None, read_response_id=None):
+        self.initialize = initialize if initialize is not None else {
+            "codexHome": "/trusted/codex-home",
+            "userAgent": "llm-collab/0.146.0",
+        }
         self.start = start if start is not None else start_result()
         self.read = read if read is not None else {"thread": thread()}
         self.start_response_id = start_response_id
@@ -56,7 +61,7 @@ class FakeAppServer:
         self.requests.append(frame)
         method = frame["method"]
         if method == "initialize":
-            return {"jsonrpc": "2.0", "id": frame["id"], "result": {}}
+            return {"jsonrpc": "2.0", "id": frame["id"], "result": self.initialize}
         if method == "thread/start":
             response_id = self.start_response_id or frame["id"]
             return self.start if isinstance(self.start, str) else {
@@ -126,6 +131,23 @@ class ManagedCodexStartTransportTests(unittest.TestCase):
         fake.start = '{"jsonrpc":"2.0","id":"llm-collab-2","error":{"code":-1}}'
         with self.assertRaises(ManagedStartResponseLost):
             ManagedCodexStartTransport(fake, config=config())("start")
+
+    def test_runtime_home_mismatch_fails_before_thread_start(self):
+        fake = FakeAppServer(initialize={
+            "codexHome": "/foreign/home",
+            "userAgent": "llm-collab/0.146.0",
+        })
+        with self.assertRaisesRegex(ManagedCodexStartError, "runtime home"):
+            ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(["initialize"], [frame["method"] for frame in fake.requests])
+
+    def test_cli_version_drift_after_start_is_retry_suppressing(self):
+        drifted = thread()
+        drifted["cliVersion"] = "0.147.0"
+        fake = FakeAppServer(start={**start_result(), "thread": drifted})
+        with self.assertRaises(ManagedStartOrphaned) as caught:
+            ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(THREAD_ID, caught.exception.native_session_id)
 
     def test_mismatched_start_response_id_is_rejected(self):
         fake = FakeAppServer(start_response_id="other-id")
