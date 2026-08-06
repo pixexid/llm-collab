@@ -473,16 +473,24 @@ not prescribe one algorithm.
 
 Scope: `llm_collab/`
 
-Once a non-idempotent task-bearing call may have executed, the operation may have
-happened. Every downstream failure — decode, shape, identity, profile — must be
-retry-suppressing: a typed orphan carrying the native identity when one is
-recoverable, otherwise ambiguous. A clean refusal there is indistinguishable from
-"nothing happened", so a caller that suppresses retries only on the ambiguous
-reason duplicates a real operation: a second thread, a second enqueue.
+Once a non-idempotent task-bearing call **reports success**, or its outcome is
+already ambiguous (a timeout, where the response was lost but the operation may
+have run), the operation may have happened. Every downstream failure past that
+boundary — decode, shape, identity, profile — must be retry-suppressing: a typed
+orphan carrying the native identity when one is recoverable, otherwise ambiguous.
+A clean refusal there is indistinguishable from "nothing happened", so a caller
+that suppresses retries only on the ambiguous reason duplicates a real operation:
+a second thread, a second enqueue.
 
-Clean refusals are legitimate **only** pre-execution (arguments, gates, an
-unsupported mode rejected before the call) or on a read-only path, which
-performed nothing.
+Clean refusals are legitimate before that success-or-ambiguity boundary —
+arguments, gates, an unsupported mode rejected before the call, a transport
+failure the call itself reported — and on read-only paths, which performed
+nothing.
+
+The rule is deliberately scoped to what has been observed. Whether a *nonzero*
+exit from a task-bearing call can leave a side effect behind is not established
+here, so this rule neither permits nor condemns a clean refusal on that path;
+establish it with evidence before tightening.
 
 Safe path: route every post-execution failure through one seam per call site, and
 make that seam — not just its call sites — produce the retry-suppressing surface.
