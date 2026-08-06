@@ -401,10 +401,10 @@ Which repositories are enrolled and what the rule audit found:
 ## Code Review Rules
 
 Path-scoped review rules for Codex Code Review. Only rules matching the changed
-files fire, and findings cite the rule that produced them. This is a seed set of
-three: each encodes a class that was already adjudicated in this repository and
-then rediscovered at review cycle 2-3, where it forced an amendment or a
-retracted CLEAN. Related GH-185.
+files fire, and findings cite the rule that produced them. There are four: each
+encodes a class that was already adjudicated in this repository and then
+rediscovered at review cycle 2-3, where it forced an amendment or a retracted
+CLEAN. Related GH-185.
 
 Keep the set small. Add a rule only after the class has cost a real cycle, and
 remove one that turns noisy.
