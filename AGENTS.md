@@ -249,6 +249,23 @@ nothing legitimate to run. AX becomes available only when a **fresh**
 `deliver.py` result prints it, which happens only after the exact binding is
 absent or nondispatchable.
 
+The recovery is concrete, so a stranded packet is never a dead end:
+
+1. read the recipient's watcher log for its `new_message` / `autobridge_dispatch`
+   / `autobridge_consumed` lifecycle, and its adapter sidecar for a live endpoint;
+2. reconcile whatever the log names — a pointer to a deleted packet aborts
+   enumeration before message selection, and a stale unread backlog will flush
+   into a live thread on restart;
+3. restart the recipient's watcher on a clean baseline;
+4. re-dispatch **one fresh probe packet** and require its receipt before treating
+   the channel as repaired;
+5. only then resend the stranded packet, and confirm it was processed rather than
+   merely marked read.
+
+The recipient owns its own watcher and binding, so steps 2-3 belong to it; a
+sender that cannot reach it says so in the durable mailbox rather than inventing
+a wake. That sequence is what actually repaired the outage below.
+
 This is not hypothetical. On 2026-08-05 every packet to Codex reported
 `autobridge_ready: true` / `ax_doorbell_required: false` while its watcher failed
 on **every poll for roughly twenty hours** — a deleted-packet pointer made

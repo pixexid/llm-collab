@@ -62,9 +62,9 @@ misbound.
 
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
-watcher-backed worker (claude, gemini, …) arms its own inbox watcher, while Codex
-has no native session watcher, so its command polls the inbox and relies on the
-sender's AX doorbell for wakes. **Do your own pickup step** (the helper prints
+watcher-backed worker — claude, gemini, and Codex alike — arms its own inbox
+watcher, and routine exact-session dispatch wakes it. AX is a fallback for Codex
+only, taken only when `deliver.py` prints it. **Do your own pickup step** (the helper prints
 yours first); a packet you never see is a packet you never answer.
 
 The manual steps below are exactly what that helper automates; run them by hand
@@ -201,9 +201,9 @@ exact active binding. A session switch, fork, reload, replacement, or app
 restart invalidates the old session-owned monitor; start a fresh session rather
 than reusing it.
 
-Codex is the current exception: it has no native session event watcher. When it
-is not polling its inbox, use the attended AX wake described in
-`session-autobridge-runbook.md`.
+Codex is watcher-backed like every other worker: routine exact-session dispatch
+is its wake. The attended AX wake described in `session-autobridge-runbook.md` is
+a Codex-only fallback, and only when `deliver.py` prints the command.
 
 ## 2. Know your three coordinates
 
