@@ -237,6 +237,8 @@ def unblock_satisfied_lanes(payload: dict) -> None:
     for lane in payload.get("lanes", []):
         if not isinstance(lane, dict) or lane.get("queue_state") != "blocked":
             continue
+        if lane.get("task_status") == "blocked":
+            continue
 
         depends_on = normalize_depends(lane.get("depends_on"))
         if depends_on and not all(dependency_is_satisfied(dep, completed_task_ids) for dep in depends_on):

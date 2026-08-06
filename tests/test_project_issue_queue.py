@@ -183,6 +183,34 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
             ["GH-760/TASK-38DCF3 WAF log-only Phase-1 evidence"],
         )
 
+    def test_normalize_keeps_explicitly_blocked_task_parked_without_dependencies(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 762,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "unassigned",
+                    "task_status": "blocked",
+                    "queue_state": "blocked",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="blocked"),
+        ):
+            with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                project_issue_queue.normalize_lanes(payload)
+
+        self.assertEqual(payload["lanes"][0]["queue_state"], "blocked")
+        self.assertEqual(payload["lanes"][0]["blocked_by"], [])
+
     def test_normalize_requires_exact_queue_project_before_policy_evaluation(self) -> None:
         for queue_project_id in (None, "nuvyr"):
             with self.subTest(queue_project_id=queue_project_id):
