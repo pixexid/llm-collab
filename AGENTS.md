@@ -242,8 +242,12 @@ dispatchable binding existed when the packet was written. Nothing in the
 transport failure is invisible to the sender: **delivery is unconfirmed until a
 dispatch or acceptance receipt exists** for that packet. Never read
 `autobridge_ready: true` with `ax_doorbell_required: false` as "the recipient has
-it". Where no receipt exists, the AX fallback stays available and is the correct
-action, not a downgrade.
+it". Where no receipt exists, **preserve the packet and diagnose** — binding,
+watcher, sidecar — and do not reach for AX. A ready binding suppresses the
+doorbell, so in exactly that state `deliver.py` prints no AX command and there is
+nothing legitimate to run. AX becomes available only when a **fresh**
+`deliver.py` result prints it, which happens only after the exact binding is
+absent or nondispatchable.
 
 This is not hypothetical. On 2026-08-05 every packet to Codex reported
 `autobridge_ready: true` / `ax_doorbell_required: false` while its watcher failed
