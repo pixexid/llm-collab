@@ -256,11 +256,14 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ever wakes it."""
     if channel == "watcher" and needs_dispatch:
         return [
-            "# Arm the agent-wide DISPATCHING watcher (no --session: watch_inbox",
-            "# only runs autobridge dispatch when --session is absent, and your",
-            "# turn is started by that dispatch, not by an announcement):",
-            f"{LAUNCH} watch_inbox.py --me {agent} --project {project} \\",
-            f"  --repo-target {repo_target} --json",
+            "# Ensure the MANAGED dispatching watcher (one per agent, not per",
+            "# chat). Your turn is started by autobridge dispatch, and",
+            "# watch_inbox only dispatches when --session is absent — but a raw",
+            "# second poller alongside the PM2 one would double-dispatch: both",
+            "# read processed_messages before invoking the runtime and record",
+            "# after, so each can issue turn/start for the same unread packet.",
+            "# `ensure` is idempotent: it starts the singleton only if missing.",
+            f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
         ]
     if channel == "watcher":
         return [

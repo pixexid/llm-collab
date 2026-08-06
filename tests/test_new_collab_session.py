@@ -77,7 +77,7 @@ class CoworkerPromptTest(unittest.TestCase):
         p = ncs.coworker_prompt("codex", ncs.wake_channel(activation),
                                 "llm-collab", "CHAT-ABCD1234", "app", "codex_app",
                                 ncs.needs_dispatch_wake(activation))
-        self.assertIn("watch_inbox.py", p)
+        self.assertIn("pm2_watchers.py ensure --agent codex", p)
         self.assertNotIn("NO native session watcher", p)
         # the register step still names the exact session; only the WATCHER is
         # agent-wide, because that is the one that dispatches.
@@ -148,11 +148,16 @@ class PickupBlockTest(unittest.TestCase):
             channel, "codex", "llm-collab", "CHAT-ABCD1234",
             "SESSION-CODEX", "app", "019f-native", "codex_app",
             ncs.needs_dispatch_wake(activation)))
-        self.assertIn("watch_inbox.py", block)
         # Assert on the COMMAND lines, not the block: the explanatory comment
         # legitimately contains the string "--session".
         command = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
-        self.assertIn("watch_inbox.py --me codex", command)
+        # The MANAGED singleton, not a raw poller: pm2 already runs one watcher
+        # per watcher_enabled agent, and a second agent-wide poller would
+        # double-dispatch, since dispatch_session reads processed_messages
+        # before invoking the runtime and records the path after
+        # (PR #559 r3725819269).
+        self.assertIn("pm2_watchers.py ensure --agent codex", command)
+        self.assertNotIn("watch_inbox.py", command)
         self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
 
@@ -234,7 +239,8 @@ class MainPathTest(unittest.TestCase):
         ])
         # initiator (codex) section is before the coworker section.
         initiator = out.split("SETUP PROMPT")[0]
-        self.assertIn("watch_inbox.py", initiator)
+        # The managed singleton, not a raw per-chat poller (r3725819269).
+        self.assertIn("pm2_watchers.py ensure --agent codex", initiator)
         self.assertNotIn("NO native session watcher", initiator)
 
     def test_claude_initiator_arms_watcher(self):
