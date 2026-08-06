@@ -171,7 +171,9 @@ A failed start with no validated native identity becomes `failed`. None of
 these paths may select a replacement by latest, frontmost, or display state.
 
 The production Codex start is deliberately two commands. Trusted setup first
-pre-approves the immutable revision-2 descriptor:
+pre-approves the immutable revision-2 descriptor for the workspace. The
+`--project` argument selects a registered project configuration in that
+workspace; it does not narrow the provider approval to that project:
 
 ```bash
 bin/llm-collab worker.py approve-codex-start --project <project>
@@ -193,8 +195,10 @@ no-follow descriptor chain through that worktree and cwd, and validates the
 App Server runtime home and supported CLI version before `thread/start`. It
 creates one persistent thread with `approvalPolicy=never` and a read-only
 sandbox, then performs an exact same-connection `thread/read`; it never issues
-`turn/start`. Supported host versions are the closed set in
-`SUPPORTED_CODEX_CLI_VERSIONS`, based on generated protocol-schema comparison.
+`turn/start`. `--expected-cli-version` defaults to the exercised Codex 0.146.0
+contract and accepts only exact values in the closed
+`SUPPORTED_CODEX_CLI_VERSIONS` allowlist. Runtime-home, user-agent, and thread
+version checks still fail closed for whichever exact value is selected.
 
 ## Dispatch freeze
 

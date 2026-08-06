@@ -43,7 +43,7 @@ from llm_collab.session_lifecycle import (
 from llm_collab.worker import WorkerLookupError, show_worker
 
 
-DEFAULT_CODEX_CLI_VERSION = "0.147.0-alpha.1.2"
+DEFAULT_CODEX_CLI_VERSION = "0.146.0"
 DEFAULT_USER_AGENT_PRODUCT = "Codex Desktop"
 START_TTL_SECONDS = 180
 MAX_GIT_OUTPUT_BYTES = 8192
@@ -115,7 +115,8 @@ def approve_codex_start(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
-                "project_id": args.project,
+                "workspace_id": workspace_id,
+                "scope": "workspace",
                 "provider_id": provider.provider_id,
                 "provider_revision": provider.provider_revision,
                 "supported_operations": ["start"],

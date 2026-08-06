@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import unittest
@@ -179,15 +180,24 @@ class CodexWorkerStartTests(unittest.TestCase):
             ),
         )
 
-    def approve(self) -> None:
+    def approve(self) -> dict:
+        output = io.StringIO()
         with (
             mock.patch.object(worker_codex, "config_get", return_value=WORKSPACE),
             mock.patch.object(
                 worker_codex, "project_state_root", return_value=self.paths.state_root
             ),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(output),
         ):
             worker_codex.approve_codex_start(argparse.Namespace(project=PROJECT))
+        return json.loads(output.getvalue())
+
+    def test_provider_approval_receipt_is_workspace_scoped(self) -> None:
+        receipt = self.approve()
+
+        self.assertEqual(WORKSPACE, receipt["workspace_id"])
+        self.assertEqual("workspace", receipt["scope"])
+        self.assertNotIn("project_id", receipt)
 
     def test_start_refuses_without_separate_provider_approval_before_native_io(self) -> None:
         fake = FakeAppServer(
