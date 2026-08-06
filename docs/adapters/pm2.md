@@ -202,10 +202,12 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`. AX may target only Codex; every non-Codex
-watcher-backed worker owns its own pickup.
+`session-autobridge-runbook.md`. AX may target only Codex, and only as the
+fallback `deliver.py` selects; every watcher-backed worker, Codex included, owns
+its own pickup through routine exact-session dispatch.
 
-- primary for a Codex recipient only: run the exact command `deliver.py` prints
+- fallback for a Codex recipient only, and only when `deliver.py` prints it: run
+  the exact command it prints
   once, even while it is busy, with one short pointer to
   the durable packet. Do not prove the composer empty first: composer content
   and `AXValue` readability/opacity are never a hold, and busy alone is not a

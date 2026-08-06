@@ -55,12 +55,18 @@ it.
 `deliver.py` has behaved this way for some time; the contract text was the part
 out of date. A dispatchable autobridge target takes precedence and suppresses the
 doorbell (`wake_fallback_allowed = not autobridge_ready and not
-dispatch_scope_refused`). Use AX only when the recipient has **no usable binding
-for the scope** — missing or inactive. An **unreadable or scope-refused** binding
-is not an AX case: `dispatch_scope_refused` (which `binding_unreadable` sets)
-makes `wake_fallback_allowed` false and suppresses the command, because no lane
-may wake a recipient whose authoritative record could not be read. Repair that
-state; do not try to ring through it.
+dispatch_scope_refused`). Read that predicate literally rather than enumerating
+cases from it: AX is available whenever **no dispatchable target resolved and the
+refusal was not terminal**. Missing and inactive bindings are the common shapes,
+but they are not the whole set — an explicit target that contradicts the
+recipient's binding refuses with `exact_binding_mismatch` and leaves the fallback
+allowed too.
+
+Exactly two states are **terminal** and suppress every wake lane: an
+**unreadable** binding and a **scope refusal**. Both set
+`dispatch_scope_refused`, which makes `wake_fallback_allowed` false, because no
+lane may wake a recipient whose authoritative record could not be read or whose
+scope forbids the packet. Those are repairs; do not try to ring through them.
 
 **An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
 with `autobridge_refusal_reason: exact_binding_required` is not an error and
@@ -284,10 +290,10 @@ saw success throughout. Two independent faults, zero sender-visible signal.
 AX is the **fallback**, not the routine path, and it is still Codex-only: no
 other worker is ever an AX ring target, and it is only ever the exact command
 `deliver.py` prints — never an invented `axsend`, and never a way around a
-recipient's watcher. Ring only when `deliver.py` asks for it, which happens in
-exactly one case: the recipient has no usable binding for the scope. An
-unreadable or scope-refused binding suppresses the doorbell and is a repair, not
-a ring.
+recipient's watcher. Ring only when `deliver.py` asks for it — which is whenever
+no dispatchable target resolved and the refusal was not terminal, not a fixed
+list of causes you can recite. The two terminal ones, an unreadable binding and a
+scope refusal, suppress the doorbell and are repairs rather than rings.
 
 Treat a missing doorbell as information, not permission: an unbound recipient
 refuses dispatch **silently** (`autobridge_refusal_reason:

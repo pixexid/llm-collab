@@ -5,7 +5,9 @@ dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 `/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
 `claude -p`, and other CLI/session-file flows.
 
-> Claude may ring Codex after writing a durable packet. Codex never rings
+> Claude may ring Codex after writing a durable packet, but only when
+> `deliver.py` prints the command — routine exact-session dispatch is the wake
+> whenever Codex's binding dispatches. Codex never rings
 > Claude: Claude is woken by its durable packet and the Claude app's own
 > background inbox watcher. The heartbeat survives only as a bounded,
 > provisional **safety-fuse** (see below), not as the primary path.

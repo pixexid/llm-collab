@@ -1910,5 +1910,44 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         )
 
 
+class AxIsNeverPrimaryDocTest(unittest.TestCase):
+    """v12 says routine exact-session dispatch is the wake for every
+    watcher-backed recipient, Codex included, and AX is the fallback
+    `deliver.py` selects.
+
+    This is a regression guard, not a general detector: each phrase below is one
+    that actually shipped and had to be corrected. The class survived four review
+    rounds on GH-556 because a hand sweep kept finding the named file and missing
+    the next one — the last miss was a bullet beginning "primary for a Codex
+    recipient only", which no grep pairing "AX" with "primary" on one line could
+    see."""
+
+    FORBIDDEN = (
+        "no background event pickup",
+        "no background pickup",
+        "no native session watcher",
+        "no native session event watcher",
+        "non-Codex watcher-backed",
+        "primary for a Codex recipient",
+        "avoid registering the matching dispatchable autobridge",
+    )
+
+    def test_no_doc_makes_ax_the_primary_wake(self):
+        roots = [REPO_ROOT / "AGENTS.md", *(REPO_ROOT / "docs").rglob("*.md")]
+        offenders = []
+        for path in roots:
+            text = path.read_text(encoding="utf-8")
+            for phrase in self.FORBIDDEN:
+                if phrase in text:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}: {phrase!r}")
+        self.assertEqual(
+            [],
+            offenders,
+            "these phrasings tell a worker that Codex lacks routine pickup, or that "
+            "AX is its primary wake, both of which contract v12 retired:\n"
+            + "\n".join(offenders),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
