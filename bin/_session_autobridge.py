@@ -19,7 +19,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1573,6 +1573,242 @@ def _repo_package_root() -> None:
     repo_root = str(Path(__file__).resolve().parent.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
+
+
+def _bb_binding_state(project_id: str, chat_id: str, agent_id: str) -> str | None:
+    """Map the ledger's exact reader result to the bootstrap decision vocabulary."""
+    workspace_id = config_get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        return "unreadable"
+    try:
+        ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+        paths = ledger_module.LedgerPaths.derive(project_state_root(), workspace_id)
+        with ledger_module.LedgerStore.open_reader(paths) as store:
+            participant = store._connection.execute(
+                """
+                SELECT 1 FROM conversation_participants
+                WHERE workspace_id = ? AND scope_kind = 'project' AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                """,
+                (workspace_id, project_id, chat_id, f"participant_{agent_id}"),
+            ).fetchone()
+            binding = store._connection.execute(
+                """
+                SELECT 1 FROM conversation_bindings
+                WHERE workspace_id = ? AND scope_kind = 'project' AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                LIMIT 1
+                """,
+                (workspace_id, project_id, chat_id, f"participant_{agent_id}"),
+            ).fetchone()
+            if participant is None and binding is None:
+                return None
+            resolved = store.resolve_conversation_binding(
+                workspace_id=workspace_id,
+                scope_kind="project",
+                scope_identity=project_id,
+                conversation_id=chat_id,
+                participant_id=f"participant_{agent_id}",
+            )
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return "unreadable"
+
+    if resolved.get("resolved"):
+        # An active ledger owner without its session record is not absence; minting
+        # another owner would be the exact split-brain this gate prevents.
+        return "mismatch"
+    return {
+        "route_ambiguous": "ambiguous",
+        "stale_generation": "mismatch",
+        "session_unverified": "unreadable",
+        "adapter_quarantined": "scope_refused",
+        "pull_pending": "mismatch",
+        "waiting_for_session": "mismatch",
+    }.get(str(resolved.get("reason")), "unreadable")
+
+
+def execute_bb_bootstrap_plan(
+    plan,
+    packet: dict[str, Any],
+    inputs: dict[str, Any],
+):
+    """Run the bb managed-start saga and publish its exact receive session.
+
+    Kept beside the other lifecycle seams so the inbox watcher remains a poller;
+    its only job is to invoke this helper before it enumerates sessions.
+    """
+    _repo_package_root()
+    bootstrap_module = importlib.import_module(".".join(("llm_collab", "bb_bootstrap")))
+    client_module = importlib.import_module(".".join(("llm_collab", "bb_client")))
+    managed_start_module = importlib.import_module(".".join(("llm_collab", "bb_managed_start")))
+    runtime_home_module = importlib.import_module(".".join(("llm_collab", "codex_runtime_home")))
+    ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+    errors_module = importlib.import_module(".".join(("llm_collab", "managed_start_errors")))
+    lifecycle_module = importlib.import_module(".".join(("llm_collab", "session_lifecycle")))
+
+    execute_bootstrap = bootstrap_module.execute_bootstrap
+    BbClient = client_module.BbClient
+    SLICE_1A_PROFILE = client_module.SLICE_1A_PROFILE
+    subprocess_transport = client_module.subprocess_transport
+    bb_start_evidence_digest = managed_start_module.bb_start_evidence_digest
+    bb_start_native = managed_start_module.bb_start_native
+    validate_bb_start_evidence = managed_start_module.validate_bb_start_evidence
+    bind_runtime_home = runtime_home_module.bind_runtime_home
+    LedgerPaths = ledger_module.LedgerPaths
+    LedgerStore = ledger_module.LedgerStore
+    ManagedStartOrphaned = errors_module.ManagedStartOrphaned
+    ManagedStartResponseLost = errors_module.ManagedStartResponseLost
+    BbLifecycleProvider = lifecycle_module.BbLifecycleProvider
+    LifecycleSubject = lifecycle_module.LifecycleSubject
+    ManagedStartRequest = lifecycle_module.ManagedStartRequest
+    SessionLifecycleCore = lifecycle_module.SessionLifecycleCore
+    TrustedProjectRoot = lifecycle_module.TrustedProjectRoot
+
+    workspace_id = config_get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise ValueError("workspace_id is required for bb bootstrap")
+    runtime_home = bind_runtime_home(inputs["runtime_home"])
+    provider = BbLifecycleProvider()
+    core = SessionLifecycleCore(provider)
+    request = ManagedStartRequest(
+        workspace_id=workspace_id,
+        scope_kind="project",
+        scope_identity=plan.project_id,
+        conversation_id=plan.conversation_id,
+        participant_id=plan.participant_id,
+        agent_id=f"agent_{plan.agent_id}",
+        endpoint_id=inputs["endpoint_id"],
+        runtime_instance_id=inputs["runtime_instance_id"],
+    )
+    trusted_root = TrustedProjectRoot(
+        plan.project_id,
+        str(inputs["repo_id"]),
+        str(inputs["repo_root"]),
+        str(inputs["cwd"]),
+    )
+    prompt = packet.get("body", "")
+    if not isinstance(prompt, str):
+        raise ValueError("first packet body must be text")
+    client = BbClient(
+        subprocess_transport(inputs["executable"]),
+        enabled=True,
+        timeout_seconds=inputs["timeout_seconds"],
+    )
+    start_native = bb_start_native(
+        client,
+        project_id=str(inputs["native_project_id"]),
+        prompt=prompt,
+        profile=SLICE_1A_PROFILE,
+        endpoint_id=inputs["endpoint_id"],
+        runtime_instance_id=inputs["runtime_instance_id"],
+    )
+    validate = lambda candidate: validate_bb_start_evidence(
+        candidate,
+        expected_project_id=str(inputs["native_project_id"]),
+        expected_endpoint_id=inputs["endpoint_id"],
+        expected_runtime_instance_id=inputs["runtime_instance_id"],
+        expected_profile=SLICE_1A_PROFILE,
+    )
+    paths = LedgerPaths.derive(project_state_root(), workspace_id)
+    with LedgerStore.open_writer(paths) as store:
+        created = now_utc().isoformat(timespec="seconds")
+        expires = (
+            now_utc() + timedelta(seconds=provider.challenge_ttl_seconds)
+        ).isoformat(timespec="seconds")
+        subject = LifecycleSubject(
+            workspace_id=workspace_id,
+            scope_kind="project",
+            scope_identity=plan.project_id,
+            conversation_id=plan.conversation_id,
+            participant_id=plan.participant_id,
+            agent_id=f"agent_{plan.agent_id}",
+            endpoint_id=inputs["endpoint_id"],
+            native_session_id="pending",
+            runtime_instance_id=inputs["runtime_instance_id"],
+        )
+        _ensure_lifecycle_prerequisites(store, subject, provider.descriptor(), created)
+
+        def already_started(_message_id: str) -> bool:
+            row = store._connection.execute(
+                """
+                SELECT 1 FROM managed_start_reservations
+                WHERE workspace_id = ? AND scope_kind = 'project' AND scope_identity = ?
+                  AND conversation_id = ? AND participant_id = ?
+                  AND start_correlation_id = ?
+                  AND state IN ('reserved', 'ambiguous_start', 'orphaned', 'bound')
+                LIMIT 1
+                """,
+                (
+                    workspace_id,
+                    plan.project_id,
+                    plan.conversation_id,
+                    plan.participant_id,
+                    plan.canonical_message_id,
+                ),
+            ).fetchone()
+            return row is not None
+
+        def start(item):
+            result = core.start_managed(
+                store,
+                request,
+                runtime_home=runtime_home,
+                trusted_project_root=trusted_root,
+                created_at_utc=created,
+                expires_at_utc=expires,
+                correlation_id=item.canonical_message_id,
+                start_native=start_native,
+                validate_start_evidence=validate,
+                evidence_digest=bb_start_evidence_digest,
+            )
+            evidence = result["evidence"]
+            native_thread_id = evidence.native_thread_id
+            session_id = "bb-" + hashlib.sha256(
+                "|".join(
+                    (plan.project_id, plan.conversation_id, plan.agent_id, native_thread_id)
+                ).encode()
+            ).hexdigest()[:32]
+            runtime = {
+                "family": "bb",
+                "session_id": native_thread_id,
+                "home": runtime_home.runtime_home_realpath,
+            }
+            if inputs.get("session_source") is not None:
+                runtime["session_source"] = inputs["session_source"]
+            session = {
+                "session_id": session_id,
+                "agent_id": plan.agent_id,
+                "project_id": plan.project_id,
+                "chat_id": plan.conversation_id,
+                "mode": "manual",
+                "status": "active",
+                "wake_strategy": "none",
+                "allowed_actions": [],
+                "lease_owner": None,
+                "lease_expires_utc": None,
+                "runtime": runtime,
+                "created_utc": now_utc().isoformat(timespec="seconds"),
+                "processed_messages": [plan.packet_path],
+                "repo_targets": [str(inputs["repo_id"])],
+                "binding_id": result["binding"]["binding_id"],
+                "binding_generation": int(result["binding"]["generation"]),
+                "endpoint_id": result["binding"]["endpoint_id"],
+            }
+            with _session_write_lock():
+                if update_binding_from_session(session, existing={}) is None:
+                    raise ValueError("bb session cannot produce a binding record")
+                save_session(session)
+            return native_thread_id
+
+        return execute_bootstrap(
+            plan,
+            already_started=already_started,
+            start=start,
+            on_ambiguous=ManagedStartResponseLost,
+            on_orphaned=ManagedStartOrphaned,
+        )
 
 
 def _frontmatter_strings(value: Any) -> list[str]:
