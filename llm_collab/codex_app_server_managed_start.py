@@ -19,6 +19,7 @@ from llm_collab.codex_app_server_live_probe import (
     _required_string,
     CodexAppServerLiveProbeError,
 )
+from llm_collab.managed_start_errors import ManagedStartOrphaned, ManagedStartResponseLost
 
 
 THREAD_START_METHOD = "thread/start"
@@ -100,6 +101,24 @@ class ManagedCodexStartConfig:
         }
 
 
+def _recoverable_thread_id(result: object) -> str | None:
+    """Extract only a bounded exact identity from a post-start response."""
+    if not isinstance(result, Mapping):
+        return None
+    thread = result.get("thread")
+    value = thread.get("id") if isinstance(thread, Mapping) else None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > 256
+        or "\x00" in value
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+        or value.casefold() in {"*", "current", "frontmost", "latest", "newest"}
+    ):
+        return None
+    return value
+
+
 class ManagedCodexStartTransport:
     """Run the fake/protocol-only managed start on one injected connection."""
 
@@ -114,8 +133,13 @@ class ManagedCodexStartTransport:
         if self._used:
             raise ManagedCodexStartError("managed-start connection is single-use")
         self._used = True
+        start_attempted = False
+        native_thread_id: str | None = None
         try:
             _minimal_initialize(self.connection)
+            # Everything after this point is retry-suppressing. The server may
+            # create the thread before the response is lost or rejected locally.
+            start_attempted = True
             start_result = _request(
                 self.connection,
                 2,
@@ -123,6 +147,7 @@ class ManagedCodexStartTransport:
                 self.config.start_params(),
                 allowed_methods=_THREAD_START_ALLOWED_METHODS,
             )
+            native_thread_id = _recoverable_thread_id(start_result)
             thread = self._validate_start_result(start_result)
             native_thread_id = _required_string(thread, "id")
             read_result = _request(
@@ -135,12 +160,31 @@ class ManagedCodexStartTransport:
             )
             read_thread = self._validate_read_result(read_result, native_thread_id)
             return self._candidate(start_result, thread, read_thread, native_thread_id)
+        except (ManagedStartOrphaned, ManagedStartResponseLost):
+            raise
         except ManagedCodexStartError:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise
         except CodexAppServerLiveProbeError as error:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise ManagedCodexStartError(str(error)) from error
         except Exception as error:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise ManagedCodexStartError("managed-start exchange failed") from error
+
+    @staticmethod
+    def _raise_post_start(native_thread_id: str | None) -> None:
+        if native_thread_id is None:
+            raise ManagedStartResponseLost(
+                "thread/start may have succeeded but no exact native identity was recoverable"
+            )
+        raise ManagedStartOrphaned(
+            "thread/start returned a native identity but completion failed",
+            native_session_id=native_thread_id,
+        )
 
     def _validate_start_result(self, result: Mapping[str, Any]) -> Mapping[str, Any]:
         fields = set(result)

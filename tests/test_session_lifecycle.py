@@ -21,6 +21,7 @@ from llm_collab.session_lifecycle import (
     CodexLifecycleProvider,
     FakeLifecycleProvider,
     LifecycleSubject,
+    ManagedStartOrphaned,
     ManagedStartRequest,
     ManagedStartResponseLost,
     validate_codex_start_evidence,
@@ -443,6 +444,57 @@ class LifecycleTest(unittest.TestCase):
                     expires_at_utc=AT_EXPIRY, correlation_id="corr_retry",
                     start_native=lambda _start_id: self.start_candidate("native_retry"),
                 )
+
+    def test_managed_start_post_execution_identity_is_durably_orphaned(self) -> None:
+        active_subject = subject()
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, active_subject, self.core.provider)
+            with self.assertRaises(ManagedStartOrphaned):
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_orphaned_transport",
+                    start_native=lambda _start_id: (_ for _ in ()).throw(
+                        ManagedStartOrphaned(
+                            "read-back failed", native_session_id="native_session_orphan"
+                        )
+                    ),
+                )
+            row = store._connection.execute(
+                "SELECT state, native_session_id, session_ref_id, evidence_sha256 "
+                "FROM managed_start_reservations"
+            ).fetchone()
+        self.assertEqual(row[0:2], ("orphaned", "native_session_orphan"))
+        self.assertTrue(row[2].startswith("session_"))
+        self.assertRegex(row[3], r"^[0-9a-f]{64}$")
+
+    def test_managed_start_unreattestable_identity_stays_ambiguous(self) -> None:
+        def fail_probe(_native_session_id: str):
+            raise ValueError("thread disappeared")
+
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=fail_probe,
+            supported_operations_json='["reserve","attach","start"]',
+        )
+        core = SessionLifecycleCore(provider)
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, subject(), provider)
+            with self.assertRaises(ManagedStartResponseLost) as caught:
+                core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_ambiguous_orphan",
+                    start_native=lambda _start_id: (_ for _ in ()).throw(
+                        ManagedStartOrphaned(
+                            "read-back failed", native_session_id="native_session_orphan"
+                        )
+                    ),
+                )
+            row = store._connection.execute(
+                "SELECT state, native_session_id FROM managed_start_reservations"
+            ).fetchone()
+        self.assertEqual("native_session_orphan", caught.exception.native_session_id)
+        self.assertEqual(("ambiguous_start", None), row)
 
     def test_managed_start_bind_conflict_orphans_exact_validated_native_evidence(self) -> None:
         active_subject = subject()
