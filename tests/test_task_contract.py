@@ -454,6 +454,42 @@ class TaskContractInvalidDbImpactTest(unittest.TestCase):
                     f"sync {iteration} lost the defect signal; got {errors}",
                 )
 
+    def test_the_invalid_value_also_survives_amiga_project_defaults(self) -> None:
+        """GH-580 on the other side of the shared contract.
+
+        Amiga is the one project whose db contract falls back to built-in
+        defaults (`_project_db_contract` returns the shared Supabase ref and its
+        required surfaces when no explicit `db` config is present). That
+        promotion path is exactly where a substituted-but-plausible value could
+        be laundered into a real classification, so the non-substitution
+        invariant has to hold HERE, not only for a project with no defaults.
+        The repository requires focused Amiga plus non-Amiga coverage for any
+        shared-contract change; the llm-collab case above is the other half.
+        """
+        # #given — an invalid value on the project that HAS defaults
+        current = {"project_id": "amiga", "db_impact": "additive_schema"}
+        body = "Amiga schema touch."
+
+        # #when — sync repeatedly, as two lifecycle transitions would
+        for iteration in range(1, 4):
+            current, _changed = task_contract.sync_db_contract(current, body)
+            errors, _summary = task_contract.validate_db_contract(
+                current, body, stage="review"
+            )
+
+            # #then — Amiga's defaults must not promote the invalid value into a
+            # valid-looking one, and the defect must still be reported.
+            with self.subTest(sync=iteration):
+                self.assertEqual(
+                    "additive_schema",
+                    current["db_impact"],
+                    "Amiga project defaults rewrote the invalid value",
+                )
+                self.assertTrue(
+                    any("additive_schema" in error for error in errors),
+                    f"Amiga sync {iteration} lost the defect signal; got {errors}",
+                )
+
     def test_repeated_sync_is_idempotent_for_an_invalid_value(self) -> None:
         """A sync that keeps changing the record would churn every mirror."""
         first, _ = task_contract.sync_db_contract(
