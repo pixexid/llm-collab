@@ -48,6 +48,7 @@ from _session_autobridge import (
     provision_pi_canonical_binding,
     PiProvisioningRefused,
     read_pi_session_fingerprint,
+    normalize_starter_binding_context,
     resolve_active_canonical_binding,
     resolve_active_canonical_owner,
     runtime_home_from_source,
@@ -125,6 +126,11 @@ def parse_args():
     register.add_argument("--expect-pi-model", default=None, help="Expected Pi model ID.")
     register.add_argument("--expect-pi-thinking", default=None, help="Expected Pi thinking level.")
     register.add_argument("--supersedes-session", default=None, help="Older llm-collab session replaced by this registration")
+    register.add_argument(
+        "--starter-context",
+        default=None,
+        help="Validated JSON snapshot of the starter binding for a new Pi worker",
+    )
     register.add_argument(
         "--runtime-command",
         default=None,
@@ -646,6 +652,10 @@ def register_session(args) -> dict:
     if not runtime:
         runtime = None
 
+    session_binding_generation = _next_session_binding_generation(
+        existing, args, runtime,
+    )
+
     payload = {
         **existing,
         "session_id": args.session,
@@ -664,6 +674,19 @@ def register_session(args) -> dict:
         "created_utc": existing.get("created_utc", utc_iso()),
         "processed_messages": existing.get("processed_messages", []),
     }
+    if session_binding_generation is not None:
+        payload["session_binding_generation"] = session_binding_generation
+    starter_context_raw = getattr(args, "starter_context", None)
+    if starter_context_raw is not None:
+        try:
+            starter_context = normalize_starter_binding_context(
+                json.loads(starter_context_raw)
+                if isinstance(starter_context_raw, str)
+                else starter_context_raw
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError(f"--starter-context is invalid: {error}") from error
+        payload["starter_binding"] = starter_context
     repo_targets = getattr(args, "repo_targets", None)
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
@@ -891,6 +914,34 @@ def register_session(args) -> dict:
         if binding is not None:
             payload["binding"] = binding
         return payload
+
+
+def _next_session_binding_generation(
+    existing: dict, args, runtime: dict | None,
+) -> int | None:
+    """Version non-Pi session leases when their native identity changes."""
+    if not isinstance(runtime, dict) or runtime.get("family") == "pi":
+        return None
+    previous = existing.get("session_binding_generation")
+    if isinstance(previous, bool) or not isinstance(previous, int) or previous < 1:
+        return 1
+    previous_runtime = existing.get("runtime")
+    requested_repos = getattr(args, "repo_targets", None)
+    existing_repos = existing.get("repo_targets")
+    same_repos = (
+        requested_repos is None
+        or sorted(set(requested_repos)) == sorted(set(existing_repos or []))
+    )
+    same_identity = (
+        existing.get("agent_id") == args.agent
+        and existing.get("project_id") == args.project
+        and existing.get("chat_id") == args.chat
+        and same_repos
+        and isinstance(previous_runtime, dict)
+        and previous_runtime.get("family") == runtime.get("family")
+        and previous_runtime.get("session_id") == runtime.get("session_id")
+    )
+    return previous if same_identity else previous + 1
 
 
 def existing_binding_snapshot_or_refuse(payload: dict) -> dict:

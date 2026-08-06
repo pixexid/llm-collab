@@ -398,7 +398,11 @@ class StartLivecraftTest(unittest.TestCase):
             "runtime_home": "/pi", "endpoint_id": wr.LIVECRAFT_ENDPOINT,
         }
         bindings = {
-            "claude": {"status": "active", "runtime_session_id": "starter-native"},
+            "claude": {
+                "status": "active", "runtime_session_id": "starter-native",
+                "runtime_family": "claude_app", "session_id": "SESSION-CLAUDE",
+                "session_binding_generation": 1, "repo_targets": ["app"],
+            },
             "glmpi": {"status": "active", "session_id": "SESSION-OLD"},
         }
         with mock.patch.object(wr, "resolve_livecraft_profile", return_value=profile), \
@@ -411,6 +415,9 @@ class StartLivecraftTest(unittest.TestCase):
         self.assertEqual(register[register.index("--supersedes-session") + 1], "SESSION-OLD")
         runtime_command = json.loads(register[register.index("--runtime-command") + 1])
         self.assertIn("livecraft_wake.py", runtime_command[1])
+        starter_context = json.loads(register[register.index("--starter-context") + 1])
+        self.assertEqual("SESSION-CLAUDE", starter_context["session_id"])
+        self.assertEqual(1, starter_context["session_binding_generation"])
 
     def _assert_profile_uses_latest_livecraft_record_only(self, project):
         sessions = Path(self.tmp.name) / "sessions"

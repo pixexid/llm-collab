@@ -329,12 +329,12 @@ def _load_optional_binding(project: str, chat: str, agent: str) -> dict | None:
 def _resolve_starter(
     *, starter_agent: str, starter_session_id: str | None, project: str, chat: str,
     repo_target: str, require_active_binding: bool = True,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict | None]:
     binding = _load_optional_binding(project, chat, starter_agent)
     if not require_active_binding:
         if not starter_session_id:
             raise RotateError("starter session id is required for the disposable pilot path")
-        return starter_agent, starter_session_id
+        return starter_agent, starter_session_id, None
     if not binding or binding.get("status") != "active":
         raise RotateError(
             f"starter binding is not active for {project}/{chat}/{starter_agent}; "
@@ -349,7 +349,44 @@ def _resolve_starter(
         raise RotateError(
             f"starter session mismatch: requested {starter_session_id!r}, binding has {native!r}"
         )
-    return starter_agent, native
+    generation = binding.get("session_binding_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise RotateError(
+            "starter binding has no exact session binding generation; re-register the "
+            "starter session before launching a worker"
+        )
+    starter_session = binding.get("session_id")
+    repo_targets = binding.get("repo_targets")
+    if not isinstance(starter_session, str) or not starter_session.strip() or not isinstance(repo_targets, list):
+        raise RotateError(
+            "starter binding has no exact session/repository scope; re-register the "
+            "starter session before launching a worker"
+        )
+    if repo_target not in repo_targets:
+        raise RotateError(
+            f"starter binding is not subscribed to repository {repo_target!r}; "
+            "re-register the starter session for this repository"
+        )
+    starter_runtime_family = binding.get("runtime_family") or STARTER_RUNTIME_FAMILIES.get(starter_agent)
+    context = {
+        "agent_id": starter_agent,
+        "project_id": project,
+        "chat_id": chat,
+        "session_id": starter_session,
+        "runtime_family": starter_runtime_family,
+        "runtime_session_id": native,
+        "session_binding_generation": generation,
+        "repo_targets": repo_targets,
+    }
+    if binding.get("binding_id") is not None:
+        context["binding_id"] = binding["binding_id"]
+    from _session_autobridge import normalize_starter_binding_context
+
+    try:
+        context = normalize_starter_binding_context(context)
+    except ValueError as error:
+        raise RotateError(f"starter binding provenance is incomplete: {error}") from error
+    return starter_agent, native, context
 
 
 def _resolve_livecraft_predecessor(
@@ -695,7 +732,7 @@ def _cleanup_livecraft_session(*, livecraft, run_autobridge, native: str) -> lis
 
 def _provision_livecraft_and_bind(
     *, agent, project, chat, repo_target, repo_cwd, provider, model, thinking,
-    runtime_home, starter_agent, starter_session_id, supersedes_session, livecraft_backend_url,
+    runtime_home, starter_agent, starter_session_id, starter_context, supersedes_session, livecraft_backend_url,
     livecraft, run_autobridge,
     bootstrap_timeout, poll_interval, sleep, clock,
 ) -> dict:
@@ -792,6 +829,8 @@ def _provision_livecraft_and_bind(
     ]
     if supersedes_session:
         argv.extend(("--supersedes-session", supersedes_session))
+    if starter_context is not None:
+        argv.extend(("--starter-context", json.dumps(starter_context, sort_keys=True, separators=(",", ":"))))
     rc, out = run_autobridge(argv)
     if rc != 0:
         cleanup_errors = _cleanup_livecraft_session(
@@ -835,7 +874,7 @@ def start_livecraft(
             override=override_values if any(override_values) else None,
             runtime_home=getattr(cfg, "runtime_home", None),
         )
-    starter_agent, starter_session_id = _resolve_starter(
+    starter_agent, starter_session_id, starter_context = _resolve_starter(
         starter_agent=getattr(cfg, "starter_agent", "claude"),
         starter_session_id=getattr(cfg, "starter_session_id", None),
         project=cfg.project, chat=chat, repo_target=repo_target,
@@ -855,6 +894,7 @@ def start_livecraft(
         repo_cwd=repo_cwd, provider=profile["provider"], model=profile["model"],
         thinking=profile["thinking"], runtime_home=profile["runtime_home"],
         starter_agent=starter_agent, starter_session_id=starter_session_id,
+        starter_context=starter_context,
         supersedes_session=supersedes_session,
         livecraft_backend_url=cfg.livecraft_backend_url,
         livecraft=livecraft,

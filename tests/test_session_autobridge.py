@@ -493,6 +493,45 @@ class SessionAutobridgeTest(unittest.TestCase):
             binding_read.assert_not_called()
             binding_write.assert_not_called()
 
+    def test_non_pi_binding_epoch_and_starter_context_are_persisted(self):
+        root = self.make_workspace()
+        self.add_agent(root, {
+            "id": "claude", "display_name": "Claude",
+            "activation": {"type": "cli_session", "watcher_enabled": True},
+        })
+        self.create_chat(root, chat_dir_name="2026-08-05_starter__CHAT-STARTER",
+                         chat_id="CHAT-STARTER", project_id="amiga")
+        context = {
+            "agent_id": "claude", "project_id": "amiga", "chat_id": "CHAT-STARTER",
+            "session_id": "SESSION-CLAUDE", "runtime_family": "claude_app",
+            "runtime_session_id": "THREAD-CLAUDE", "session_binding_generation": 1,
+            "repo_targets": ["app"],
+        }
+        self.run_cli(
+            root, "register", "--session", "SESSION-CLAUDE", "--agent", "claude",
+            "--project", "amiga", "--chat", "CHAT-STARTER", "--repo-target", "app",
+            "--mode", "manual", "--status", "active", "--runtime-family", "claude_app",
+            "--runtime-session-id", "THREAD-CLAUDE", "--runtime-session-source", "runtime",
+            "--starter-context", json.dumps(context),
+        )
+        session_path = root / "State" / "session_autobridge" / "sessions" / "SESSION-CLAUDE.json"
+        binding_path = root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-STARTER" / "claude.json"
+        session = json.loads(session_path.read_text())
+        binding = json.loads(binding_path.read_text())
+        self.assertEqual(1, session["session_binding_generation"])
+        self.assertEqual(context, session["starter_binding"])
+        self.assertEqual(1, binding["session_binding_generation"])
+        self.assertEqual(context, binding["starter_binding"])
+
+        self.run_cli(
+            root, "register", "--session", "SESSION-CLAUDE", "--agent", "claude",
+            "--project", "amiga", "--chat", "CHAT-STARTER", "--mode", "manual",
+            "--status", "active", "--runtime-family", "claude_app",
+            "--runtime-session-id", "THREAD-CLAUDE-NEW", "--runtime-session-source", "runtime",
+        )
+        updated = json.loads(session_path.read_text())
+        self.assertEqual(2, updated["session_binding_generation"])
+
     # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
     OWNER_FAMILY = "claude_app"
 

@@ -28,6 +28,12 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
                 "command": ["python3", "/runtime/bin/livecraft_wake.py"],
             },
             "pi_fingerprint": fingerprint,
+            "starter_binding": {
+                "agent_id": "codex", "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+                "session_id": "SESSION-CODEX", "runtime_family": "codex_app",
+                "runtime_session_id": "codex-native", "session_binding_generation": 1,
+                "repo_targets": ["app"],
+            },
         }
         message = {
             "path": "Chats/wake.md",
@@ -37,7 +43,8 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
             },
             "body": "Wake body",
         }
-        with mock.patch.object(bridge, "read_pi_session_fingerprint", return_value=fingerprint), \
+        with mock.patch.object(bridge, "livecraft_starter_binding_status", return_value=(True, None)), \
+             mock.patch.object(bridge, "read_pi_session_fingerprint", return_value=fingerprint), \
              mock.patch.object(
                  bridge.subprocess, "run",
                  return_value=CompletedProcess([], 0, "prompted", ""),
@@ -65,6 +72,12 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
                 "command": ["python3", "/runtime/bin/livecraft_wake.py"],
             },
             "pi_fingerprint": fingerprint,
+            "starter_binding": {
+                "agent_id": "codex", "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+                "session_id": "SESSION-CODEX", "runtime_family": "codex_app",
+                "runtime_session_id": "codex-native", "session_binding_generation": 1,
+                "repo_targets": ["app"],
+            },
         }
         message = {
             "path": "Chats/wake.md",
@@ -86,6 +99,7 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
              mock.patch.object(bridge, "claim_message_activation", return_value=(True, None)), \
              mock.patch.object(bridge, "resolve_effective_action", return_value=("runtime_trigger", "test")), \
              mock.patch.object(bridge, "materialize_selected_runtime_packet") as materialize, \
+             mock.patch.object(bridge, "livecraft_starter_binding_status", return_value=(True, None)), \
              mock.patch.object(bridge, "read_pi_session_fingerprint", return_value=fingerprint), \
              mock.patch.object(
                  bridge.subprocess, "run",
@@ -101,6 +115,70 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
         action = result["actions"][0]
         self.assertEqual(0, action["runtime_result"]["returncode"])
         self.assertFalse(action["runtime_result"]["delivery_accepted"])
+
+    def test_starter_binding_status_rejects_rebound_authority(self):
+        session = {
+            "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+            "starter_binding": {
+                "agent_id": "codex", "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+                "session_id": "SESSION-CODEX", "runtime_family": "codex_app",
+                "runtime_session_id": "codex-native", "session_binding_generation": 1,
+                "repo_targets": ["app"],
+            },
+        }
+        binding = {
+            "status": "active", "session_id": "SESSION-CODEX-NEW",
+            "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+        }
+        with mock.patch.object(bridge, "load_binding", return_value=binding), \
+             mock.patch.object(bridge, "load_session", return_value={}):
+            ok, reason = bridge.livecraft_starter_binding_status(session)
+        self.assertFalse(ok)
+        self.assertEqual(bridge.LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON, reason)
+
+    def test_starter_binding_status_accepts_exact_current_authority(self):
+        context = {
+            "agent_id": "codex", "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+            "session_id": "SESSION-CODEX", "runtime_family": "codex_app",
+            "runtime_session_id": "codex-native", "session_binding_generation": 1,
+            "repo_targets": ["app"],
+        }
+        session = {
+            "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+            "starter_binding": context,
+        }
+        binding = {
+            **context, "status": "active",
+            "runtime_session_source": "runtime", "runtime_home": "/codex",
+        }
+        owner = {
+            "session_id": "SESSION-CODEX", "agent_id": "codex",
+            "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D", "status": "active",
+            "repo_targets": ["app"], "session_binding_generation": 1,
+            "runtime": {"family": "codex_app", "session_id": "codex-native"},
+        }
+        with mock.patch.object(bridge, "load_binding", return_value=binding), \
+             mock.patch.object(bridge, "load_session", return_value=owner):
+            ok, reason = bridge.livecraft_starter_binding_status(session)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+    def test_execute_runtime_trigger_refuses_missing_starter_context(self):
+        session = {
+            "endpoint_id": "endpoint_pi_livecraft_local",
+            "binding_id": "binding-livecraft", "binding_generation": 2,
+            "runtime": {
+                "family": "pi", "session_id": "native", "session_source": "/pi/session.jsonl",
+                "home": "/pi", "command": ["python3", "wake.py"],
+            },
+        }
+        with mock.patch.object(bridge, "livecraft_starter_binding_status", return_value=(
+            False, bridge.LIVECRAFT_STARTER_CONTEXT_MISSING_REASON,
+        )), mock.patch.object(bridge.subprocess, "run") as run:
+            result = bridge.execute_runtime_trigger(session, {"path": "Chats/wake.md"})
+        self.assertEqual(1, result["returncode"])
+        self.assertEqual(bridge.LIVECRAFT_STARTER_CONTEXT_MISSING_REASON, result["status"])
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

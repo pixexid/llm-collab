@@ -112,6 +112,15 @@ creation and wake delivery untouched and reports the recovery condition clearly.
   returned identity and provider/model/thinking fingerprint, and registers only after
   the bootstrap marker succeeds. The worker bootstrap does not install a foreground
   event monitor; the Livecraft host owns background wakes.
+- **Starter provenance is part of the worker binding.** The first-start flow persists
+  the starter agent, logical session, runtime family/native session, project/chat/repository
+  scope, and the starter lease's `session_binding_generation` in the worker session and
+  binding mirror. Every Livecraft wake compares that snapshot with the current starter
+  lease and its authoritative session before prompting. A missing or changed snapshot
+  returns `livecraft_starter_context_missing` or `livecraft_starter_context_mismatch`,
+  leaves the packet durable, and never reuses the worker. Re-register the starter and
+  start a fresh Pi worker for a changed task or chat; do not manually copy a worker's
+  binding into a new context.
 - **The Livecraft path is production by default.** Without `--disposable`, the command
   requires a current project snapshot with `canonical_writes: true` and resolves the
   stored worker profile plus the active starter binding. Pass explicit provider/model/

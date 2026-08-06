@@ -29,6 +29,8 @@ EXACT_BINDING_REQUIRED_REASON = "exact_binding_required"
 EXACT_BINDING_NOT_DISPATCHABLE_REASON = "exact_binding_not_dispatchable"
 EXACT_BINDING_AMBIGUOUS_REASON = "exact_binding_ambiguous"
 EXACT_BINDING_MISMATCH_REASON = "exact_binding_mismatch"
+LIVECRAFT_STARTER_CONTEXT_MISSING_REASON = "livecraft_starter_context_missing"
+LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON = "livecraft_starter_context_mismatch"
 HEURISTIC_RUNTIME_DISCOVERY_REFUSED_REASON = "heuristic_runtime_discovery_refused"
 HEURISTIC_RUNTIME_DISCOVERY_FAMILIES = frozenset(
     {"codex_app", "claude_app", "gemini_cli"}
@@ -1093,6 +1095,11 @@ def binding_payload_from_session(
         "last_seen_at_utc": utc_iso(),
         "supersedes_session_id": session.get("supersedes_session_id"),
     }
+    starter_binding = session.get("starter_binding")
+    if starter_binding is not None:
+        payload["starter_binding"] = normalize_starter_binding_context(starter_binding)
+    if session.get("session_binding_generation") is not None:
+        payload["session_binding_generation"] = session["session_binding_generation"]
     # Carry the canonical identity onto the file binding so deliver.py reads a
     # target_binding_id from it and inbox.py's exact-read fence matches. Absent
     # on the session (unbound, or a non-pi family), these simply stay off.
@@ -1179,6 +1186,109 @@ def runtime_metadata(session: dict) -> dict[str, Any]:
     if isinstance(runtime, dict):
         return runtime
     return {}
+
+
+def normalize_starter_binding_context(value: Any) -> dict[str, Any]:
+    """Validate and retain the exact starter lease identity captured by a worker."""
+    if not isinstance(value, dict):
+        raise ValueError("starter_binding must be an object")
+    required = (
+        "agent_id", "project_id", "chat_id", "session_id", "runtime_family",
+        "runtime_session_id", "session_binding_generation",
+    )
+    if any(
+        not isinstance(value.get(key), str) or not value[key].strip()
+        for key in required[:-1]
+    ):
+        raise ValueError("starter_binding has an incomplete identity")
+    generation = value.get("session_binding_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise ValueError("starter_binding has no positive session binding generation")
+    repo_targets = value.get("repo_targets")
+    if (
+        not isinstance(repo_targets, list)
+        or not repo_targets
+        or any(not isinstance(target, str) or not target.strip() for target in repo_targets)
+    ):
+        raise ValueError("starter_binding has no repository scope")
+    normalized = {
+        key: value[key]
+        for key in required
+    }
+    normalized["repo_targets"] = sorted(set(repo_targets))
+    if value.get("binding_id") is not None:
+        if not isinstance(value["binding_id"], str) or not value["binding_id"].strip():
+            raise ValueError("starter_binding binding_id is malformed")
+        normalized["binding_id"] = value["binding_id"]
+    return normalized
+
+
+def livecraft_starter_binding_status(session: dict) -> tuple[bool, str | None]:
+    """Return whether a Livecraft worker still has its original starter lease."""
+    try:
+        expected = normalize_starter_binding_context(session.get("starter_binding"))
+    except ValueError:
+        return False, LIVECRAFT_STARTER_CONTEXT_MISSING_REASON
+
+    if (
+        expected["project_id"] != session.get("project_id")
+        or expected["chat_id"] != session.get("chat_id")
+    ):
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    try:
+        current = load_binding(
+            str(expected["project_id"]),
+            str(expected["chat_id"]),
+            str(expected["agent_id"]),
+        )
+        owner = load_session(str(current.get("session_id")))
+    except (FileNotFoundError, BindingUnreadable, UnreadableFile, ValueError, TypeError):
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+
+    runtime = runtime_metadata(owner)
+    observed = {
+        "agent_id": owner.get("agent_id"),
+        "project_id": owner.get("project_id"),
+        "chat_id": owner.get("chat_id"),
+        "session_id": owner.get("session_id"),
+        "runtime_family": runtime.get("family"),
+        "runtime_session_id": runtime.get("session_id"),
+        "session_binding_generation": owner.get("session_binding_generation"),
+        "repo_targets": owner.get("repo_targets"),
+    }
+    if observed["repo_targets"] is None:
+        observed["repo_targets"] = current.get("repo_targets")
+    try:
+        observed = normalize_starter_binding_context(observed)
+    except ValueError:
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    binding_observed = {
+        "agent_id": current.get("agent_id"),
+        "project_id": current.get("project_id"),
+        "chat_id": current.get("chat_id"),
+        "session_id": current.get("session_id"),
+        "runtime_family": current.get("runtime_family"),
+        "runtime_session_id": current.get("runtime_session_id"),
+        "session_binding_generation": current.get("session_binding_generation"),
+        "repo_targets": current.get("repo_targets"),
+    }
+    try:
+        binding_observed = normalize_starter_binding_context(binding_observed)
+    except ValueError:
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    if owner.get("status") != "active" or current.get("status") != "active":
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    for key in (
+        "agent_id", "project_id", "chat_id", "session_id", "runtime_family",
+        "runtime_session_id", "session_binding_generation", "repo_targets",
+    ):
+        if observed[key] != expected[key]:
+            return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+        if binding_observed[key] != expected[key]:
+            return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    if expected.get("binding_id") is not None and current.get("binding_id") != expected["binding_id"]:
+        return False, LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON
+    return True, None
 
 
 def livecraft_runtime_wake_available(session: dict) -> bool:
@@ -3250,6 +3360,15 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
     livecraft_runtime_command = livecraft_runtime_wake_available(session)
     if runtime_family == "pi":
+        if livecraft_runtime_command:
+            starter_ok, starter_reason = livecraft_starter_binding_status(session)
+            if not starter_ok:
+                return {
+                    "status": starter_reason,
+                    "runtime_family": "pi",
+                    "returncode": 1,
+                    "delivery_accepted": False,
+                }
         # Pre-wake drift guard: the current native session must still match the
         # provider/model/thinking/cwd fingerprint pinned at registration. A mismatch
         # or any unreadable/incomplete evidence emits NO wake and returns a
@@ -4108,6 +4227,14 @@ def dispatch_session(
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
+            if runtime.get("family") == "pi" and livecraft_runtime_wake_available(routing_session):
+                starter_ok, starter_reason = livecraft_starter_binding_status(routing_session)
+                if not starter_ok:
+                    event["reason"] = starter_reason
+                    should_mark_processed = False
+                    append_event(session_id, event)
+                    actions.append(event)
+                    continue
             if (
                 runtime.get("family") == "pi"
                 and not message_needs_canonical_materialization(routing_session, message)
