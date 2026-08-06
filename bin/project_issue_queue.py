@@ -354,6 +354,19 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
                 f"lane {order} tier mismatch for {task_id}: queue {tier!r} vs task {frontmatter_tier!r}"
             )
 
+        # lane_type decides whether a lane may be selected at all, so a cached
+        # projection that disagrees with the mirror is a scheduling fault, not a
+        # cosmetic drift: a mirror reclassified as coordination while the cache
+        # still says null makes every exclusion here read the tracker as ordinary
+        # work and hand it to a worker. Compared like every other authoritative
+        # field rather than trusted from the cache.
+        frontmatter_lane_type = frontmatter.get("lane_type")
+        if frontmatter_lane_type != lane.get("lane_type"):
+            errors.append(
+                f"lane {order} lane_type mismatch for {task_id}: "
+                f"queue {lane.get('lane_type')!r} vs task {frontmatter_lane_type!r}"
+            )
+
         task_depends = normalize_depends(frontmatter.get("depends_on"))
         if task_depends != depends_on:
             errors.append(

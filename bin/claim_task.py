@@ -438,6 +438,31 @@ def main():
         lane = issue_queue.find_lane(payload, fm.get("task_id", args.task))
         if lane is not None:
             lane_state = lane.get("queue_state")
+            # A coordination lane is a tracker and is never activated (GH-527).
+            # Checked BEFORE the state allowlist and before --allow-queue-override:
+            # the allowlist admits `active`/`review`, which a coordination lane may
+            # legitimately hold, and the override is designed to bypass ordering —
+            # neither should be able to hand non-work to an owner.
+            if issue_queue.is_coordination_lane(lane):
+                print(
+                    json.dumps(
+                        {
+                            "error": "coordination lanes are trackers and are never activated",
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "project_id": project_id,
+                            "lane": {
+                                "issue": lane.get("issue"),
+                                "queue_state": lane_state,
+                                "lane_type": lane.get("lane_type"),
+                                "order": lane.get("order"),
+                            },
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             if lane_state not in {"ready", "active", "review"} and not args.allow_queue_override:
                 current_ready = issue_queue.next_ready_lane(payload)
                 print(

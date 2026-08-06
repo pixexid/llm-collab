@@ -1252,6 +1252,91 @@ class CoordinationLaneTest(unittest.TestCase):
         errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
         self.assertEqual([], errors)
 
+    def test_amiga_coordination_selection_and_suppression(self) -> None:
+        """AGENTS.md: a shared-contract change needs focused coverage for Amiga AND
+        a non-Amiga project. The other cases here are llm-collab plus a synthetic
+        strict project; neither is Amiga, and Amiga is the one that enables
+        `ui_ux.direct_app_only`, so it exercises a different validator path.
+
+        Both halves of the deadlock, on Amiga: never selected, never suppressing.
+        """
+        payload = {"project_id": "amiga", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        self.assertEqual(93, project_issue_queue.next_ready_lane(payload)["issue"])
+
+        active = {"project_id": "amiga", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        fm = {
+            lane["task_id"]: {
+                "project_id": "amiga",
+                "status": lane.get("task_status", "open"),
+                "lane_type": lane.get("lane_type"),
+            }
+            for lane in active["lanes"]
+        }
+        project_issue_queue.normalize_lanes(active, task_frontmatters=fm)
+        by_issue = {l["issue"]: l for l in active["lanes"]}
+        self.assertEqual("ready", by_issue[93]["queue_state"])
+        self.assertIn(85, by_issue)
+
+    def _mirror(self, temp, *, lane_type):
+        """One task mirror on disk, differing from the lane ONLY in lane_type."""
+        body = (
+            "---\n"
+            "task_id: TASK-85\n"
+            "title: GH-85 tracker\n"
+            "status: open\n"
+            "owner: codex\n"
+            "project_id: llm-collab\n"
+            "depends_on: []\n"
+            f"lane_type: {lane_type}\n"
+            "---\n\n# GH-85\n"
+        )
+        path = Path(temp) / "TASK-85.md"
+        path.write_text(body)
+        return path
+
+    def _validate_with_mirror(self, temp, *, cache_lane_type, mirror_lane_type):
+        mirror = self._mirror(temp, lane_type=mirror_lane_type)
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", cache_lane_type, task="TASK-85"),
+        ]}
+        with patch.object(project_issue_queue, "find_task_by_id", return_value=mirror):
+            errors, _ = project_issue_queue.validate_queue("llm-collab", payload)
+        return errors
+
+    def test_validate_flags_lane_type_drift_between_cache_and_mirror(self) -> None:
+        """Connector P1 on PR #550, and a state I actually observed tonight: the
+        cached projection carried `lane_type: null` for GH-85 while the mirror said
+        `coordination`, and validation reported healthy. Every exclusion in this
+        module reads the CACHED lane, so an unvalidated mismatch silently restores
+        the deadlock this whole lane removes.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            errors = self._validate_with_mirror(
+                temp, cache_lane_type=None, mirror_lane_type="coordination"
+            )
+        self.assertTrue(
+            any("lane_type mismatch" in e for e in errors),
+            f"stale cached lane_type must be a validation error, got {errors!r}",
+        )
+
+    def test_validate_accepts_matching_lane_type(self) -> None:
+        """Unchanged direction: agreement must stay silent, or an always-report
+        mutation would satisfy the mismatch test above."""
+        with tempfile.TemporaryDirectory() as temp:
+            errors = self._validate_with_mirror(
+                temp, cache_lane_type="coordination", mirror_lane_type="coordination"
+            )
+        self.assertFalse(
+            [e for e in errors if "lane_type mismatch" in e],
+            f"matching lane_type must not error, got {errors!r}",
+        )
+
     def test_v6_coordination_token_survives_the_strict_direct_app_validator(self) -> None:
         """V6/AC8. llm-collab does not set `ui_ux.direct_app_only`, so validating
         there proves nothing — the collision would only appear on a strict
