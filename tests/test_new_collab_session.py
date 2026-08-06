@@ -73,12 +73,16 @@ class WakeChannelTest(unittest.TestCase):
 class CoworkerPromptTest(unittest.TestCase):
     def test_codex_prompt_arms_the_watcher(self):
         # A Codex co-worker is onboarded onto routine dispatch, not polling.
-        p = ncs.coworker_prompt("codex", ncs.wake_channel(
-            {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}),
-            "llm-collab", "CHAT-ABCD1234", "app", "codex_app")
+        activation = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
+        p = ncs.coworker_prompt("codex", ncs.wake_channel(activation),
+                                "llm-collab", "CHAT-ABCD1234", "app", "codex_app",
+                                ncs.needs_dispatch_wake(activation))
         self.assertIn("watch_inbox.py", p)
         self.assertNotIn("NO native session watcher", p)
-        self.assertIn("SESSION-CODEX-ABCD1234", p)
+        # the register step still names the exact session; only the WATCHER is
+        # agent-wide, because that is the one that dispatches.
+        self.assertIn("--session SESSION-CODEX-ABCD1234 --agent codex", p)
+        self.assertNotIn("--session SESSION-CODEX-ABCD1234 --repo-target", p)
 
     def test_watcher_prompt_arms_watcher(self):
         p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
@@ -132,15 +136,36 @@ class PickupBlockTest(unittest.TestCase):
         # a real watcher. This reverses the earlier ruling that Codex had no
         # native session watcher; it has one, and that watcher delivered the
         # app-server proof on 2026-08-06.
-        channel = ncs.wake_channel(
-            {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
-        )
+        activation = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
+        channel = ncs.wake_channel(activation)
         self.assertEqual("watcher", channel)
+        # And it must be the DISPATCHING watcher. watch_inbox.py runs
+        # dispatch_autobridge only when --session is absent, so an exact-session
+        # command would announce and never start Codex's turn — while the bound
+        # binding suppresses AX. Observed, not woken (PR #559 r3725767284).
+        self.assertTrue(ncs.needs_dispatch_wake(activation))
         block = "\n".join(ncs.pickup_block(
             channel, "codex", "llm-collab", "CHAT-ABCD1234",
-            "SESSION-CODEX", "app", "019f-native", "codex_app"))
+            "SESSION-CODEX", "app", "019f-native", "codex_app",
+            ncs.needs_dispatch_wake(activation)))
         self.assertIn("watch_inbox.py", block)
+        # Assert on the COMMAND lines, not the block: the explanatory comment
+        # legitimately contains the string "--session".
+        command = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+        self.assertIn("watch_inbox.py --me codex", command)
+        self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
+
+    def test_self_reading_worker_still_gets_the_exact_session_watcher(self):
+        # Claude reads its own inbox on the announcement, so the exact-session
+        # observer is correct for it and must not be widened to agent-wide.
+        activation = {"type": "cli_session", "watcher_enabled": True}
+        self.assertFalse(ncs.needs_dispatch_wake(activation))
+        block = "\n".join(ncs.pickup_block(
+            ncs.wake_channel(activation), "claude", "llm-collab", "CHAT-ABCD1234",
+            "SESSION-CLAUDE", "app", "019f-native", "claude_app",
+            ncs.needs_dispatch_wake(activation)))
+        self.assertIn("--session SESSION-CLAUDE", block)
 
     def test_watcher_pickup_arms_a_watcher(self):
         block = "\n".join(ncs.pickup_block(

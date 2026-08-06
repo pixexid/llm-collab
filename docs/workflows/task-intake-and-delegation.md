@@ -141,7 +141,9 @@ AX command printed by `deliver.py`; a supported `ax_attended_only` target report
 `ax_attended_recovery_required` instead — route control to Codex-attended
 recovery, never a routine ring. A terminal-only
 CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
-included, is woken by its durable packet and its own watcher.
+included, is woken by its durable packet and its own watcher **whenever its
+binding dispatches** (`autobridge_ready: true`); only when `deliver.py` reports
+`ax_doorbell_required: true` instead does a Codex packet take the AX fallback.
 
 Do not read `watcher_pickup_ready` as the signal for that. It requires
 `wake_fallback_allowed` **and** `is_watcher_only_target`, so a dispatchable
@@ -516,10 +518,11 @@ built and the orchestrator waits for work it never assigned.
 - **Then keep the loop alive — through the recipient's own transport.**
   Re-driving is a *new durable packet* plus only the wake action `deliver.py`
   reports for that recipient — never a hand-chosen ring. For a watcher-backed
-  recipient — Claude, the Pi workers, and Codex alike — deliver durably and stop;
-  its watcher owns pickup, so never ring it. Only when `deliver.py` actually
-  prints an AX command (Codex, with no dispatchable binding) run exactly that
-  command, and never re-ring a `QUEUED (UNCONFIRMED)` attempt. Re-driving a question just yields another answer. (See AGENTS.md
+  recipient whose binding dispatches (`autobridge_ready: true`) — Claude, the Pi
+  workers, and Codex alike — deliver durably and stop; its watcher owns pickup,
+  so never ring it. Only when `deliver.py` reports `ax_doorbell_required: true`
+  does the alternate path apply: run exactly the AX command it prints, and never
+  re-ring a `QUEUED (UNCONFIRMED)` attempt. Re-driving a question just yields another answer. (See AGENTS.md
   contract v10 and `## Delegation message requirements`.)
 
 ## Delegation message requirements

@@ -231,11 +231,37 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
     )
 
 
-def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family) -> list[str]:
+def needs_dispatch_wake(activation: dict) -> bool:
+    """True when this worker's turn is STARTED by autobridge dispatch rather
+    than by reading an announcement — today, a worker carrying an `ax_app`
+    (Codex). Such a worker must run the agent-wide dispatching watcher, because
+    an exact-session watcher never calls dispatch_autobridge."""
+    return bool((activation or {}).get("ax_app"))
+
+
+def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family,
+                 needs_dispatch: bool = False) -> list[str]:
     """How THIS agent picks up packets, keyed to its real wake channel. Every
     watcher-backed worker arms a persistent native watcher — Codex included,
     per contract v12; the polling block below is for a worker that genuinely has
-    no watcher to arm."""
+    no watcher to arm.
+
+    Two watcher shapes, and the difference is not cosmetic. An exact-session
+    watcher (`--session`) OBSERVES: watch_inbox.py runs dispatch_autobridge only
+    when `--session` is absent, so it announces `new_message` and stops. That is
+    right for a worker that reads its own inbox on the announcement. A worker
+    whose turn is STARTED by autobridge dispatch — one carrying an `ax_app`,
+    i.e. Codex — needs the agent-wide dispatching watcher instead; give it the
+    exact-session command and a bound packet would suppress AX while nothing
+    ever wakes it."""
+    if channel == "watcher" and needs_dispatch:
+        return [
+            "# Arm the agent-wide DISPATCHING watcher (no --session: watch_inbox",
+            "# only runs autobridge dispatch when --session is absent, and your",
+            "# turn is started by that dispatch, not by an announcement):",
+            f"{LAUNCH} watch_inbox.py --me {agent} --project {project} \\",
+            f"  --repo-target {repo_target} --json",
+        ]
     if channel == "watcher":
         return [
             "# Arm your own inbox watcher in a persistent Monitor:",
@@ -256,7 +282,8 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ]
 
 
-def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
+def coworker_prompt(agent, channel, project, chat, repo_target, family,
+                    needs_dispatch: bool = False) -> str:
     session = f"SESSION-{agent.upper()}-{chat.split('-')[-1]}"
     # claude_app discovery refuses an unscoped read (it could pick another
     # project's session), so the worker must pass its own checkout path.
@@ -285,7 +312,8 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family) -> str:
         "",
         "# 3. Pick up packets on YOUR wake channel:",
     ]
-    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>", family)
+    lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>",
+                          family, needs_dispatch)
     return "\n".join(lines)
 
 
@@ -401,15 +429,18 @@ def main():
 
     print(f"chat_id: {chat}")
     print(f"initiator session: {my_session} ({args.me} / {args.my_runtime_session_id})")
-    my_channel = wake_channel(agent_activation(agents, args.me))
+    my_activation = agent_activation(agents, args.me)
+    my_channel = wake_channel(my_activation)
     print("\n=== YOUR OWN PICKUP (do this now) ===")
     print("\n".join(pickup_block(my_channel, args.me, args.project, chat,
                                  my_session, args.repo_target, args.my_runtime_session_id,
-                                 args.my_runtime_family)))
+                                 args.my_runtime_family, needs_dispatch_wake(my_activation))))
     for agent_id, family in coworkers:
-        channel = wake_channel(agent_activation(agents, agent_id))
+        activation = agent_activation(agents, agent_id)
+        channel = wake_channel(activation)
         print(f"\n=== SETUP PROMPT — share with {agent_id} ===")
-        print(coworker_prompt(agent_id, channel, args.project, chat, args.repo_target, family))
+        print(coworker_prompt(agent_id, channel, args.project, chat, args.repo_target, family,
+                              needs_dispatch_wake(activation)))
 
 
 if __name__ == "__main__":
