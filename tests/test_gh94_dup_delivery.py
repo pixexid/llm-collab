@@ -90,13 +90,13 @@ class FakeClient:
         return item
 
 
-def _run(recv_script, *, turn_start_ok=True):
+def _run(recv_script, *, turn_start_ok=True, message=MESSAGE):
     client = FakeClient(recv_script, turn_start_ok=turn_start_ok)
     endpoint = {"url": "ws://127.0.0.1:1/", "token_file": None, "pid": 1, "source": "test"}
     with patch.object(sab, "discover_codex_app_server", return_value=endpoint), \
          patch.object(sab, "_codex_app_server_token", return_value=None), \
          patch.object(sab, "JsonRpcWebSocketClient", return_value=client):
-        result = sab.execute_codex_app_server_trigger(SESSION, MESSAGE, None)
+        result = sab.execute_codex_app_server_trigger(SESSION, message, None)
     return result, client
 
 
@@ -118,6 +118,30 @@ class PostAcceptanceIsDeliveredTest(unittest.TestCase):
                 "text": "[from claude] Read latest codex packet in CHAT-REPLY: to-codex.md",
             }],
         )
+
+    def test_activation_turn_keeps_fenced_resume_prompt(self):
+        activation_message = dict(
+            MESSAGE,
+            body="start the protected lane",
+            activation_lease={
+                "fence_token": 7,
+                "owner_session_id": "owner-session",
+                "identity": {
+                    "project": "llm-collab",
+                    "chat": "CHAT-REPLY",
+                    "task": "TASK-1",
+                    "worktree": "/tmp/worktree",
+                    "branch": "codex/task-1",
+                    "target_agent": "codex",
+                },
+                "lease": {"lease_key": "lease-1"},
+            },
+        )
+        _, client = _run([_completed()], message=activation_message)
+        prompt = client.turn_start_payload["input"][0]["text"]
+        self.assertIn("activation_fence_token: 7", prompt)
+        self.assertIn("Activation packet body:\nstart the protected lane", prompt)
+        self.assertIn("Before mutating protected lane state, assert this exact activation lease fence.", prompt)
 
     def test_completed_turn_is_observed_and_delivered(self):
         result, client = _run([_completed("hi")])

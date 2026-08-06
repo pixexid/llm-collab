@@ -3143,7 +3143,11 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         return None
 
     timeout_seconds = int(runtime.get("timeout_seconds", 180))
-    prompt = build_app_server_ring_prompt(session, message)
+    prompt = (
+        build_resume_prompt(session, message)
+        if message.get("activation_lease")
+        else build_app_server_ring_prompt(session, message)
+    )
     runtime_session_id = str(runtime["session_id"])
     token = _codex_app_server_token(endpoint.get("token_file"))
     notifications: list[str] = []
