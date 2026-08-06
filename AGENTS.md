@@ -494,6 +494,10 @@ make that seam — not just its call sites — produce the retry-suppressing sur
 Routing alone is not compliance: a seam that returns a typed reason with a null
 identity is still a clean refusal.
 
+Review this invariant by enumerating every terminal branch after the success or
+ambiguity boundary and naming both its surfaced exception and durable state;
+finding one correct orphan branch does not prove its siblings are safe.
+
 Tests must prove **both** sides: that an identity-carrying failure keeps its typed
 reason and identity, and that an identity-less failure is ambiguous. A test for
 only one side cannot tell the fix from its over-application.

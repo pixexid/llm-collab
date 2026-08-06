@@ -1020,22 +1020,30 @@ class SessionLifecycleCore:
                 store.mark_managed_start(
                     workspace_id=request.workspace_id,
                     start_id=start_id,
-                    state="failed",
+                    state="ambiguous_start",
                     updated_at_utc=created_at_utc,
                     failure_reason=type(error).__name__,
                 )
-            else:
-                store.mark_managed_start(
-                    workspace_id=request.workspace_id,
-                    start_id=start_id,
-                    state="orphaned",
-                    updated_at_utc=created_at_utc,
-                    failure_reason=type(error).__name__,
-                    native_session_id=evidence.native_thread_id,
-                    session_ref_id=session_ref_id,
-                    evidence_sha256=codex_start_evidence_digest(evidence),
-                )
-            raise
+                raise ManagedStartResponseLost(
+                    "native start returned but exact completion failed",
+                    native_session_id=(
+                        evidence.native_thread_id if evidence is not None else None
+                    ),
+                ) from error
+            store.mark_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                state="orphaned",
+                updated_at_utc=created_at_utc,
+                failure_reason=type(error).__name__,
+                native_session_id=evidence.native_thread_id,
+                session_ref_id=session_ref_id,
+                evidence_sha256=codex_start_evidence_digest(evidence),
+            )
+            raise ManagedStartOrphaned(
+                "native start returned an exact identity but binding failed",
+                native_session_id=evidence.native_thread_id,
+            ) from error
         return {
             "start_id": start_id,
             "evidence": evidence,

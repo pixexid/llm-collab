@@ -164,11 +164,12 @@ compound participant. `reserved`, `ambiguous_start`, and `failed` rows carry no
 native session, SessionRef, or evidence digest. `orphaned`, `bound`, and
 `retired` rows retain the exact validated native identity and evidence digest.
 
-A lost start response becomes `ambiguous_start` and MUST NOT trigger a blind
-retry. A validated native start whose binding transaction fails becomes
-`orphaned`; later cleanup may retire only that exact re-attested native session.
-A failed start with no validated native identity becomes `failed`. None of
-these paths may select a replacement by latest, frontmost, or display state.
+A failure proven before the native start becomes `failed`. Once the native start
+may have run, every later failure is retry-suppressing: a fully validated native
+identity and SessionRef become `orphaned`, while a lost response or incomplete
+validation becomes `ambiguous_start`. Neither state may trigger a blind retry;
+later cleanup may retire only an exact re-attested orphan. None of these paths
+may select a replacement by latest, frontmost, or display state.
 
 The production Codex start is deliberately two commands. Trusted setup first
 pre-approves the immutable revision-2 descriptor for the workspace. The

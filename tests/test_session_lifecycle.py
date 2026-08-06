@@ -530,6 +530,66 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual("native_session_orphan", caught.exception.native_session_id)
         self.assertEqual(("ambiguous_start", None), row)
 
+    def test_returned_candidate_with_failed_reattestation_blocks_retry(self) -> None:
+        def fail_probe(_native_session_id: str):
+            raise ValueError("thread disappeared")
+
+        provider = CodexLifecycleProvider(
+            exact_thread_probe=fail_probe,
+            supported_operations_json='["reserve","attach","start"]',
+        )
+        core = SessionLifecycleCore(provider)
+        native_calls = []
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, subject(), provider)
+
+            def start_native(_start_id):
+                native_calls.append(True)
+                return self.start_candidate()
+
+            with self.assertRaises(ManagedStartResponseLost) as caught:
+                core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_post_return",
+                    start_native=start_native,
+                )
+            self.assertEqual("native_session_new", caught.exception.native_session_id)
+            self.assertEqual(
+                [("ambiguous_start", None)],
+                store._connection.execute(
+                    "SELECT state, native_session_id FROM managed_start_reservations"
+                ).fetchall(),
+            )
+            with self.assertRaises(CanonicalConflictError):
+                core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_post_return_retry",
+                    start_native=start_native,
+                )
+        self.assertEqual([True], native_calls)
+
+    def test_returned_unvalidated_candidate_is_ambiguous(self) -> None:
+        malformed = self.start_candidate()
+        del malformed["native_thread_id"]
+        with LedgerStore.open_writer(self.paths) as store:
+            self.provision(store, subject(), self.core.provider)
+            with self.assertRaises(ManagedStartResponseLost) as caught:
+                self.core.start_managed(
+                    store, self.managed_request(), runtime_home=self.runtime_home,
+                    trusted_project_root=self.trusted_root, created_at_utc=NOW,
+                    expires_at_utc=AT_EXPIRY, correlation_id="corr_unvalidated",
+                    start_native=lambda _start_id: malformed,
+                )
+            self.assertIsNone(caught.exception.native_session_id)
+            self.assertEqual(
+                [("ambiguous_start", None)],
+                store._connection.execute(
+                    "SELECT state, native_session_id FROM managed_start_reservations"
+                ).fetchall(),
+            )
+
     def test_managed_start_bind_conflict_orphans_exact_validated_native_evidence(self) -> None:
         active_subject = subject()
         with LedgerStore.open_writer(self.paths) as store:
@@ -557,13 +617,14 @@ class LifecycleTest(unittest.TestCase):
                 )
                 return self.start_candidate()
 
-            with self.assertRaises(CanonicalConflictError):
+            with self.assertRaises(ManagedStartOrphaned) as caught:
                 self.core.start_managed(
                     store, self.managed_request(), runtime_home=self.runtime_home,
                     trusted_project_root=self.trusted_root, created_at_utc=NOW,
                     expires_at_utc=AT_EXPIRY, correlation_id="corr_orphan",
                     start_native=fake_start,
                 )
+            self.assertEqual("native_session_new", caught.exception.native_session_id)
             row = store._connection.execute(
                 "SELECT state, native_session_id, evidence_sha256 FROM managed_start_reservations"
             ).fetchone()
