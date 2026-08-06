@@ -45,6 +45,34 @@ workflows below.
 
 ### Recent contract changes
 
+Contract v12 (2026-08-06) makes the **durable packet plus session-autobridge
+dispatch the routine wake for every watcher/monitor-backed recipient, Codex
+included**, and demotes AX to the fallback. This supersedes only the routing half
+of v10: AX is still Codex-only, and still only ever the exact command
+`deliver.py` prints — what changes is *when* it is used, never *who* may receive
+it.
+
+`deliver.py` has behaved this way for some time; the contract text was the part
+out of date. A dispatchable autobridge target takes precedence and suppresses the
+doorbell (`wake_fallback_allowed = not autobridge_ready and not
+dispatch_scope_refused`). Use AX only when autobridge is unavailable, which means
+exactly two things: the recipient has **no binding** for the scope, or its
+binding **cannot be read or dispatched**.
+
+**An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
+with `autobridge_refusal_reason: exact_binding_required` is not an error and
+prints no warning, so the absence of a doorbell is *not* evidence that dispatch
+happened — read the `deliver.py` result rather than inferring from quiet. Every
+delivery to Codex on 2026-08-05 took the AX fallback for this reason and nobody
+noticed, because the contract said AX was the Codex path anyway.
+
+Why it is worth the change: while AX was the only route to Codex, no Pi worker
+could reach it — Pi workers cannot ring AX — so every reply had to be relayed by
+a Claude thread. On 2026-08-05 that cost 35 minutes with two GH-549 packets
+unread behind a single relay. With the recipient bound, any worker's `deliver.py`
+reaches Codex directly and the relay hop disappears. Mechanics in
+`docs/workflows/session-autobridge-runbook.md`.
+
 Contract v11 (2026-08-03) ends idle standoffs at their real cause: bad
 delegation. A question and a task delegation are different acts — a question gets
 an answer, a delegation gets a deliverable — and must never share a packet. A
@@ -203,10 +231,25 @@ rather than opening a parallel lane. The mailbox is the only channel between
 workers — a PR comment is not a message, and a GitHub verdict is not a substitute
 for draining the inbox before you open a PR or merge.
 
-AX is not a general worker wake. Only a Codex/ChatGPT recipient may receive it,
-and only through the exact command `deliver.py` prints. For every non-Codex
-watcher/monitor-backed recipient, including Claude, write the durable packet and
-stop; never invent an `axsend` command or bypass the recipient's watcher.
+**Write the durable packet and let dispatch wake the recipient.** For every
+watcher/monitor-backed recipient — Claude, the Pi workers, and Codex once it is
+bound — a matching session-autobridge target takes precedence and suppresses the
+doorbell. Check the `deliver.py` result: `autobridge_ready: true` with
+`ax_doorbell_required: false` means the recipient has it and nothing further is
+owed.
+
+AX is the **fallback**, not the routine path, and it is still Codex-only: no
+other worker is ever an AX ring target, and it is only ever the exact command
+`deliver.py` prints — never an invented `axsend`, and never a way around a
+recipient's watcher. Ring only when `deliver.py` asks for it, which happens in
+exactly two cases: the recipient has no binding for the scope, or its binding
+cannot be read or dispatched.
+
+Treat a missing doorbell as information, not permission: an unbound recipient
+refuses dispatch **silently** (`autobridge_refusal_reason:
+exact_binding_required`), so quiet means "unrouted", not "delivered". If a
+recipient you expect to be bound is not, that is the defect to fix — the
+recipient registers its own session, since only it knows its exact runtime id.
 
 ## Shared Checkout Safety
 
