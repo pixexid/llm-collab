@@ -158,6 +158,17 @@ class PickupBlockTest(unittest.TestCase):
         # (PR #559 r3725819269).
         self.assertIn("pm2_watchers.py ensure --agent codex", command)
         self.assertNotIn("watch_inbox.py", command)
+        # Transport before binding-dependent wake: ensuring the watcher without
+        # the sidecar leaves a dispatchable binding that suppresses AX with
+        # nowhere to send the turn — the 2026-08-05 silent outage
+        # (PR #559 r3725873619). Order is asserted, not just presence.
+        cmds = [l.strip() for l in command.splitlines() if l.strip()]
+        self.assertEqual(
+            [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
+             f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
+            cmds,
+            "sidecar must be ensured BEFORE the watcher, and nothing else emitted",
+        )
         self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
 

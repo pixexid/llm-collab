@@ -256,13 +256,22 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ever wakes it."""
     if channel == "watcher" and needs_dispatch:
         return [
-            "# Ensure the MANAGED dispatching watcher (one per agent, not per",
-            "# chat). Your turn is started by autobridge dispatch, and",
-            "# watch_inbox only dispatches when --session is absent — but a raw",
-            "# second poller alongside the PM2 one would double-dispatch: both",
-            "# read processed_messages before invoking the runtime and record",
-            "# after, so each can issue turn/start for the same unread packet.",
-            "# `ensure` is idempotent: it starts the singleton only if missing.",
+            "# 1) Ensure the TRANSPORT first. A binding that dispatches while",
+            "#    the app-server sidecar is missing suppresses AX and has",
+            "#    nowhere to send the turn — that is the 20-hour silent outage",
+            "#    of 2026-08-05. This fails closed (exit 2) with the exact",
+            "#    remedy when the token is absent or insecure, so a failure",
+            "#    here means STOP, not continue:",
+            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
+            "",
+            "# 2) Then ensure the MANAGED dispatching watcher (one per agent,",
+            "#    not per chat). Your turn is started by autobridge dispatch,",
+            "#    and watch_inbox only dispatches when --session is absent —",
+            "#    but a raw second poller alongside the PM2 one would",
+            "#    double-dispatch: both read processed_messages before invoking",
+            "#    the runtime and record after, so each can issue turn/start for",
+            "#    the same unread packet. `ensure` is idempotent: it starts the",
+            "#    singleton only if missing.",
             f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
         ]
     if channel == "watcher":
