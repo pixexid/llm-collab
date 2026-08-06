@@ -137,3 +137,64 @@ def plan_bootstrap(
         canonical_message_id=canonical_message_id,
         packet_path=packet_path,
     )
+
+
+@dataclass(frozen=True)
+class BootstrapOutcome:
+    """What one bootstrap attempt did, in terms the watcher can log and act on."""
+
+    state: str
+    native_thread_id: str | None = None
+    detail: str = ""
+
+
+BOOTSTRAP_STARTED = "bb_bootstrap_started"
+BOOTSTRAP_DUPLICATE = "bb_bootstrap_duplicate_first_packet"
+BOOTSTRAP_AMBIGUOUS = "bb_bootstrap_ambiguous_start"
+BOOTSTRAP_ORPHANED = "bb_bootstrap_orphaned"
+BOOTSTRAP_FAILED = "bb_bootstrap_failed"
+
+
+def execute_bootstrap(
+    plan: BootstrapPlan,
+    *,
+    already_started: Callable[[str], bool],
+    start: Callable[[BootstrapPlan], Any],
+    on_ambiguous: type[Exception],
+    on_orphaned: type[Exception],
+) -> BootstrapOutcome:
+    """Run one bootstrap: dedup, then exactly one start, then classify the result.
+
+    Dependencies are injected rather than imported so this is provable without a
+    ledger, a bb process, or a watcher. The three saga shapes are mapped here
+    because the watcher must log them differently and must never retry two of
+    them.
+
+    Dedup comes FIRST and is the whole reason AC4 exists: bb has no idempotency,
+    so a duplicate first delivery that reaches the start produces a second real
+    thread. Checking after the start would be a check of something already done.
+    """
+    if already_started(plan.canonical_message_id):
+        return BootstrapOutcome(
+            BOOTSTRAP_DUPLICATE,
+            detail=f"{plan.canonical_message_id} already started a thread",
+        )
+    try:
+        result = start(plan)
+    except on_orphaned as error:  # a thread exists; hand its id back to be reconciled
+        return BootstrapOutcome(
+            BOOTSTRAP_ORPHANED,
+            native_thread_id=getattr(error, "native_session_id", None),
+            detail=str(error),
+        )
+    except on_ambiguous as error:  # bb may have created it; NEVER retried
+        return BootstrapOutcome(
+            BOOTSTRAP_AMBIGUOUS,
+            native_thread_id=getattr(error, "native_session_id", None),
+            detail=str(error),
+        )
+    except Exception as error:  # no thread was created; a plain failure is honest
+        return BootstrapOutcome(BOOTSTRAP_FAILED, detail=str(error))
+    return BootstrapOutcome(
+        BOOTSTRAP_STARTED, native_thread_id=str(result), detail="one thread started"
+    )

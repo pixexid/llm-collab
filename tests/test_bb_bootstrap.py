@@ -20,6 +20,16 @@ from llm_collab.bb_bootstrap import (
     BootstrapRefusal,
     plan_bootstrap,
     project_enables_bb,
+    execute_bootstrap,
+    BOOTSTRAP_STARTED,
+    BOOTSTRAP_DUPLICATE,
+    BOOTSTRAP_AMBIGUOUS,
+    BOOTSTRAP_ORPHANED,
+    BOOTSTRAP_FAILED,
+)
+from llm_collab.managed_start_errors import (
+    ManagedStartOrphaned,
+    ManagedStartResponseLost,
 )
 
 PROJECT = {"id": "llm-collab", "bb": {"enabled": True}}
@@ -139,6 +149,82 @@ class FirstPacketTest(unittest.TestCase):
         self.assertEqual("cmid_0001", outcome.canonical_message_id)
         self.assertEqual(PACKET["path"], outcome.packet_path)
 
+
+
+class ExecuteBootstrapTest(unittest.TestCase):
+    """AC2/AC3/AC4 + V3/V5: dedup before start, and the three saga shapes."""
+
+    def setUp(self) -> None:
+        self.started: list[str] = []
+        self.seen: set[str] = set()
+
+    def _start_ok(self, plan):
+        self.started.append(plan.canonical_message_id)
+        return "thr_new"
+
+    def _run(self, start=None, seen=None):
+        return execute_bootstrap(
+            plan(),
+            already_started=lambda cmid: cmid in (self.seen if seen is None else seen),
+            start=start or self._start_ok,
+            on_ambiguous=ManagedStartResponseLost,
+            on_orphaned=ManagedStartOrphaned,
+        )
+
+    def test_one_first_delivery_starts_exactly_one_thread(self):
+        outcome = self._run()
+        self.assertEqual(BOOTSTRAP_STARTED, outcome.state)
+        self.assertEqual("thr_new", outcome.native_thread_id)
+        self.assertEqual(1, len(self.started))
+
+    def test_a_duplicate_first_packet_never_reaches_the_start(self):
+        """V3/AC4: bb has no idempotency, so the guard must be BEFORE the spawn."""
+        outcome = self._run(seen={"cmid_0001"})
+        self.assertEqual(BOOTSTRAP_DUPLICATE, outcome.state)
+        self.assertEqual(
+            [], self.started, "a deduped delivery must not reach the start at all"
+        )
+
+    def test_an_ambiguous_start_is_recorded_and_not_retried(self):
+        """V5: a lost response after thread creation must not produce a second."""
+        calls: list[int] = []
+
+        def start(_plan):
+            calls.append(1)
+            raise ManagedStartResponseLost("response lost after creation")
+
+        outcome = self._run(start=start)
+        self.assertEqual(BOOTSTRAP_AMBIGUOUS, outcome.state)
+        self.assertEqual(1, len(calls), "ambiguous must never be retried")
+
+    def test_an_orphan_carries_its_native_id_forward(self):
+        def start(_plan):
+            raise ManagedStartOrphaned("bound failed", native_session_id="thr_orphan")
+
+        outcome = self._run(start=start)
+        self.assertEqual(BOOTSTRAP_ORPHANED, outcome.state)
+        self.assertEqual("thr_orphan", outcome.native_thread_id)
+
+    def test_a_plain_failure_is_not_dressed_as_a_saga_state(self):
+        def start(_plan):
+            raise RuntimeError("connection refused")
+
+        outcome = self._run(start=start)
+        self.assertEqual(BOOTSTRAP_FAILED, outcome.state)
+        self.assertIsNone(outcome.native_thread_id)
+
+    def test_orphan_is_classified_before_ambiguous(self):
+        """An id is actionable; an ambiguity is not. Precedence must not invert."""
+
+        class BothShapes(ManagedStartOrphaned, ManagedStartResponseLost):
+            pass
+
+        def start(_plan):
+            raise BothShapes("both", native_session_id="thr_both")
+
+        outcome = self._run(start=start)
+        self.assertEqual(BOOTSTRAP_ORPHANED, outcome.state)
+        self.assertEqual("thr_both", outcome.native_thread_id)
 
 if __name__ == "__main__":
     unittest.main()
