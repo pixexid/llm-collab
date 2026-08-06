@@ -207,10 +207,12 @@ a different failure class and are not TCC update-survival evidence.
 The mailbox is the record; the doorbell is the notification. A doorbell with no
 corresponding mailbox packet is not valid for task-grade work.
 
-The doorbell exists for a worker that has no background event pickup of its own —
-Codex today. **Claude is not rung.** Its runtime carries its own inbox watcher,
-so the durable packet is the whole wake path; a Claude packet that is not being
-picked up is a watcher or binding defect to report, not a reason to reach for AX.
+The doorbell exists for the case where routine exact-session dispatch is
+unavailable for a Codex packet — not because Codex lacks background pickup. It
+has a watcher like every other worker, and that watcher is its routine wake.
+**Claude is not rung**, and neither is a Codex whose binding dispatches: the
+durable packet is the whole wake path, and a packet that is not being picked up
+is a watcher or binding defect to report, not a reason to reach for AX.
 See `session-autobridge-runbook.md`.
 
 ## Sender identifier convention

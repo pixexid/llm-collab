@@ -140,8 +140,8 @@ message, and use the approved worker bridge. Only a Codex recipient may use the
 AX command printed by `deliver.py`; a supported `ax_attended_only` target reports
 `ax_attended_recovery_required` instead — route control to Codex-attended
 recovery, never a routine ring. A terminal-only
-CLI worker needs a dispatchable runtime session. Every non-Codex watcher-backed
-worker is woken by its durable packet and its own watcher, and `deliver.py`
+CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
+included, is woken by its durable packet and its own watcher, and `deliver.py`
 reports `watcher_pickup_ready`. Treat `activation_unavailable` as a configuration blocker, record it
 precisely, and do not misreport it as routine operator relay.
 

@@ -259,8 +259,9 @@ happens, but the fix is to declare the scope.
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
-block. Run only its exact printed command. For a non-Codex watcher-backed
-recipient, `watcher_pickup_ready` means the watcher owns pickup. `deliver.py`
+block. Run only its exact printed command, and only when it is
+printed. For any watcher-backed recipient, `watcher_pickup_ready` means the
+watcher owns pickup. `deliver.py`
 exit 0 means the durable packet is written and the reply is complete.
 
 ## 5. Verify it actually dispatched

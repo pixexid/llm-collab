@@ -55,9 +55,12 @@ it.
 `deliver.py` has behaved this way for some time; the contract text was the part
 out of date. A dispatchable autobridge target takes precedence and suppresses the
 doorbell (`wake_fallback_allowed = not autobridge_ready and not
-dispatch_scope_refused`). Use AX only when autobridge is unavailable, which means
-exactly two things: the recipient has **no binding** for the scope, or its
-binding **cannot be read or dispatched**.
+dispatch_scope_refused`). Use AX only when the recipient has **no usable binding
+for the scope** — missing or inactive. An **unreadable or scope-refused** binding
+is not an AX case: `dispatch_scope_refused` (which `binding_unreadable` sets)
+makes `wake_fallback_allowed` false and suppresses the command, because no lane
+may wake a recipient whose authoritative record could not be read. Repair that
+state; do not try to ring through it.
 
 **An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
 with `autobridge_refusal_reason: exact_binding_required` is not an error and
@@ -259,8 +262,13 @@ The recovery is concrete, so a stranded packet is never a dead end:
 3. restart the recipient's watcher on a clean baseline;
 4. re-dispatch **one fresh probe packet** and require its receipt before treating
    the channel as repaired;
-5. only then resend the stranded packet, and confirm it was processed rather than
-   merely marked read.
+5. only then consider the stranded packet — and **do not resend it by reflex**.
+   `deliver.py` mints a fresh timestamped path on every send while dispatch dedup
+   is keyed by message path, so a resend is a *new* packet to the runtime and can
+   produce a second turn. Resend only when the original is proven to have failed
+   **before** runtime acceptance and is still unread. Where acceptance is
+   ambiguous, or the packet was marked read with no processed evidence, record
+   the ambiguous delivery and reconcile explicitly instead.
 
 The recipient owns its own watcher and binding, so steps 2-3 belong to it; a
 sender that cannot reach it says so in the durable mailbox rather than inventing
@@ -277,8 +285,9 @@ AX is the **fallback**, not the routine path, and it is still Codex-only: no
 other worker is ever an AX ring target, and it is only ever the exact command
 `deliver.py` prints — never an invented `axsend`, and never a way around a
 recipient's watcher. Ring only when `deliver.py` asks for it, which happens in
-exactly two cases: the recipient has no binding for the scope, or its binding
-cannot be read or dispatched.
+exactly one case: the recipient has no usable binding for the scope. An
+unreadable or scope-refused binding suppresses the doorbell and is a repair, not
+a ring.
 
 Treat a missing doorbell as information, not permission: an unbound recipient
 refuses dispatch **silently** (`autobridge_refusal_reason:

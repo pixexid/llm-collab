@@ -16,8 +16,9 @@ limits on dispatch.
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
 the busy-safe **bidirectional AX doorbell**, and only through the exact command
-printed by `deliver.py`. Every non-Codex watcher-backed worker is woken by its
-durable packet and its own watcher. See
+printed by `deliver.py`. Every watcher-backed worker, Codex included, is woken
+by its durable packet and its own watcher; AX is reached only when that dispatch
+is unavailable. See
 `claude-code-desktop-computer-use-bridge.md`. **GH-470: composer content and
 `AXValue` readability are never a sender-side hold, and neither is a busy/running
 recipient.** The recipient never types into its own composer, so any value there

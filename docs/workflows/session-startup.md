@@ -199,11 +199,10 @@ Current Phase 1 routing gives a matching dispatchable session autobridge
 precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
 suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
 uses the separately documented session-autobridge path and its retry limitations.
-Do not describe AX as primary for that packet. If the workflow requires AX as
-the primary wake, avoid registering the matching dispatchable autobridge or
-deactivate it before calling `deliver.py` (see
-`session-autobridge-runbook.md#deactivate-a-session`), then verify the delivery
-result actually reports `ax_doorbell_required: true`.
+Do not describe AX as primary for that packet, and **never deactivate a working
+binding to obtain an AX wake** — that removes the routine dispatch v12 requires
+in order to reach a fallback. If `deliver.py` does not print an AX command, the
+answer is to repair or diagnose dispatch, not to disable it.
 
 Safest task-grade workflow for desktop-app agents:
 

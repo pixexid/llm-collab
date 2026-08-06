@@ -163,12 +163,14 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
-AX applies only to the Codex recipient. Every non-Codex watcher-backed worker
-uses its durable packet and background watcher alone.
+AX applies only to the Codex recipient, and only as a fallback. Every
+watcher-backed worker — Codex included — uses its durable packet and background
+watcher as the routine wake.
 
-- if AX must be the primary wake, first ensure no matching dispatchable session
-  autobridge is active; current `deliver.py` gives `autobridge_ready` precedence
-  and suppresses `ax_doorbell_required`
+- never deactivate a dispatchable session autobridge in order to obtain an AX
+  wake; `deliver.py` gives `autobridge_ready` precedence and suppresses
+  `ax_doorbell_required` by design, and removing routine dispatch to reach a
+  fallback inverts contract v12
 - write the durable `llm-collab` packet and inspect the delivery result; when it
   reports `autobridge_ready: true`, the current Phase 1 route is session
   autobridge, not AX
