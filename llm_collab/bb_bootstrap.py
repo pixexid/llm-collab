@@ -1,0 +1,139 @@
+"""Recipient-side bb bootstrap entry condition (GH-564 Slice 1B, AC0/AC8).
+
+This module owns ONE decision: may a first delivery bootstrap a bb thread for this
+participant, right now? It performs no native call, writes no canonical row, and
+holds no transport. The caller — the recipient's own watcher, before autobridge
+session enumeration — acts on the decision.
+
+Three properties are load-bearing and each is a separate refusal rather than a
+combined truth test, because a combined test cannot say WHY it refused and a
+caller that cannot distinguish "not enabled" from "already bound" will eventually
+bootstrap over a live thread:
+
+* **Default off.** Absent or false project configuration refuses before anything
+  is read. AC8 requires no bb process, no HTTP call, no canonical row and no
+  routing change when disabled, so the disabled answer must come first and must
+  not depend on any other lookup succeeding.
+* **Exact absence only.** Bootstrap is for the case where no session exists at
+  all. Any existing session for the exact (project, chat, participant) — whatever
+  its state — means this is not a first delivery, and the ordinary path owns it.
+* **Terminal states refuse, never bootstrap.** An unreadable, mismatched,
+  ambiguous or scope-refused binding is a repair. Bootstrapping through one would
+  mint a second owner for a participant that already has a contested one, which is
+  the failure the whole exact-binding contract exists to prevent.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Sequence
+
+# Refusal reasons. Distinct values because the caller logs them and an operator
+# reads them: "not enabled" and "already bound" are different situations with
+# different repairs, and collapsing them hides which one happened.
+BOOTSTRAP_DISABLED = "bb_bootstrap_disabled"
+BOOTSTRAP_NOT_ENABLED_FOR_PROJECT = "bb_bootstrap_project_not_enabled"
+BOOTSTRAP_SESSION_EXISTS = "bb_bootstrap_session_exists"
+BOOTSTRAP_TERMINAL_BINDING = "bb_bootstrap_terminal_binding"
+BOOTSTRAP_NO_PACKET = "bb_bootstrap_no_first_packet"
+
+# A binding in any of these states is contested or unreadable. None of them is a
+# first delivery, and none may be bootstrapped through.
+TERMINAL_BINDING_STATES = frozenset(
+    {"unreadable", "mismatch", "ambiguous", "scope_refused"}
+)
+
+
+@dataclass(frozen=True)
+class BootstrapRefusal:
+    reason: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class BootstrapPlan:
+    """One first delivery that may create exactly one bb thread.
+
+    Carries the packet identity so the caller can dedup on it BEFORE spawning:
+    bb has no idempotency, so a duplicate first delivery that reaches the spawn
+    produces a second real thread.
+    """
+
+    project_id: str
+    conversation_id: str
+    participant_id: str
+    agent_id: str
+    canonical_message_id: str
+    packet_path: str
+
+
+def project_enables_bb(project: Mapping[str, Any] | None) -> bool:
+    """True only for an explicit boolean true under the project's `bb.enabled`.
+
+    Deliberately strict: a missing project, a missing `bb` block, a non-mapping
+    `bb`, a missing key, or a truthy non-boolean (`"yes"`, `1`) all read as
+    disabled. Default-off is the contract, so anything ambiguous is off rather
+    than "probably meant on".
+    """
+    if not isinstance(project, Mapping):
+        return False
+    bb = project.get("bb")
+    if not isinstance(bb, Mapping):
+        return False
+    return bb.get("enabled") is True
+
+
+def plan_bootstrap(
+    *,
+    enabled: bool,
+    project: Mapping[str, Any] | None,
+    project_id: str,
+    conversation_id: str,
+    participant_id: str,
+    agent_id: str,
+    existing_session_ids: Sequence[str],
+    binding_state: str | None,
+    first_packet: Mapping[str, Any] | None,
+) -> BootstrapPlan | BootstrapRefusal:
+    """Decide whether this delivery may bootstrap. Pure: no I/O, no native call.
+
+    Order is part of the contract. The adapter-disabled check runs first so a
+    disabled deployment reaches no lookup at all, and the existence check runs
+    before the packet read so an already-bound participant never causes a packet
+    to be parsed for a decision that was already made.
+    """
+    if not enabled:
+        return BootstrapRefusal(BOOTSTRAP_DISABLED, "bb adapter is disabled")
+    if not project_enables_bb(project):
+        return BootstrapRefusal(
+            BOOTSTRAP_NOT_ENABLED_FOR_PROJECT,
+            f"project {project_id!r} does not set bb.enabled: true",
+        )
+    if binding_state in TERMINAL_BINDING_STATES:
+        return BootstrapRefusal(
+            BOOTSTRAP_TERMINAL_BINDING,
+            f"binding state {binding_state!r} is terminal; repair it rather than bootstrapping",
+        )
+    if existing_session_ids:
+        return BootstrapRefusal(
+            BOOTSTRAP_SESSION_EXISTS,
+            f"{len(existing_session_ids)} session(s) already exist for this participant",
+        )
+    if not isinstance(first_packet, Mapping):
+        return BootstrapRefusal(BOOTSTRAP_NO_PACKET, "no first packet to bootstrap from")
+    canonical_message_id = first_packet.get("canonical_message_id")
+    packet_path = first_packet.get("path")
+    if not isinstance(canonical_message_id, str) or not canonical_message_id:
+        return BootstrapRefusal(
+            BOOTSTRAP_NO_PACKET, "first packet has no canonical_message_id to dedup on"
+        )
+    if not isinstance(packet_path, str) or not packet_path:
+        return BootstrapRefusal(BOOTSTRAP_NO_PACKET, "first packet has no path")
+    return BootstrapPlan(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        participant_id=participant_id,
+        agent_id=agent_id,
+        canonical_message_id=canonical_message_id,
+        packet_path=packet_path,
+    )
