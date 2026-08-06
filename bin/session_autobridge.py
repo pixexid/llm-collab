@@ -270,18 +270,20 @@ def plan_superseded_retirement(superseded_id: str, replacement: dict):
     """Pure preflight for retiring a superseded predecessor: load, validate scope, and
     build its terminal candidate with a prepared tuple — but write nothing.
 
-    Returns ``(terminal_record, prepared)`` to commit later, or ``None`` when there is
-    nothing to retire (absent or already-terminal). Raises ValueError on a cross-scope
-    retire. Splitting the write off lets a caller that also mutates another store (the
-    canonical rebind) run this refusal gate — including the capacity/inbox refusal that
-    stamping the terminal status can trigger — BEFORE that mutation.
+    Returns ``(record, prepared_retirement)`` to commit later, with a ``None``
+    retirement for an already-terminal predecessor, or ``None`` when absent. Raises
+    ValueError on an unreadable or cross-scope predecessor. Keeping the record in the
+    terminal case lets the successor inherit its duplicate-suppression authority without
+    rewriting it.
     """
     try:
         record = load_session(superseded_id)
-    except (FileNotFoundError, ValueError, UnreadableFile):
+    except FileNotFoundError:
         return None
-    if record.get("status") not in {"active", "parked"}:
-        return None
+    except (ValueError, UnreadableFile) as error:
+        raise ValueError(
+            f"refusing to supersede unreadable session {superseded_id}: {error}"
+        ) from error
     if any(
         record.get(field) != replacement.get(field)
         for field in ("agent_id", "project_id", "chat_id")
@@ -289,6 +291,8 @@ def plan_superseded_retirement(superseded_id: str, replacement: dict):
         raise ValueError(
             "refusing to retire a superseded session in a different agent/project/chat scope"
         )
+    if record.get("status") not in {"active", "parked"}:
+        return record, None
     record["status"] = "superseded"
     record["superseded_by"] = str(replacement["session_id"])
     return record, prepare_session_write(record)
@@ -297,7 +301,34 @@ def plan_superseded_retirement(superseded_id: str, replacement: dict):
 def commit_superseded_retirement(record: dict, prepared) -> None:
     """Write the pre-validated terminal predecessor record, carrying its prepared tuple
     so nothing is reopened or recomputed (no second refusal window)."""
-    save_session(record, prepared=prepared)
+    if prepared is not None:
+        save_session(record, prepared=prepared)
+
+
+def inherit_superseded_delivery_state(replacement: dict, predecessor: dict) -> None:
+    """Carry paired duplicate-suppression authority into a same-scope successor."""
+    predecessor_processed = predecessor.get("processed_messages", [])
+    replacement_processed = replacement.get("processed_messages", [])
+    predecessor_settled = predecessor.get("canonical_settled_messages", {})
+    replacement_settled = replacement.get("canonical_settled_messages", {})
+    if (
+        not isinstance(predecessor_processed, list)
+        or not isinstance(replacement_processed, list)
+        or not all(
+            isinstance(path, str)
+            for path in [*predecessor_processed, *replacement_processed]
+        )
+        or not isinstance(predecessor_settled, dict)
+        or not isinstance(replacement_settled, dict)
+    ):
+        raise ValueError("refusing supersession with malformed duplicate-suppression state")
+    replacement["processed_messages"] = list(
+        dict.fromkeys([*predecessor_processed, *replacement_processed])
+    )
+    replacement["canonical_settled_messages"] = {
+        **predecessor_settled,
+        **replacement_settled,
+    }
 
 
 def retire_superseded_session(superseded_id: str, replacement: dict) -> None:
@@ -774,10 +805,17 @@ def register_session(args) -> dict:
                 args.session, args.project, args.chat,
                 gh468_native_session_id, gh468_native_family, args.status
             )
+            retirement = None
+            if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+                retirement = plan_superseded_retirement(
+                    str(args.supersedes_session), payload
+                )
+                if retirement is not None:
+                    inherit_superseded_delivery_state(payload, retirement[0])
             prepared = prepare_session_write(payload)
             existing_binding = existing_binding_snapshot_or_refuse(payload)
-            if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-                retire_superseded_session(str(args.supersedes_session), payload)
+            if retirement is not None:
+                commit_superseded_retirement(*retirement)
             binding = update_binding_from_session(payload, existing=existing_binding)
             save_session(payload, prepared=prepared, allow_reactivation=True)
         if binding is not None:
@@ -823,6 +861,13 @@ def register_session(args) -> dict:
         except CanonicalBindingNativeMismatch as mismatch:
             canonical = None
             replacement_predecessor = _authorize_pi_replacement_or_refuse(args, mismatch)
+        # Pre-validate the predecessor retirement before the canonical swap, then
+        # include its dedup ledger in the successor's one carried capacity preflight.
+        retirement = None
+        if args.supersedes_session and str(args.supersedes_session) != str(args.session):
+            retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
+            if retirement is not None:
+                inherit_superseded_delivery_state(payload, retirement[0])
         preflight_candidate, _ = prepare_session_write(
             {
                 **payload,
@@ -851,14 +896,6 @@ def register_session(args) -> dict:
                 f"[error] {error}. Refusing to register before the canonical transition; "
                 "no session was written."
             )
-        # Pre-validate the predecessor retirement as a pure refusal gate too: adding the
-        # terminal status can itself cross the cap / trip inbox compaction, and that save
-        # would otherwise land AFTER the swap. Plan (load + validate + prepare) now; commit
-        # the carried tuple after the swap. For a replacement the supersedes is already
-        # proven same-scope, so this only sizes the terminal record.
-        retirement = None
-        if args.supersedes_session and str(args.supersedes_session) != str(args.session):
-            retirement = plan_superseded_retirement(str(args.supersedes_session), payload)
         # No pure refusal remains: NOW mint or swap. A fresh native session mints its
         # binding (#378); an authorized replacement rebinds the successor in for the
         # verified predecessor (#319); an exact-native re-registration already resolved
