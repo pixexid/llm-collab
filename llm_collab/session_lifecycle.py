@@ -552,7 +552,12 @@ class CodexLifecycleProvider(FakeLifecycleProvider):
 # mandatory (the store enforces it); `reserve` and `inspect` are the other two
 # operations Slice 1B calls. Anything else would be advertising a capability
 # this provider does not implement.
-BB_SUPPORTED_OPERATIONS_JSON = '["reserve","start","inspect"]'
+# Exactly the operation the managed-start store path requires. `reserve` and
+# `inspect` were advertised without a caller that needs them: nothing in
+# TASK-A1B97C or the managed-start saga drives this provider through either, and
+# advertising an operation this provider does not implement is a claim the store
+# would be entitled to act on.
+BB_SUPPORTED_OPERATIONS_JSON = '["start"]'
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "evt_x7hthpcxe5",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_9xirgjgdis",
+    "seq": 1,
+    "createdAt": 1785997910422,
+    "type": "client/turn/requested",
+    "data": {
+      "direction": "outbound",
+      "requestId": "creq_j47impnctb",
+      "source": "spawn",
+      "initiator": "user",
+      "senderThreadId": null,
+      "systemMessageKind": "unlabeled",
+      "systemMessageSubject": null,
+      "input": [
+        {
+          "type": "text",
+          "text": "GH-563 fixture capture (high). Reply with exactly: FIXTURE-HIGH. Then stop.",
+          "mentions": []
+        }
+      ],
+      "target": {
+        "kind": "thread-start"
+      },
+      "request": {
+        "method": "thread/start",
+        "params": {}
+      },
+      "execution": {
+        "model": "kimi-coding/k3",
+        "serviceTier": "default",
+        "reasoningLevel": "high",
+        "permissionMode": "full",
+        "source": "client/turn/requested"
+      }
+    }
+  },
+  {
+    "id": "evt_3xazvw8xwa",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_9xirgjgdis",
+    "seq": 2,
+    "createdAt": 1785997910424,
+    "type": "client/thread/start",
+    "data": {
+      "direction": "outbound",
+      "source": "spawn",
+      "initiator": "user",
+      "request": {
+        "method": "thread/start",
+        "params": {}
+      }
+    }
+  },
+  {
+    "id": "evt_m9zict4674",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_9xirgjgdis",
+    "seq": 3,
+    "createdAt": 1785997910496,
+    "type": "thread/identity",
+    "data": {
+      "providerThreadId": "thr_9xirgjgdis"
+    }
+  }
+]

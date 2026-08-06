@@ -1,10 +1,10 @@
 {
-  "id": "thr_v5tzma96u8",
+  "id": "thr_9xirgjgdis",
   "projectId": "proj_vny6bi5p8e",
   "environmentId": "env_a6zp3erus5",
   "providerId": "pi",
   "title": null,
-  "titleFallback": "GH-563 fixture capture. Reply exactly: FIXTURE. Then stop.",
+  "titleFallback": "GH-563 fixture capture (high). Reply with exactly: FIXTURE-HIGH. Then stop.",
   "sectionId": null,
   "status": "starting",
   "parentThreadId": null,
@@ -16,10 +16,10 @@
   "archivedAt": null,
   "pinnedAt": null,
   "deletedAt": null,
-  "lastReadAt": 1785996099823,
-  "latestAttentionAt": 1785996099821,
-  "createdAt": 1785996099821,
-  "updatedAt": 1785996099823,
+  "lastReadAt": 1785997910422,
+  "latestAttentionAt": 1785997910420,
+  "createdAt": 1785997910420,
+  "updatedAt": 1785997910422,
   "runtime": {
     "displayStatus": "starting",
     "hostReconnectGraceExpiresAt": null

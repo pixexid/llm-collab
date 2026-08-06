@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from llm_collab.codex_runtime_home import bind_runtime_home
 from llm_collab.session_lifecycle import (
     BB_SUPPORTED_OPERATIONS_JSON,
     DEFAULT_SUPPORTED_OPERATIONS_JSON,
@@ -12,7 +15,10 @@ from llm_collab.session_lifecycle import (
     CodexLifecycleProvider,
     LifecycleSubject,
     SessionLifecycleError,
+    TrustedProjectRoot,
 )
+
+PROJECT = "llm-collab"
 
 
 class DescriptorTest(unittest.TestCase):
@@ -27,6 +33,15 @@ class DescriptorTest(unittest.TestCase):
             BbLifecycleProvider().descriptor()["supported_operations_json"]
         )
         self.assertIn("start", operations)
+
+    def test_descriptor_advertises_nothing_beyond_start(self):
+        """Advertising an unproven operation is a claim the store may act on.
+
+        No caller in this slice or in TASK-A1B97C drives this provider through
+        `reserve` or `inspect`, so advertising them asserted a capability that
+        nothing exercises and nothing proves.
+        """
+        self.assertEqual(["start"], json.loads(BB_SUPPORTED_OPERATIONS_JSON))
 
     def test_descriptor_is_not_the_codex_attached_shape(self):
         """Codex is `["reserve","attach"]` — identity-only, cannot drive a start.
@@ -75,39 +90,95 @@ class DescriptorTest(unittest.TestCase):
         self.assertEqual("bb_managed_provider", authority.identity)
 
 
-class FailClosedTest(unittest.TestCase):
+class AttestTest(unittest.TestCase):
+    """AC6: each guard is proven with the OTHER input valid.
+
+    A combined-None case cannot distinguish which guard fired, so it would still
+    pass with the project-root guard deleted. Every case below varies exactly one
+    input away from a pair that is proven to attest successfully.
+    """
+
+    def setUp(self) -> None:
+        tmp = TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.runtime_home_dir = root / "runtime-home"
+        self.runtime_home_dir.mkdir()
+        self.repo = root / "repo"
+        self.repo.mkdir()
+        self.cwd = self.repo / "work"
+        self.cwd.mkdir()
+        self.runtime_home = bind_runtime_home(self.runtime_home_dir)
+        self.trusted_root = TrustedProjectRoot(
+            PROJECT, "repo_app", str(self.repo), str(self.cwd)
+        )
+
     def _subject(self) -> LifecycleSubject:
         return LifecycleSubject(
-            workspace_id="ws_1",
+            workspace_id="ws_alpha",
             scope_kind="project",
-            scope_identity="llm-collab",
+            scope_identity=PROJECT,
             conversation_id="CHAT-TEST",
             participant_id="claude",
             agent_id="claude",
-            endpoint_id="endpoint_1",
-            native_session_id="thr_test",
-            runtime_instance_id="runtime_1",
+            endpoint_id="endpoint_bb_one",
+            native_session_id="thr_ru3nj2r8ur",
+            runtime_instance_id="runtime_bb",
         )
 
+    def _attest(self, *, runtime_home, trusted_project_root):
+        return BbLifecycleProvider().attest(
+            self._subject(),
+            runtime_home=runtime_home,
+            observed_at_utc="2026-08-06T00:00:00+00:00",
+            correlation_id="corr_bb_one",
+            trusted_project_root=trusted_project_root,
+        )
+
+    def test_a_valid_pair_attests(self):
+        """The baseline. Without it the refusal cases below prove nothing."""
+        session_ref = self._attest(
+            runtime_home=self.runtime_home, trusted_project_root=self.trusted_root
+        )
+        self.assertEqual("thr_ru3nj2r8ur", session_ref["native_session_id"])
+
+    def test_missing_project_root_refuses_with_a_valid_runtime_home(self):
+        """A thread attested against no project root would bind to any repository."""
+        with self.assertRaises(SessionLifecycleError):
+            self._attest(runtime_home=self.runtime_home, trusted_project_root=None)
+
+    def test_wrong_project_root_refuses_with_a_valid_runtime_home(self):
+        """Refuse rather than widen: another project's root is not this subject's."""
+        other_root = TrustedProjectRoot(
+            "some-other-project", "repo_app", str(self.repo), str(self.cwd)
+        )
+        with self.assertRaises(SessionLifecycleError):
+            self._attest(runtime_home=self.runtime_home, trusted_project_root=other_root)
+
+    def test_missing_runtime_home_refuses_with_a_valid_project_root(self):
+        with self.assertRaises(Exception):
+            self._attest(
+                runtime_home=None,  # type: ignore[arg-type]
+                trusted_project_root=self.trusted_root,
+            )
+
+
+class FailClosedTest(unittest.TestCase):
     def test_open_ui_fails_closed(self):
         """bb owns thread presentation; open_ui is not an advertised operation."""
+        subject = LifecycleSubject(
+            workspace_id="ws_alpha",
+            scope_kind="project",
+            scope_identity=PROJECT,
+            conversation_id="CHAT-TEST",
+            participant_id="claude",
+            agent_id="claude",
+            endpoint_id="endpoint_bb_one",
+            native_session_id="thr_ru3nj2r8ur",
+            runtime_instance_id="runtime_bb",
+        )
         with self.assertRaises(SessionLifecycleError):
-            BbLifecycleProvider().open_ui(self._subject())
-
-    def test_attest_refuses_without_a_trusted_project_root(self):
-        """AC6: refuse rather than widen.
-
-        A thread attested against an absent or wrong project root would bind a
-        worker to someone else's repository.
-        """
-        with self.assertRaises(SessionLifecycleError):
-            BbLifecycleProvider().attest(
-                self._subject(),
-                runtime_home=None,  # type: ignore[arg-type]
-                observed_at_utc="2026-08-06T00:00:00+00:00",
-                correlation_id="corr_1",
-                trusted_project_root=None,
-            )
+            BbLifecycleProvider().open_ui(subject)
 
 
 if __name__ == "__main__":

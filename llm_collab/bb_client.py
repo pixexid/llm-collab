@@ -9,7 +9,8 @@ write. It exists to freeze the response and failure contract that Slice 1B
 (GH-564) calls, so the risky lane is reviewed against a settled contract instead
 of inventing one mid-flight.
 
-Two properties are load-bearing and both come from live observation, not docs:
+Four properties are load-bearing and all four come from live observation against
+the installed 0.35.1 CLI, not from docs:
 
 * ``thread spawn --json`` returns the thread object at the TOP LEVEL, while
   ``thread show --json`` nests it under a ``thread`` key. One validator reused for
@@ -17,10 +18,19 @@ Two properties are load-bearing and both come from live observation, not docs:
   read from a thread that was actually ``active``. The two envelopes therefore get
   two separate validators, and that separation is what the mutation proof
   targets.
+* The spawn envelope carries no model and no reasoning level, so argv alone
+  cannot prove which profile actually ran. The authoritative record is the
+  ``execution`` block on the thread's ``client/turn/requested`` event, and that is
+  what this client validates the requested profile against.
+* ``thread log --json`` caps at 100 events by default. A page returned without
+  its own bound is indistinguishable from a complete history, so replay returns an
+  explicitly bounded page that declares its own truncation.
 * bb has no idempotency concept at any layer (zero ``idempotenc`` occurrences in
   its shipped bundles, and two identical sends produced two ingresses in the
-  pilot). This client therefore never retries a task-bearing call: a duplicate
-  would be a second real turn, not a retry.
+  pilot). This client therefore never retries any native call: one attempt, one
+  deadline. A "retry" of a spawn or a tell would be a second real turn, and a
+  read that retries inside a deadline gives each attempt the full timeout, which
+  is not one deadline at all.
 """
 
 from __future__ import annotations
@@ -31,9 +41,23 @@ from typing import Any, Callable, Mapping, Sequence
 
 PINNED_BB_VERSION = "0.35.1"
 
+# Refuse rather than parse past this. A response this large is a contract break,
+# and truncating it would turn a resource limit into a correctness bug.
+MAX_RESPONSE_CHARS = 1_048_576
+
+# bb's own `thread log --limit` default. Passed EXPLICITLY so the page bound is
+# this module's, not an implicit default that can move under us.
+MAX_EVENT_PAGE = 100
+
+# The spawn turn request is event seq 1. A small window rather than 1 exactly, so
+# a future leading event does not silently break profile validation; if the block
+# is not in the window the client refuses instead of assuming.
+EXECUTION_PROBE_EVENTS = 3
+
 # Refusal reasons. Distinct values because callers act differently on each: a
 # version mismatch is an environment repair, a malformed response is a contract
-# break, a timeout on a task-bearing call is AMBIGUOUS rather than failed.
+# break, a timeout on a task-bearing call is AMBIGUOUS rather than failed, and an
+# orphan means a real thread exists that this client refused to hand back.
 REFUSAL_DISABLED = "bb_adapter_disabled"
 REFUSAL_VERSION_MISMATCH = "bb_version_mismatch"
 REFUSAL_MALFORMED_RESPONSE = "bb_malformed_response"
@@ -41,6 +65,8 @@ REFUSAL_TRANSPORT_FAILED = "bb_transport_failed"
 REFUSAL_TIMED_OUT = "bb_timed_out"
 REFUSAL_AMBIGUOUS = "bb_ambiguous_outcome"
 REFUSAL_PROFILE_MISMATCH = "bb_profile_mismatch"
+REFUSAL_IDENTITY_MISMATCH = "bb_identity_mismatch"
+REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 
 class BbTransportTimeout(Exception):
@@ -53,15 +79,23 @@ class BbRefusal:
 
     Returned rather than raised so a caller must handle it explicitly; an
     exception unwinding past a canonical write is how partial state happens.
+
+    ``native_thread_id`` is set only when a real bb thread was created and then
+    refused. That case is not retryable and not a clean failure: the id is the
+    evidence a caller needs to reconcile the orphan.
     """
 
     reason: str
     detail: str
+    native_thread_id: str | None = None
 
 
 @dataclass(frozen=True)
 class BbProfile:
-    """One exact (provider, model, effort) triple.
+    """One exact (provider, model, reasoning level) triple.
+
+    Named for bb's own ``--reasoning-level`` / ``reasoningLevel`` rather than a
+    local synonym, so the value and its native flag cannot drift apart.
 
     Slice 1A neither selects nor defaults one. The caller supplies it and this
     client validates the native result against it. Profile *selection* is Phase 2
@@ -70,14 +104,16 @@ class BbProfile:
 
     provider: str
     model: str
-    effort: str
+    reasoning_level: str
 
 
-# The single frozen triple for Slice 1A. It is the only triple this workspace has
-# live evidence for (the GH-562 pilot ran on it end to end), and `kimi-coding/k3`
-# advertises low/high/max with no `medium`, so `low` is a supported setting
-# rather than a guess at a value that does not exist.
-SLICE_1A_PROFILE = BbProfile(provider="pi", model="kimi-coding/k3", effort="low")
+# The single frozen triple for Slice 1A. `kimi-coding/k3` advertises low/high/max
+# with no `medium`, and a live spawn at `high` was read back from the execution
+# event as exactly `high` (fixture `thread_log_execution_high.json`), so the
+# equality this client enforces is observed rather than assumed.
+SLICE_1A_PROFILE = BbProfile(
+    provider="pi", model="kimi-coding/k3", reasoning_level="high"
+)
 
 
 @dataclass(frozen=True)
@@ -92,12 +128,43 @@ class BbThread:
 
 
 @dataclass(frozen=True)
+class BbExecution:
+    """The profile bb actually ran, read from its authoritative execution block."""
+
+    model: str
+    reasoning_level: str
+
+
+@dataclass(frozen=True)
+class BbQueued:
+    """A follow-up message bb accepted, bound to the thread it was addressed to."""
+
+    thread_id: str
+    mode: str
+
+
+@dataclass(frozen=True)
 class BbEvent:
     """One replayable bb thread event, keyed by its sequence number."""
 
     seq: int
     event_id: str
     event_type: str
+
+
+@dataclass(frozen=True)
+class BbEventPage:
+    """A bounded page of events that declares its own truncation.
+
+    A bare list cannot distinguish "this is the whole history" from "this is the
+    first 100 of it". ``truncated`` plus ``next_after_seq`` make the continuation
+    explicit, so a caller that ignores it stops early visibly rather than
+    silently believing it saw everything.
+    """
+
+    events: tuple[BbEvent, ...]
+    truncated: bool
+    next_after_seq: int | None
 
 
 @dataclass(frozen=True)
@@ -118,6 +185,13 @@ def _require_str(payload: Mapping[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _require_seq(value: Any) -> int | None:
+    """A sequence number is an integer. `True` is an int in Python; it is not a seq."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 class BbClient:
     """Validating client for bb 0.35.1.
 
@@ -132,14 +206,10 @@ class BbClient:
         *,
         enabled: bool = False,
         timeout_seconds: float = 30.0,
-        read_probe_attempts: int = 2,
     ) -> None:
         self._transport = transport
         self._enabled = enabled
         self._timeout_seconds = timeout_seconds
-        # Read-only probes may retry inside one deadline; task-bearing calls
-        # never do. Guard the value so a caller cannot turn a read into a storm.
-        self._read_probe_attempts = max(1, int(read_probe_attempts))
         self._verified_version: str | None = None
 
     # ---- version -------------------------------------------------------
@@ -250,10 +320,17 @@ class BbClient:
     ) -> BbThread | BbRefusal:
         """Create one bb thread with an explicitly supplied profile.
 
-        The profile is an argument, never a default or a selection. A timeout is
-        reported as AMBIGUOUS rather than failed, because bb may have created the
-        thread before the response was lost — and this client never retries a
-        spawn, since a retry would be a second real thread.
+        The profile is an argument, never a default or a selection. Success is
+        bound to the request AND to bb's own record: the returned thread must be
+        the one asked for, in the project asked for, running the profile asked
+        for. Because the spawn envelope carries neither model nor reasoning
+        level, the last of those is read back from the execution event.
+
+        A timeout is reported as AMBIGUOUS rather than failed, because bb may
+        have created the thread before the response was lost — and this client
+        never retries a spawn, since a retry would be a second real thread. Once
+        a thread exists, any later refusal is an ORPHAN carrying its native id,
+        never a clean failure a caller might retry.
         """
         refusal = self._gate()
         if refusal is not None:
@@ -267,8 +344,8 @@ class BbClient:
             profile.provider,
             "--model",
             profile.model,
-            "--effort",
-            profile.effort,
+            "--reasoning-level",
+            profile.reasoning_level,
             "--prompt",
             prompt,
             "--json",
@@ -279,17 +356,48 @@ class BbClient:
         thread = self.validate_spawn_envelope(payload)
         if isinstance(thread, BbRefusal):
             return thread
+
+        def orphan(reason: str, detail: str) -> BbRefusal:
+            return BbRefusal(reason, detail, native_thread_id=thread.thread_id)
+
+        if thread.project_id != project_id:
+            return orphan(
+                REFUSAL_IDENTITY_MISMATCH,
+                f"requested project {project_id!r}; bb reported {thread.project_id!r}",
+            )
         if thread.provider_id != profile.provider:
-            return BbRefusal(
+            return orphan(
                 REFUSAL_PROFILE_MISMATCH,
                 f"requested provider {profile.provider!r}; bb reported {thread.provider_id!r}",
+            )
+        execution = self._execution_evidence(thread.thread_id)
+        if isinstance(execution, BbRefusal):
+            return orphan(
+                execution.reason,
+                f"spawned thread could not be profile-verified: {execution.detail}",
+            )
+        if execution.model != profile.model:
+            return orphan(
+                REFUSAL_PROFILE_MISMATCH,
+                f"requested model {profile.model!r}; bb ran {execution.model!r}",
+            )
+        if execution.reasoning_level != profile.reasoning_level:
+            return orphan(
+                REFUSAL_PROFILE_MISMATCH,
+                f"requested reasoning level {profile.reasoning_level!r}; "
+                f"bb ran {execution.reasoning_level!r}",
             )
         return thread
 
     def send(
         self, *, thread_id: str, message: str, mode: str = "queue-if-active"
-    ) -> str | BbRefusal:
+    ) -> BbQueued | BbRefusal:
         """Deliver a follow-up message. Queues when the thread is active.
+
+        Returns a typed acceptance bound to the requested thread rather than raw
+        stdout: this module is the sole bb response validator, so handing a
+        caller unparsed text would move validation somewhere it is not allowed to
+        live.
 
         Slice 1A implements queue-if-active only. Urgent steering is GH-562 case
         4 and stays Phase 2, so there is no steer mode here to reach for by
@@ -303,11 +411,31 @@ class BbClient:
                 REFUSAL_PROFILE_MISMATCH,
                 f"mode {mode!r} is not implemented in Slice 1A; only queue-if-active",
             )
-        argv = ["thread", "tell", thread_id, message, "--mode", "queue"]
-        result = self._task_call(argv)
-        if isinstance(result, BbRefusal):
-            return result
-        return result.stdout.strip()
+        payload = self._task_json(
+            ["thread", "tell", thread_id, message, "--mode", "queue", "--json"]
+        )
+        if isinstance(payload, BbRefusal):
+            return payload
+        if not isinstance(payload, Mapping):
+            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "tell envelope is not an object")
+        if payload.get("ok") is not True:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"tell envelope did not report ok=true: {payload.get('ok')!r}",
+            )
+        reported_thread = _require_str(payload, "threadId")
+        if reported_thread != thread_id:
+            return BbRefusal(
+                REFUSAL_IDENTITY_MISMATCH,
+                f"told thread {thread_id!r}; bb reported {reported_thread!r}",
+            )
+        reported_mode = _require_str(payload, "mode")
+        if reported_mode != "queue":
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"requested queue mode; bb reported {reported_mode!r}",
+            )
+        return BbQueued(thread_id=thread_id, mode=reported_mode)
 
     def thread_state(self, thread_id: str) -> BbThread | BbRefusal:
         refusal = self._gate()
@@ -316,10 +444,20 @@ class BbClient:
         payload = self._read_json(["thread", "show", thread_id, "--json"])
         if isinstance(payload, BbRefusal):
             return payload
-        return self.validate_show_envelope(payload)
+        thread = self.validate_show_envelope(payload)
+        if isinstance(thread, BbRefusal):
+            return thread
+        if thread.thread_id != thread_id:
+            return BbRefusal(
+                REFUSAL_IDENTITY_MISMATCH,
+                f"asked for thread {thread_id!r}; bb reported {thread.thread_id!r}",
+            )
+        return thread
 
-    def events_after(self, thread_id: str, after_seq: int) -> list[BbEvent] | BbRefusal:
-        """Replay events strictly after a sequence number.
+    def events_after(
+        self, thread_id: str, after_seq: int, *, limit: int = MAX_EVENT_PAGE
+    ) -> BbEventPage | BbRefusal:
+        """Replay one bounded page of events strictly after a sequence number.
 
         Sequence-based replay is the durable path; a `thread:changed` websocket
         signal may only trigger a fetch and is never itself evidence.
@@ -327,27 +465,33 @@ class BbClient:
         refusal = self._gate()
         if refusal is not None:
             return refusal
-        payload = self._read_json(
-            ["thread", "log", thread_id, "--json", "--after-seq", str(after_seq)]
-        )
-        if isinstance(payload, BbRefusal):
-            return payload
-        if not isinstance(payload, list):
-            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event envelope is not a list")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, f"limit {limit!r} is not an integer")
+        if not 1 <= limit <= MAX_EVENT_PAGE:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"limit {limit} is outside 1..{MAX_EVENT_PAGE}",
+            )
+        entries = self._log_entries(thread_id, after_seq=after_seq, limit=limit)
+        if isinstance(entries, BbRefusal):
+            return entries
         events: list[BbEvent] = []
-        for entry in payload:
-            if not isinstance(entry, Mapping):
-                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event entry is not an object")
-            seq = entry.get("seq")
+        for entry in entries:
             event_id = _require_str(entry, "id")
             event_type = _require_str(entry, "type")
-            if not isinstance(seq, int) or event_id is None or event_type is None:
-                return BbRefusal(
-                    REFUSAL_MALFORMED_RESPONSE,
-                    "event entry missing seq/id/type",
+            if event_id is None or event_type is None:
+                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event entry missing id/type")
+            events.append(
+                BbEvent(
+                    seq=int(entry["seq"]), event_id=event_id, event_type=event_type
                 )
-            events.append(BbEvent(seq=seq, event_id=event_id, event_type=event_type))
-        return events
+            )
+        truncated = len(events) == limit
+        return BbEventPage(
+            events=tuple(events),
+            truncated=truncated,
+            next_after_seq=events[-1].seq if truncated else None,
+        )
 
     def queued_messages(self, thread_id: str) -> int | BbRefusal:
         """Count durably queued messages, for drain observation.
@@ -365,22 +509,104 @@ class BbClient:
             return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "queue envelope is not a list")
         return len(payload)
 
+    # ---- native evidence -----------------------------------------------
+
+    def _execution_evidence(self, thread_id: str) -> BbExecution | BbRefusal:
+        """Read the profile bb actually ran from its `client/turn/requested` event.
+
+        argv proves what was asked for, not what happened; the spawn envelope
+        carries neither model nor reasoning level. This block is the only native
+        record of both.
+        """
+        entries = self._log_entries(
+            thread_id, after_seq=None, limit=EXECUTION_PROBE_EVENTS
+        )
+        if isinstance(entries, BbRefusal):
+            return entries
+        for entry in entries:
+            data = entry.get("data")
+            if not isinstance(data, Mapping):
+                continue
+            execution = data.get("execution")
+            if not isinstance(execution, Mapping):
+                continue
+            model = _require_str(execution, "model")
+            reasoning_level = _require_str(execution, "reasoningLevel")
+            if model is None or reasoning_level is None:
+                return BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE,
+                    "execution block missing model/reasoningLevel",
+                )
+            return BbExecution(model=model, reasoning_level=reasoning_level)
+        return BbRefusal(
+            REFUSAL_MALFORMED_RESPONSE,
+            f"no execution block in the first {EXECUTION_PROBE_EVENTS} events",
+        )
+
+    def _log_entries(
+        self, thread_id: str, *, after_seq: int | None, limit: int
+    ) -> list[Mapping[str, Any]] | BbRefusal:
+        """Read a bounded, identity-checked, strictly ordered slice of the log.
+
+        The native limit is always passed. Every entry must belong to the thread
+        that was asked for, and sequence numbers must advance: an entry from
+        another thread, or a page that restarts at 1 for `after_seq=40`, is a
+        contract break rather than data to interpret.
+        """
+        argv = ["thread", "log", thread_id, "--json", "--limit", str(limit)]
+        if after_seq is not None:
+            if isinstance(after_seq, bool) or not isinstance(after_seq, int):
+                return BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE, f"after_seq {after_seq!r} is not an integer"
+                )
+            argv += ["--after-seq", str(after_seq)]
+        payload = self._read_json(argv)
+        if isinstance(payload, BbRefusal):
+            return payload
+        if not isinstance(payload, list):
+            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event envelope is not a list")
+        if len(payload) > limit:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"bb returned {len(payload)} events for a limit of {limit}",
+            )
+        entries: list[Mapping[str, Any]] = []
+        previous = after_seq
+        for entry in payload:
+            if not isinstance(entry, Mapping):
+                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event entry is not an object")
+            reported_thread = _require_str(entry, "threadId")
+            if reported_thread != thread_id:
+                return BbRefusal(
+                    REFUSAL_IDENTITY_MISMATCH,
+                    f"asked for thread {thread_id!r}; event belongs to {reported_thread!r}",
+                )
+            seq = _require_seq(entry.get("seq"))
+            if seq is None:
+                return BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE, f"event seq {entry.get('seq')!r} is not an integer"
+                )
+            if previous is not None and seq <= previous:
+                return BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE,
+                    f"event seq {seq} does not advance past {previous}",
+                )
+            previous = seq
+            entries.append(entry)
+        return entries
+
     # ---- transport -----------------------------------------------------
 
     def _read_json(self, argv: Sequence[str]) -> Any | BbRefusal:
-        """Read-only probe. May retry within one deadline."""
-        last: BbRefusal | None = None
-        for _ in range(self._read_probe_attempts):
-            result = self._call(argv)
-            if isinstance(result, BbRefusal):
-                # A timeout on a read is safe to retry; a malformed response is
-                # not going to become well-formed.
-                if result.reason != REFUSAL_TIMED_OUT:
-                    return result
-                last = result
-                continue
-            return self._decode(result)
-        return last or BbRefusal(REFUSAL_TIMED_OUT, "read probe exhausted its attempts")
+        """Read-only probe: exactly one attempt against one deadline.
+
+        A retry loop here would hand each attempt the full timeout, so the
+        caller's deadline would silently become a multiple of itself.
+        """
+        result = self._call(argv)
+        if isinstance(result, BbRefusal):
+            return result
+        return self._decode(result)
 
     def _task_call(self, argv: Sequence[str]) -> BbTransportResult | BbRefusal:
         """Task-bearing call. NEVER retried."""
@@ -406,6 +632,15 @@ class BbClient:
             result = self._transport(argv, self._timeout_seconds)
         except BbTransportTimeout as exc:
             return BbRefusal(REFUSAL_TIMED_OUT, str(exc) or " ".join(argv))
+        # Bound both streams BEFORE either is parsed or interpolated into a
+        # detail string. Refuse rather than truncate: a truncated response that
+        # still claims to be a response is worse than no response.
+        for name, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
+            if len(stream) > MAX_RESPONSE_CHARS:
+                return BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE,
+                    f"{name} is {len(stream)} chars, over the {MAX_RESPONSE_CHARS} bound",
+                )
         if result.exit_code != 0:
             return BbRefusal(
                 REFUSAL_TRANSPORT_FAILED,
@@ -419,3 +654,9 @@ class BbClient:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             return BbRefusal(REFUSAL_MALFORMED_RESPONSE, f"response is not JSON: {exc}")
+        except RecursionError:
+            # Deeply nested JSON exhausts the decoder's stack. Unconverted, this
+            # escapes the refusal contract entirely as a bare interpreter error.
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE, "response nesting exceeded the decoder limit"
+            )
