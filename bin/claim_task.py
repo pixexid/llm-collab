@@ -433,21 +433,58 @@ def main():
             )
             sys.exit(1)
 
+    # GH-527: a coordination lane is a tracker and is never activated.
+    #
+    # The authority is the TASK MIRROR, not the cached projection. The cache is
+    # precisely what can go stale — a mirror reclassified as coordination while
+    # `issue-queue.json` still says ordinary is the drift `validate_queue` now
+    # reports, and `claim_task` never calls `validate_queue`. Guarding on the
+    # cached lane alone would leave that exact path open.
+    #
+    # Deliberately outside the queue block below: that block is gated on
+    # `queue_exists()` and on finding a cached lane, so a project with no
+    # projection, or a task with no lane in it, would otherwise be unguarded.
+    if args.status == "in_progress":
+        mirror_lane_type = str(fm.get("lane_type") or "").strip().lower()
+        if mirror_lane_type == issue_queue.COORDINATION_LANE_TYPE:
+            print(
+                json.dumps(
+                    {
+                        "error": "coordination lanes are trackers and are never activated",
+                        "authority": "task_mirror",
+                        "task_id": fm.get("task_id", args.task),
+                        "target_status": args.status,
+                        "project_id": project_id,
+                        "lane_type": fm.get("lane_type"),
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     if project_id and args.status == "in_progress" and issue_queue.queue_exists(project_id):
         payload = issue_queue.load_queue(project_id)
         lane = issue_queue.find_lane(payload, fm.get("task_id", args.task))
         if lane is not None:
             lane_state = lane.get("queue_state")
-            # A coordination lane is a tracker and is never activated (GH-527).
-            # Checked BEFORE the state allowlist and before --allow-queue-override:
-            # the allowlist admits `active`/`review`, which a coordination lane may
-            # legitimately hold, and the override is designed to bypass ordering —
-            # neither should be able to hand non-work to an owner.
+            # Second source, opposite drift direction: the cached lane says
+            # coordination while the mirror does not. The mirror check above is
+            # the authority, so this only fires on cache-only classification —
+            # still a refusal, because either source claiming "tracker" while the
+            # other disagrees is drift, and drift on an activation decision fails
+            # closed rather than picking a winner.
+            #
+            # Both run BEFORE the state allowlist and --allow-queue-override: the
+            # allowlist admits `active`/`review`, which a coordination lane may
+            # legitimately hold, and the override exists to bypass ordering — not
+            # to hand non-work to an owner.
             if issue_queue.is_coordination_lane(lane):
                 print(
                     json.dumps(
                         {
                             "error": "coordination lanes are trackers and are never activated",
+                            "authority": "cached_queue_lane",
                             "task_id": fm.get("task_id", args.task),
                             "target_status": args.status,
                             "project_id": project_id,
