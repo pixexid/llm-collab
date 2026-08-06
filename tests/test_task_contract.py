@@ -316,6 +316,109 @@ class TaskContractProjectDesignDocsTest(unittest.TestCase):
         self.assertTrue(any("direct_app_only: true" in error for error in errors))
 
 
+class TaskContractInvalidDbImpactTest(unittest.TestCase):
+    """GH-567: an invalid explicit db_impact must be rejected, not silently re-detected.
+
+    `detect_db_contract` accepts a value only when it is already a member of
+    DB_IMPACT_VALUES, so an invalid one falls through to automatic classification
+    and sync overwrites it. The observed harm was a diagnostic naming the wrong
+    authority: a task about llm-collab's local SQLite ledger was auto-classified
+    `shared-supabase-required` and then asked for Supabase project/surface fields.
+    """
+
+    def test_invalid_explicit_db_impact_is_rejected_by_name(self) -> None:
+        # #given — the exact value observed while refining #564
+        frontmatter = {
+            "project_id": "llm-collab",
+            "db_impact": "additive_schema",
+        }
+
+        # #when
+        errors, _summary = task_contract.validate_db_contract(
+            frontmatter,
+            "Wire the bb managed-runtime adapter against the local sqlite ledger schema.",
+            stage="review",
+        )
+
+        # #then — the invalid member is named, and the valid set is offered
+        self.assertTrue(
+            any("additive_schema" in error for error in errors),
+            f"expected the invalid value to be named; got {errors}",
+        )
+        self.assertTrue(
+            any("local-schema-only" in error for error in errors),
+            f"expected the valid values to be offered; got {errors}",
+        )
+
+    def test_invalid_explicit_db_impact_does_not_demand_supabase_fields(self) -> None:
+        """The wrong-authority diagnostic is the defect, not merely a missing error."""
+        # #given — body markers that would auto-classify as shared-supabase-required
+        frontmatter = {
+            "project_id": "llm-collab",
+            "db_impact": "additive_schema",
+        }
+
+        # #when
+        errors, _summary = task_contract.validate_db_contract(
+            frontmatter,
+            "Apply a shared supabase migration to the database schema.",
+            stage="review",
+        )
+
+        # #then — the ONLY error is the invalid value; no Supabase demand rides
+        # along on a classification we know is bogus. Filtering the invalid-value
+        # error out first matters: it legitimately lists the valid members, so a
+        # bare substring search for "supabase" would match our own message.
+        collateral = [error for error in errors if "is not a valid value" not in error]
+        self.assertEqual(
+            [],
+            collateral,
+            f"invalid db_impact must not produce further diagnostics; got {collateral}",
+        )
+
+    def test_valid_explicit_db_impact_still_passes_through(self) -> None:
+        """The guard must reject only non-members — every real value still works."""
+        for value in sorted(task_contract.DB_IMPACT_VALUES):
+            with self.subTest(db_impact=value):
+                # #given
+                frontmatter = {"project_id": "llm-collab", "db_impact": value}
+
+                # #when
+                errors, summary = task_contract.validate_db_contract(
+                    frontmatter, "Local ledger work.", stage="review"
+                )
+
+                # #then
+                self.assertFalse(
+                    any("is not a valid value" in error for error in errors),
+                    f"{value} is a member and must not be rejected; got {errors}",
+                )
+                self.assertEqual(value, summary["db_impact"])
+
+    def test_absent_db_impact_still_auto_classifies(self) -> None:
+        """Missing is not invalid: the guard must not fire on an absent value.
+
+        Asserting only `detection == "auto"` would NOT discriminate — the summary
+        is built before the guard's early return, so it reads "auto" either way.
+        The absence of the rejection error is the assertion that fails if the
+        guard's emptiness check is dropped.
+        """
+        # #given
+        frontmatter = {"project_id": "llm-collab"}
+
+        # #when
+        errors, summary = task_contract.validate_db_contract(
+            frontmatter, "No database markers here.", stage="review"
+        )
+
+        # #then
+        self.assertFalse(
+            any("is not a valid value" in error for error in errors),
+            f"an absent db_impact must not be rejected as invalid; got {errors}",
+        )
+        self.assertEqual("auto", summary["db_impact_detection"])
+
+
 class TaskContractProjectDbConfigTest(unittest.TestCase):
     def test_amiga_db_contract_keeps_legacy_defaults(self) -> None:
         # #given

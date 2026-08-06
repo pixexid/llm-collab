@@ -1166,6 +1166,14 @@ def validate_db_contract(
 ) -> tuple[list[str], dict]:
     errors: list[str] = []
     project = _exact_task_project(frontmatter, project_override)
+    # Read the ORIGINAL explicit value before sync. `detect_db_contract` accepts a
+    # value only when it is already a member, so an invalid one falls through to
+    # automatic classification and sync overwrites it — by the time `fm` exists the
+    # malformed value is gone and the task is misclassified. Reporting that as a
+    # missing Supabase field points at the wrong authority; the actual defect is a
+    # closed-enum member that does not exist.
+    raw_impact = _normalize_text(frontmatter.get("db_impact"))
+    invalid_explicit_impact = bool(raw_impact) and raw_impact not in DB_IMPACT_VALUES
     fm, _ = sync_db_contract(
         frontmatter,
         body,
@@ -1192,6 +1200,18 @@ def validate_db_contract(
         "enabled": production_guard_enabled,
         "concrete_schema_paths": concrete_schema_paths,
     }
+
+    if invalid_explicit_impact:
+        # Report the real defect and stop. Every check below reasons about the
+        # AUTO-classified impact, which was derived only because this value was
+        # silently discarded — so continuing would emit diagnostics naming an
+        # authority the task never claimed.
+        errors.append(
+            f"db_impact {raw_impact!r} is not a valid value; expected one of: "
+            + ", ".join(sorted(DB_IMPACT_VALUES))
+            + "."
+        )
+        return errors, summary
 
     historical_done = (
         stage == "done"
