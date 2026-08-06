@@ -185,7 +185,9 @@ class BbTransportResult:
 # oversized response but cannot prevent one from being read into memory. A
 # transport that reads a real subprocess must stop at MAX_RESPONSE_CHARS + 1 and
 # raise rather than accumulate. No such transport ships in Slice 1A — every
-# caller here injects one — and the production reader is tracked separately.
+# caller here injects one. GH-570 is a BLOCKING obligation on whichever slice
+# first introduces a production transport: implement the read bound in that same
+# slice before merge rather than opening a competing lane for it.
 BbTransport = Callable[[Sequence[str], float], BbTransportResult]
 
 
@@ -369,6 +371,17 @@ class BbClient:
         spawned_id = _require_str(payload, "id") if isinstance(payload, Mapping) else None
 
         def orphan(reason: str, detail: str) -> BbRefusal:
+            # Routing every post-execution failure through here is not enough on
+            # its own: with no recoverable id this once returned the typed reason
+            # with native_thread_id=None, which is a CLEAN refusal for a thread
+            # bb may already have created. An id makes the refusal an orphan a
+            # caller can reconcile; without one there is nothing to reconcile
+            # against and the only honest answer is that we cannot tell.
+            if spawned_id is None:
+                return BbRefusal(
+                    REFUSAL_AMBIGUOUS,
+                    f"{detail}; no native id was recoverable, so the thread may exist",
+                )
             return BbRefusal(reason, detail, native_thread_id=spawned_id)
 
         thread = self.validate_spawn_envelope(payload)
@@ -648,6 +661,17 @@ class BbClient:
                 REFUSAL_AMBIGUOUS,
                 f"{' '.join(argv)} timed out; the operation may have been performed",
             )
+        if isinstance(result, BbRefusal) and result.reason == REFUSAL_MALFORMED_RESPONSE:
+            # The only malformed refusal _call() raises is its size bound, and it
+            # is checked before the exit code — so an exit-0 oversized response
+            # reached here having ALREADY performed the operation. Left clean it
+            # bypasses both the decode conversion and spawn()'s orphan seam, which
+            # is how an oversized spawn response could invite a duplicate spawn.
+            # Read paths never come through here and stay malformed.
+            return BbRefusal(
+                REFUSAL_AMBIGUOUS,
+                f"{result.detail}; the operation may have been performed",
+            )
         return result
 
     def _task_json(self, argv: Sequence[str]) -> Any | BbRefusal:
@@ -678,10 +702,20 @@ class BbClient:
         # still claims to be a response is worse than no response.
         for name, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
             if len(stream) > MAX_RESPONSE_CHARS:
-                return BbRefusal(
-                    REFUSAL_MALFORMED_RESPONSE,
-                    f"{name} is {len(stream)} chars, over the {MAX_RESPONSE_CHARS} bound",
-                )
+                detail = f"{name} is {len(stream)} chars, over the {MAX_RESPONSE_CHARS} bound"
+                if result.exit_code != 0:
+                    # The bound is checked before the exit code so an oversized
+                    # stream never reaches a detail string — but the exit code is
+                    # still known. This preserves the pre-existing transport-failure
+                    # classification for a nonzero exit; it does not claim the call
+                    # had no side effect, which stays unestablished pending GH-570.
+                    # Without it the size bound would silently broaden that
+                    # classification into ambiguous via _task_call(). The detail
+                    # stays bounded; only the reason changes.
+                    return BbRefusal(
+                        REFUSAL_TRANSPORT_FAILED, f"exit {result.exit_code}: {detail}"
+                    )
+                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, detail)
         if result.exit_code != 0:
             return BbRefusal(
                 REFUSAL_TRANSPORT_FAILED,

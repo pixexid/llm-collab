@@ -290,6 +290,27 @@ class ProfileTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
 
+    def test_an_object_envelope_without_an_id_is_ambiguous(self):
+        """Routing through orphan() is not enough — orphan() must also refuse cleanly.
+
+        With no recoverable id there is nothing to reconcile against, and bb may
+        still have created the thread, so the only honest surface is ambiguous.
+        """
+        client, _ = spawning_client(
+            **{"thread spawn": BbTransportResult(0, '{"projectId": "p"}', "")}
+        )
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+        self.assertIsNone(outcome.native_thread_id)
+
+    def test_a_non_object_envelope_is_ambiguous(self):
+        """Valid JSON of the wrong shape still followed an exit-0 spawn."""
+        client, _ = spawning_client(**{"thread spawn": BbTransportResult(0, "[]", "")})
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
     def test_a_malformed_envelope_still_reports_the_created_thread(self):
         """bb created the thread before this envelope existed.
 
@@ -417,13 +438,39 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIn("over the", outcome.detail)
 
     def test_oversized_stderr_is_bounded_before_it_reaches_a_detail_string(self):
+        """The invariant here is the bounded detail; a nonzero exit is a transport failure.
+
+        The size bound is checked before the exit code so the stream never reaches
+        a detail string — but the exit code is known either way, and reporting a
+        reported failure as malformed would let the task seam convert it.
+        """
         client, _ = enabled_client(
             {"thread show": BbTransportResult(1, "", "e" * (MAX_RESPONSE_CHARS + 1))}
         )
         outcome = client.thread_state(SHOWN_THREAD)
         self.assertIsInstance(outcome, BbRefusal)
-        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+        self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
         self.assertLess(len(outcome.detail), 200)
+
+    def test_an_oversized_nonzero_task_response_stays_a_transport_failure(self):
+        """The size bound must not broaden the transport-failure classification.
+
+        A nonzero exit keeps the classification it already had; that is not a
+        claim it had no side effect, which stays unestablished pending GH-570.
+        Without this, an ordinary spawn rejection carrying a large diagnostic
+        would silently become retry-suppressing.
+        """
+        oversized = "x" * (MAX_RESPONSE_CHARS + 1)
+        for stream, response in (
+            ("stdout", BbTransportResult(1, oversized, "")),
+            ("stderr", BbTransportResult(1, "", oversized)),
+        ):
+            with self.subTest(stream=stream):
+                client, _ = spawning_client(**{"thread spawn": response})
+                outcome = spawn(client)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
+                self.assertLess(len(outcome.detail), 200)
 
     def test_deeply_nested_json_becomes_a_typed_refusal(self):
         """Unconverted, this escapes the refusal contract as a bare RecursionError."""
@@ -443,6 +490,32 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertLess(sys.get_int_max_str_digits(), MAX_RESPONSE_CHARS)
         client, _ = enabled_client(
             {"thread show": BbTransportResult(0, "1" * 5000, "")}
+        )
+        outcome = client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+
+    def test_an_oversized_task_response_is_ambiguous_on_either_stream(self):
+        """The size bound is checked before the exit code, so exit-0 reaches it.
+
+        Left clean this bypasses both the decode conversion and spawn()'s orphan
+        seam, so an oversized spawn response could invite a duplicate spawn.
+        """
+        oversized = "x" * (MAX_RESPONSE_CHARS + 1)
+        for stream, response in (
+            ("stdout", BbTransportResult(0, oversized, "")),
+            ("stderr", BbTransportResult(0, "{}", oversized)),
+        ):
+            with self.subTest(stream=stream):
+                client, _ = spawning_client(**{"thread spawn": response})
+                outcome = spawn(client)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_an_oversized_read_response_stays_malformed(self):
+        """A read performed nothing, so its size bound is not ambiguous."""
+        client, _ = enabled_client(
+            {"thread show": BbTransportResult(0, "x" * (MAX_RESPONSE_CHARS + 1), "")}
         )
         outcome = client.thread_state(SHOWN_THREAD)
         self.assertIsInstance(outcome, BbRefusal)

@@ -401,10 +401,10 @@ Which repositories are enrolled and what the rule audit found:
 ## Code Review Rules
 
 Path-scoped review rules for Codex Code Review. Only rules matching the changed
-files fire, and findings cite the rule that produced them. This is a seed set of
-three: each encodes a class that was already adjudicated in this repository and
-then rediscovered at review cycle 2-3, where it forced an amendment or a
-retracted CLEAN. Related GH-185.
+files fire, and findings cite the rule that produced them. There are four: each
+encodes a class that was already adjudicated in this repository and then
+rediscovered at review cycle 2-3, where it forced an amendment or a retracted
+CLEAN. Related GH-185.
 
 Keep the set small. Add a rule only after the class has cost a real cycle, and
 remove one that turns noisy.
@@ -468,3 +468,36 @@ not results that declare their own bound.
 
 Any bounded primitive that proves the same outcome is acceptable; this rule does
 not prescribe one algorithm.
+
+### Post-execution failures must suppress retry
+
+Scope: `llm_collab/`
+
+Once a non-idempotent task-bearing call **reports success**, or its outcome is
+already ambiguous (a timeout, where the response was lost but the operation may
+have run), the operation may have happened. Every downstream failure past that
+boundary — decode, shape, identity, profile — must be retry-suppressing: a typed
+orphan carrying the native identity when one is recoverable, otherwise ambiguous.
+A clean refusal there is indistinguishable from "nothing happened", so a caller
+that suppresses retries only on the ambiguous reason duplicates a real operation:
+a second thread, a second enqueue.
+
+Clean refusals are legitimate before that success-or-ambiguity boundary —
+arguments, gates, an unsupported mode rejected before the call — and on read-only
+paths, which performed nothing.
+
+Native nonzero exits are outside this rule until evidence establishes their
+side-effect contract.
+
+Safe path: route every post-execution failure through one seam per call site, and
+make that seam — not just its call sites — produce the retry-suppressing surface.
+Routing alone is not compliance: a seam that returns a typed reason with a null
+identity is still a clean refusal.
+
+Tests must prove **both** sides: that an identity-carrying failure keeps its typed
+reason and identity, and that an identity-less failure is ambiguous. A test for
+only one side cannot tell the fix from its over-application.
+
+This rule exists because the class cost four review cycles in one lane — envelope
+validation, decode, `send()` semantic checks, then `spawn()` with no recoverable
+id — each fixed as an instance while the invariant stayed unwritten.
