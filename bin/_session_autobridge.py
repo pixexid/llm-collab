@@ -39,6 +39,7 @@ from _helpers import (
     STATE_ROOT,
     agent_inbox_path,
     build_handoff_prompt,
+    build_packet_ring_prompt,
     config_get,
     get_agent,
     now_utc,
@@ -2355,6 +2356,16 @@ def build_resume_prompt(session: dict, message: dict) -> str:
     return "\n".join(lines)
 
 
+def build_app_server_ring_prompt(session: dict, message: dict) -> str:
+    fm = message["frontmatter"]
+    return build_packet_ring_prompt(
+        str(fm.get("from", fm.get("sender_agent_id", ""))),
+        str(session["agent_id"]),
+        str(fm.get("chat_id", "")),
+        Path(str(message.get("path", ""))).name,
+    )
+
+
 def derived_runtime_command(session: dict, message: dict) -> list[str] | None:
     runtime = runtime_metadata(session)
     runtime_family = runtime.get("family")
@@ -3132,7 +3143,11 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
         return None
 
     timeout_seconds = int(runtime.get("timeout_seconds", 180))
-    prompt = build_resume_prompt(session, message)
+    prompt = (
+        build_resume_prompt(session, message)
+        if message.get("activation_lease")
+        else build_app_server_ring_prompt(session, message)
+    )
     runtime_session_id = str(runtime["session_id"])
     token = _codex_app_server_token(endpoint.get("token_file"))
     notifications: list[str] = []
