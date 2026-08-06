@@ -514,6 +514,15 @@ def main():
     wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused
 
     body = read_body(args.body_file)
+    slug = slugify(args.title, max_len=40)
+    timestamp = ts()
+    if not body:
+        candidate = chat_dir / f"{timestamp}_to-{args.recipient}_{slug}.md"
+        print(
+            f"[error] refusing empty message body; packet not written: {candidate}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     recipient_agent = get_agent(args.recipient)
     recipient_type = recipient_agent.get("activation", {}).get("type")
     should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
@@ -527,8 +536,6 @@ def main():
         )
         body = f"{onboarding}\n\n---\n\n## Work packet\n\n{body or '(no body)'}"
 
-    slug = slugify(args.title, max_len=40)
-    timestamp = ts()
     activation_paths: tuple[Path, Path] | None = None
     if args.activation:
         # ts() has second precision: two same-title activations in one second
