@@ -6,6 +6,7 @@ that decides whether a lost response becomes a second real thread.
 
 from __future__ import annotations
 
+import sys
 import unittest
 
 from llm_collab.bb_client import (
@@ -204,6 +205,72 @@ class DigestTest(unittest.TestCase):
             bb_start_evidence_digest(self._evidence()), bb_start_evidence_digest(other)
         )
 
+
+
+class DefaultOffEndToEndTest(unittest.TestCase):
+    """V7/AC8: disabled means no process is spawned, proven against a real transport.
+
+    The Slice 1A default-off test asserts an empty call log on a fake transport.
+    That proves the client made no call; it does not prove no bb process would
+    have been created, because a fake cannot create one. Here the transport is
+    the production `subprocess_transport`, pointed at a command that writes a
+    sentinel file. If disablement ever stops short of the process boundary, the
+    sentinel appears and this fails.
+    """
+
+    def test_a_disabled_client_creates_no_process(self):
+        import tempfile
+        from pathlib import Path
+
+        from llm_collab.bb_client import BbClient, subprocess_transport
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sentinel = Path(tmp) / "spawned"
+            transport = subprocess_transport(
+                [
+                    sys.executable,
+                    "-c",
+                    f"open({str(sentinel)!r}, 'w').write('x')",
+                ]
+            )
+            client = BbClient(transport)  # enabled defaults to False
+
+            outcomes = [
+                client.verify_version(),
+                client.spawn(project_id=PROJECT, prompt="p", profile=SLICE_1A_PROFILE),
+                client.thread_state("thr_x"),
+                client.send(thread_id="thr_x", message="m"),
+            ]
+
+            for outcome in outcomes:
+                self.assertIsInstance(outcome, BbRefusal)
+            self.assertFalse(
+                sentinel.exists(),
+                "a disabled client reached the process boundary and spawned bb",
+            )
+
+    def test_an_enabled_client_does_reach_the_process(self):
+        """The control. Without it, the test above passes on a broken transport."""
+        import tempfile
+        from pathlib import Path
+
+        from llm_collab.bb_client import BbClient, subprocess_transport
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sentinel = Path(tmp) / "spawned"
+            transport = subprocess_transport(
+                [
+                    sys.executable,
+                    "-c",
+                    f"open({str(sentinel)!r}, 'w').write('x'); print('{{}}')",
+                ]
+            )
+            client = BbClient(transport, enabled=True)
+            client.verify_version()
+            self.assertTrue(
+                sentinel.exists(),
+                "the enabled control never reached the process, so the proof above is vacuous",
+            )
 
 if __name__ == "__main__":
     unittest.main()
