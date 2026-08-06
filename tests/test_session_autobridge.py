@@ -8668,6 +8668,9 @@ class SessionAutobridgeTest(unittest.TestCase):
             old_path = self._session_json(root, "SESSION-OLD")
             old = json.loads(old_path.read_text())
             old["processed_messages"] = ["Chats/pi/already-dispatched.md"]
+            old["canonical_settled_messages"] = {
+                "Chats/pi/already-dispatched.md": {"reason": "accepted"}
+            }
             write_json(old_path, old)
             done = self._register_pi(
                 root, session="SESSION-NEW", project=project, chat=chat,
@@ -8691,6 +8694,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertEqual("SESSION-NEW", old.get("superseded_by"))
             self.assertEqual(
                 ["Chats/pi/already-dispatched.md"], new.get("processed_messages")
+            )
+            self.assertEqual(
+                {"Chats/pi/already-dispatched.md": {"reason": "accepted"}},
+                new.get("canonical_settled_messages"),
+            )
+            self.assertTrue(
+                session_autobridge_lib.processed_message_blocks_dispatch(
+                    new,
+                    {"path": "Chats/pi/already-dispatched.md", "frontmatter": {}},
+                    session_autobridge_lib.processed_messages(new),
+                )
             )
 
     def test_pi_native_session_replacement_refusals_preserve_predecessor(self):
@@ -10053,7 +10067,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         predecessor_path = "Chats/supersession/already-dispatched.md"
         successor_path = "Chats/supersession/already-seen-by-successor.md"
         shared_path = "Chats/supersession/seen-by-both.md"
-        for project, chat in (("amiga", "CHAT-SUP-A"), ("nuvyr", "CHAT-SUP-N")):
+        for project, chat, predecessor_status in (
+            ("amiga", "CHAT-SUP-A", "active"),
+            ("nuvyr", "CHAT-SUP-N", "stopped"),
+        ):
             with self.subTest(project=project):
                 root = self.make_workspace()
                 self.add_agent(
@@ -10080,13 +10097,22 @@ class SessionAutobridgeTest(unittest.TestCase):
                 )
                 old = json.loads((sessions / "SESSION-OLD.json").read_text())
                 self.assertIn(old["status"], {"active", "parked"})
+                old["status"] = predecessor_status
                 old["processed_messages"] = [predecessor_path, shared_path]
+                old["canonical_settled_messages"] = {
+                    predecessor_path: {"reason": "accepted"},
+                    shared_path: {"reason": "predecessor"},
+                }
                 write_json(sessions / "SESSION-OLD.json", old)
                 write_json(
                     sessions / "SESSION-NEW.json",
                     {
                         "session_id": "SESSION-NEW",
                         "processed_messages": [successor_path, shared_path],
+                        "canonical_settled_messages": {
+                            successor_path: {"reason": "accepted"},
+                            shared_path: {"reason": "successor"},
+                        },
                     },
                 )
 
@@ -10104,17 +10130,65 @@ class SessionAutobridgeTest(unittest.TestCase):
                     successor["processed_messages"],
                 )
                 self.assertEqual(3, len(successor["processed_messages"]))
+                self.assertEqual(
+                    {
+                        predecessor_path: {"reason": "accepted"},
+                        successor_path: {"reason": "accepted"},
+                        shared_path: {"reason": "successor"},
+                    },
+                    successor["canonical_settled_messages"],
+                )
                 self.assertTrue(
                     session_autobridge_lib.processed_message_blocks_dispatch(
                         successor,
-                        {"path": predecessor_path, "frontmatter": {}},
+                        {
+                            "path": predecessor_path,
+                            "frontmatter": {"target_binding_id": "binding-old"},
+                        },
                         session_autobridge_lib.processed_messages(successor),
                     )
                 )
                 retired = json.loads((sessions / "SESSION-OLD.json").read_text())
-                self.assertEqual("superseded", retired["status"])
-                self.assertEqual("SESSION-NEW", retired["superseded_by"])
+                expected_status = "superseded" if predecessor_status == "active" else "stopped"
+                self.assertEqual(expected_status, retired["status"])
+                if predecessor_status == "active":
+                    self.assertEqual("SESSION-NEW", retired["superseded_by"])
                 self.assertIn(successor["status"], {"active", "parked"})
+
+    def test_registration_refuses_an_unreadable_superseded_ledger(self):
+        args = SimpleNamespace(
+            session="SESSION-NEW", agent="claude", project="amiga", chat="CHAT-X",
+            mode="notify", status="active", wake_strategy="none", allowed_actions=[],
+            lease_owner=None, ttl_seconds=3600, runtime_family="claude_app",
+            runtime_session_id="THREAD-NEW", runtime_session_source="first_read",
+            runtime_home=None, supersedes_session="SESSION-BROKEN", runtime_command=None,
+            runtime_timeout=None, repo_targets=None,
+        )
+        with patch.object(
+            session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_cli,
+            "load_session",
+            side_effect=[
+                FileNotFoundError("successor absent"),
+                session_autobridge_lib.UnreadableFile("broken predecessor"),
+            ],
+        ), patch.object(
+            session_autobridge_cli, "refuse_native_session_active_elsewhere"
+        ), patch.object(
+            session_autobridge_cli, "prepare_session_write"
+        ) as prepare, patch.object(
+            session_autobridge_cli, "existing_binding_snapshot_or_refuse", return_value={}
+        ), patch.object(
+            session_autobridge_cli, "update_binding_from_session", return_value=None
+        ), patch.object(
+            session_autobridge_cli, "save_session"
+        ) as save:
+            with self.assertRaisesRegex(ValueError, "refusing to supersede unreadable session"):
+                session_autobridge_cli.register_session(args)
+
+        prepare.assert_not_called()
+        save.assert_not_called()
 
     def test_a_refused_continuation_does_not_retire_the_predecessor(self):
         """GH-373 finding 2: every refusal preflight runs BEFORE the retire, so a
@@ -10138,10 +10212,18 @@ class SessionAutobridgeTest(unittest.TestCase):
                           return_value=({"session_id": "SESSION-NEW"}, "{}")), \
              patch.object(session_autobridge_cli, "existing_binding_snapshot_or_refuse",
                           side_effect=RuntimeError("binding unreadable")), \
-             patch.object(session_autobridge_cli, "retire_superseded_session") as retire:
+             patch.object(
+                 session_autobridge_cli,
+                 "plan_superseded_retirement",
+                 return_value=(
+                     {"session_id": "SESSION-OLD", "status": "superseded"},
+                     ({"session_id": "SESSION-OLD", "status": "superseded"}, "{}"),
+                 ),
+             ), \
+             patch.object(session_autobridge_cli, "commit_superseded_retirement") as commit:
             with self.assertRaises(RuntimeError):
                 session_autobridge_cli.register_session(args)
-        retire.assert_not_called()
+        commit.assert_not_called()
 
     def test_register_persists_explicit_repo_subscription(self):
         root = self.make_workspace()
