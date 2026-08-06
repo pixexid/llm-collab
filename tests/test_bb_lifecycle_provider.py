@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 import unittest
 
-from llm_collab.bb_lifecycle_provider import (
-    BB_SUPPORTED_OPERATIONS_JSON,
-    BbLifecycleProvider,
-)
 from llm_collab.session_lifecycle import (
+    BB_SUPPORTED_OPERATIONS_JSON,
     DEFAULT_SUPPORTED_OPERATIONS_JSON,
+    BbLifecycleProvider,
     CodexLifecycleProvider,
     LifecycleSubject,
     SessionLifecycleError,
