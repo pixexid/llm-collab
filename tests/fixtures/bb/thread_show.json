@@ -1,0 +1,54 @@
+{
+  "thread": {
+    "id": "thr_ru3nj2r8ur",
+    "projectId": "proj_vny6bi5p8e",
+    "environmentId": "env_a6zp3erus5",
+    "providerId": "pi",
+    "title": "PILOT-B test worker",
+    "titleFallback": "You are PILOT-B, a disposable test worker for the llm-collab bb adapter pilot...",
+    "sectionId": null,
+    "status": "idle",
+    "parentThreadId": null,
+    "sourceThreadId": null,
+    "originKind": null,
+    "childOrigin": null,
+    "originPluginId": null,
+    "visibility": "hidden",
+    "archivedAt": null,
+    "pinnedAt": null,
+    "deletedAt": null,
+    "lastReadAt": 1785992360650,
+    "latestAttentionAt": 1785992360557,
+    "createdAt": 1785992009148,
+    "updatedAt": 1785992429727,
+    "runtime": {
+      "displayStatus": "idle",
+      "hostReconnectGraceExpiresAt": null
+    },
+    "canSpawnChild": true
+  },
+  "environment": {
+    "id": "env_a6zp3erus5",
+    "name": null,
+    "projectId": "proj_vny6bi5p8e",
+    "hostId": "host_xmbnwrzjmn",
+    "path": "/Users/pixexid/Projects/llm-collab",
+    "managed": false,
+    "isGitRepo": true,
+    "isWorktree": false,
+    "workspaceProvisionType": "unmanaged",
+    "branchName": "main",
+    "baseBranch": null,
+    "defaultBranch": "main",
+    "mergeBaseBranch": null,
+    "status": "ready",
+    "createdAt": 1785981938826,
+    "updatedAt": 1785995413262,
+    "pullRequest": {
+      "status": "unavailable",
+      "pullRequest": null,
+      "message": "GitHub CLI is not available"
+    }
+  },
+  "pendingTodos": null
+}

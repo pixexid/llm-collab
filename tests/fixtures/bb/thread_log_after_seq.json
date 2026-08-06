@@ -1,0 +1,74 @@
+[
+  {
+    "id": "evt_j5yb8inj9a",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_ru3nj2r8ur",
+    "seq": 1,
+    "createdAt": 1785992009150,
+    "type": "client/turn/requested",
+    "data": {
+      "direction": "outbound",
+      "requestId": "creq_bkr25vtbxn",
+      "source": "spawn",
+      "initiator": "user",
+      "senderThreadId": null,
+      "systemMessageKind": "unlabeled",
+      "systemMessageSubject": null,
+      "input": [
+        {
+          "type": "text",
+          "text": "You are PILOT-B, a disposable test worker for the llm-collab bb adapter pilot (GH-562). Do not modify any files. Reply with exactly: PILOT-B ready. Then stop and wait for further messages.",
+          "mentions": []
+        }
+      ],
+      "target": {
+        "kind": "thread-start"
+      },
+      "request": {
+        "method": "thread/start",
+        "params": {}
+      },
+      "execution": {
+        "model": "kimi-coding/k3",
+        "serviceTier": "default",
+        "reasoningLevel": "medium",
+        "permissionMode": "full",
+        "source": "client/turn/requested"
+      }
+    }
+  },
+  {
+    "id": "evt_viirdc2iws",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_ru3nj2r8ur",
+    "seq": 2,
+    "createdAt": 1785992009152,
+    "type": "client/thread/start",
+    "data": {
+      "direction": "outbound",
+      "source": "spawn",
+      "initiator": "user",
+      "request": {
+        "method": "thread/start",
+        "params": {}
+      }
+    }
+  },
+  {
+    "id": "evt_mtma3qtbs6",
+    "scope": {
+      "kind": "thread"
+    },
+    "threadId": "thr_ru3nj2r8ur",
+    "seq": 3,
+    "createdAt": 1785992009253,
+    "type": "thread/identity",
+    "data": {
+      "providerThreadId": "thr_ru3nj2r8ur"
+    }
+  }
+]
