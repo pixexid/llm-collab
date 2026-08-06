@@ -567,12 +567,41 @@ class SendTest(unittest.TestCase):
         self.assertEqual("queue", argv[argv.index("--mode") + 1])
 
     def test_send_refuses_a_response_for_another_thread(self):
+        """Ambiguous, not a clean identity failure: bb already exited 0."""
         client, _ = enabled_client(
             {"thread tell": BbTransportResult(0, fixture("thread_tell_queued.json"), "")}
         )
         outcome = client.send(thread_id="thr_someone_else", message="m")
         self.assertIsInstance(outcome, BbRefusal)
-        self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_send_refuses_a_malformed_mode_as_ambiguous(self):
+        payload = json.loads(fixture("thread_tell_queued.json"))
+        payload["mode"] = "steer"
+        client, _ = enabled_client(
+            {"thread tell": BbTransportResult(0, json.dumps(payload), "")}
+        )
+        outcome = client.send(thread_id=SPAWNED_THREAD, message="m")
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_send_refuses_a_non_object_envelope_as_ambiguous(self):
+        client, _ = enabled_client({"thread tell": BbTransportResult(0, "[]", "")})
+        outcome = client.send(thread_id=SPAWNED_THREAD, message="m")
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
+    def test_send_rejects_an_unsupported_mode_before_calling_bb(self):
+        """The pre-execution boundary: nothing ran, so this stays a clean refusal.
+
+        Without this the ambiguous rule above would swallow the whole method and
+        a caller could never distinguish 'we did not try' from 'we cannot tell'.
+        """
+        client, transport = enabled_client({})
+        outcome = client.send(thread_id=SPAWNED_THREAD, message="m", mode="steer")
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertNotEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+        self.assertEqual(0, transport.count("thread", "tell"))
 
     def test_send_refuses_unvalidated_text(self):
         """BbClient is the sole response validator; raw stdout is not a result.
@@ -595,7 +624,7 @@ class SendTest(unittest.TestCase):
         )
         outcome = client.send(thread_id=SPAWNED_THREAD, message="m")
         self.assertIsInstance(outcome, BbRefusal)
-        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
 
     def test_send_refuses_steering(self):
         """Steering is GH-562 case 4 and stays Phase 2."""
