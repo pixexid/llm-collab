@@ -290,6 +290,27 @@ class ProfileTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
 
+    def test_an_object_envelope_without_an_id_is_ambiguous(self):
+        """Routing through orphan() is not enough — orphan() must also refuse cleanly.
+
+        With no recoverable id there is nothing to reconcile against, and bb may
+        still have created the thread, so the only honest surface is ambiguous.
+        """
+        client, _ = spawning_client(
+            **{"thread spawn": BbTransportResult(0, '{"projectId": "p"}', "")}
+        )
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+        self.assertIsNone(outcome.native_thread_id)
+
+    def test_a_non_object_envelope_is_ambiguous(self):
+        """Valid JSON of the wrong shape still followed an exit-0 spawn."""
+        client, _ = spawning_client(**{"thread spawn": BbTransportResult(0, "[]", "")})
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+
     def test_a_malformed_envelope_still_reports_the_created_thread(self):
         """bb created the thread before this envelope existed.
 

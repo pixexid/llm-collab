@@ -185,7 +185,9 @@ class BbTransportResult:
 # oversized response but cannot prevent one from being read into memory. A
 # transport that reads a real subprocess must stop at MAX_RESPONSE_CHARS + 1 and
 # raise rather than accumulate. No such transport ships in Slice 1A — every
-# caller here injects one — and the production reader is tracked separately.
+# caller here injects one. GH-570 is a BLOCKING obligation on whichever slice
+# first introduces a production transport: implement the read bound in that same
+# slice before merge rather than opening a competing lane for it.
 BbTransport = Callable[[Sequence[str], float], BbTransportResult]
 
 
@@ -369,6 +371,17 @@ class BbClient:
         spawned_id = _require_str(payload, "id") if isinstance(payload, Mapping) else None
 
         def orphan(reason: str, detail: str) -> BbRefusal:
+            # Routing every post-execution failure through here is not enough on
+            # its own: with no recoverable id this once returned the typed reason
+            # with native_thread_id=None, which is a CLEAN refusal for a thread
+            # bb may already have created. An id makes the refusal an orphan a
+            # caller can reconcile; without one there is nothing to reconcile
+            # against and the only honest answer is that we cannot tell.
+            if spawned_id is None:
+                return BbRefusal(
+                    REFUSAL_AMBIGUOUS,
+                    f"{detail}; no native id was recoverable, so the thread may exist",
+                )
             return BbRefusal(reason, detail, native_thread_id=spawned_id)
 
         thread = self.validate_spawn_envelope(payload)
