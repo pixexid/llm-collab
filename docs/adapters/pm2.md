@@ -312,6 +312,11 @@ and every packet falls back to the AX doorbell.
 The sidecar shares the desktop app's `CODEX_HOME`, so it reaches the same
 threads and the visible app keeps running.
 
+The `turn/start` input is deliberately only the short packet ring used by AX,
+for example `[from claude] Read latest codex packet in CHAT-...: packet.md`.
+The packet body and bootstrap instructions stay in the durable mailbox; the App
+Server still creates a normal visible turn because it has no passive ring API.
+
 ### Enabling it
 
 The token file's presence is the enable switch — there is no config flag:

@@ -35,7 +35,15 @@ SESSION = {
     "agent_id": "codex",
     "runtime": {"family": "codex_app", "session_id": "codex-thread-1", "timeout_seconds": 5},
 }
-MESSAGE = {"path": "/chat/to-codex.md", "frontmatter": {"title": "t", "from": "claude"}}
+MESSAGE = {
+    "path": "/chat/to-codex.md",
+    "frontmatter": {
+        "title": "t",
+        "from": "claude",
+        "sender_agent_id": "claude",
+        "chat_id": "CHAT-REPLY",
+    },
+}
 
 
 class FakeClient:
@@ -47,6 +55,7 @@ class FakeClient:
         self._recv = list(recv_script)
         self._turn_start_ok = turn_start_ok
         self.turn_start_calls = 0
+        self.turn_start_payload = None
         self.deadline_set = None
 
     def __enter__(self):
@@ -61,6 +70,7 @@ class FakeClient:
     def request(self, method, params=None):
         if method == "turn/start":
             self.turn_start_calls += 1
+            self.turn_start_payload = params
             if not self._turn_start_ok:
                 raise ConnectionError("turn/start not accepted")
             return {"turn": {"id": "turn-1", "status": "inProgress"}}
@@ -85,7 +95,6 @@ def _run(recv_script, *, turn_start_ok=True):
     endpoint = {"url": "ws://127.0.0.1:1/", "token_file": None, "pid": 1, "source": "test"}
     with patch.object(sab, "discover_codex_app_server", return_value=endpoint), \
          patch.object(sab, "_codex_app_server_token", return_value=None), \
-         patch.object(sab, "build_resume_prompt", return_value="prompt"), \
          patch.object(sab, "JsonRpcWebSocketClient", return_value=client):
         result = sab.execute_codex_app_server_trigger(SESSION, MESSAGE, None)
     return result, client
@@ -100,6 +109,16 @@ def _completed(text="done", turn_id="turn-1"):
 
 
 class PostAcceptanceIsDeliveredTest(unittest.TestCase):
+    def test_app_server_turn_uses_short_packet_ring(self):
+        _, client = _run([_completed()])
+        self.assertEqual(
+            client.turn_start_payload["input"],
+            [{
+                "type": "text",
+                "text": "[from claude] Read latest codex packet in CHAT-REPLY: to-codex.md",
+            }],
+        )
+
     def test_completed_turn_is_observed_and_delivered(self):
         result, client = _run([_completed("hi")])
         self.assertEqual(result["returncode"], 0)

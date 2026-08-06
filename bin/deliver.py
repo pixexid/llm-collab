@@ -47,6 +47,7 @@ from _helpers import (
     add_to_inbox,
     agent_ids,
     build_handoff_prompt,
+    build_packet_ring_prompt,
     ensure_project,
     has_collab_awareness,
     set_collab_awareness,
@@ -645,8 +646,8 @@ def main():
         if args.activation:
             ax_doorbell_prompt = activation_ring_prompt
         else:
-            ax_doorbell_prompt = (
-                f"[from {args.sender}] Read latest {args.recipient} packet in {chat_id}: {to_path.name}"
+            ax_doorbell_prompt = build_packet_ring_prompt(
+                args.sender, args.recipient, chat_id, to_path.name
             )
     ax_attended_recovery_required = (
         args.recipient != "operator"

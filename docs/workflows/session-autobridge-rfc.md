@@ -116,6 +116,10 @@ For Codex app sessions, the preferred dispatch path is the Codex App Server:
 - This path is preferred over `codex exec resume` because it emits the normal
   `turn/started`, `item/...`, and `turn/completed` notification stream that an
   already-open Codex renderer can observe.
+- Its `turn/start` input is only the short packet ring used by AX; the durable
+  mailbox remains the source of truth for the packet body and bootstrap
+  instructions. App Server has no passive ring-only operation, so the ring
+  still appears as one normal visible turn.
 
 After a successful app-runtime dispatch, the spike may still attempt a visible UI
 refresh as a fallback:

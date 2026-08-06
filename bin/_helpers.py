@@ -1125,6 +1125,12 @@ def collab_bootstrap_command(agent_id: str) -> str:
     return f"{RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {agent_id}"
 
 
+def build_packet_ring_prompt(
+    sender_id: str, recipient_id: str, chat_id: str, packet_name: str
+) -> str:
+    return f"[from {sender_id}] Read latest {recipient_id} packet in {chat_id}: {packet_name}"
+
+
 def build_handoff_prompt(
     agent: dict,
     *,
