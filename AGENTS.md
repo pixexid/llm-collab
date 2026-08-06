@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 11 -->
+<!-- CONTRACT_VERSION: 12 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -234,9 +234,23 @@ for draining the inbox before you open a PR or merge.
 **Write the durable packet and let dispatch wake the recipient.** For every
 watcher/monitor-backed recipient — Claude, the Pi workers, and Codex once it is
 bound — a matching session-autobridge target takes precedence and suppresses the
-doorbell. Check the `deliver.py` result: `autobridge_ready: true` with
-`ax_doorbell_required: false` means the recipient has it and nothing further is
-owed.
+doorbell.
+
+**`autobridge_ready: true` is send-time routability, not delivery.** It means a
+dispatchable binding existed when the packet was written. Nothing in the
+`deliver.py` result observes the recipient's watcher, so a post-send watcher or
+transport failure is invisible to the sender: **delivery is unconfirmed until a
+dispatch or acceptance receipt exists** for that packet. Never read
+`autobridge_ready: true` with `ax_doorbell_required: false` as "the recipient has
+it". Where no receipt exists, the AX fallback stays available and is the correct
+action, not a downgrade.
+
+This is not hypothetical. On 2026-08-05 every packet to Codex reported
+`autobridge_ready: true` / `ax_doorbell_required: false` while its watcher failed
+on **every poll for roughly twenty hours** — a deleted-packet pointer made
+`bounded_unread_messages` raise before message selection, and the deployed
+sidecar token was absent so no external WS endpoint existed at all. The sender
+saw success throughout. Two independent faults, zero sender-visible signal.
 
 AX is the **fallback**, not the routine path, and it is still Codex-only: no
 other worker is ever an AX ring target, and it is only ever the exact command

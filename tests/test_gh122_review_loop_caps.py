@@ -1362,8 +1362,26 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 11 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 12 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
+
+        # GH-556: pinning the marker alone let the marker and the body disagree.
+        # A v12 block was added while the marker still read 11, the suite stayed
+        # green at 2483, and startup/drift reported v11 against a v12 contract.
+        # Derive the expected marker from the body instead of pinning both
+        # independently, so the next version bump cannot repeat it.
+        newest_in_body = max(
+            int(match) for match in re.findall(r"^Contract v(\d+) \(", text, re.M)
+        )
+        marker = re.search(r"<!-- CONTRACT_VERSION: (\d+) -->", text)
+        self.assertIsNotNone(marker, "AGENTS.md must carry a CONTRACT_VERSION marker")
+        self.assertEqual(
+            newest_in_body,
+            int(marker.group(1)),
+            "CONTRACT_VERSION marker must equal the newest `Contract vN` block in "
+            "the body; a mismatch makes startup and drift checks report a stale "
+            "contract version",
+        )
 
         recent_entry = contract_section(
             text, "### Recent contract changes", "## Required Reading"
