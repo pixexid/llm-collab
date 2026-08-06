@@ -1,0 +1,8 @@
+{
+  "currentVersion": "0.35.1",
+  "latestVersion": "0.35.1",
+  "source": "npm",
+  "updateAvailable": false,
+  "isDevelopment": false,
+  "upgradeCommand": "npx bb-app@latest"
+}

@@ -548,6 +548,88 @@ class CodexLifecycleProvider(FakeLifecycleProvider):
         )
 
 
+# Exactly the operation the managed-start store path requires. `reserve` and
+# `inspect` were advertised without a caller that needs them: nothing in
+# TASK-A1B97C or the managed-start saga drives this provider through either, and
+# advertising an operation this provider does not implement is a claim the store
+# would be entitled to act on.
+BB_SUPPORTED_OPERATIONS_JSON = '["start"]'
+
+
+@dataclass(frozen=True)
+class BbLifecycleProvider:
+    """Managed-start identity attester for a bb-hosted native session.
+
+    Identity values are frozen. The real proof is ``build_session_ref``'s
+    repository and runtime-home checks, fed by the bb thread id that the spawn
+    returned — never by an id this provider derives or guesses.
+    """
+
+    provider_id: str = "provider_bb"
+    provider_revision: str = "revision_1"
+    authority_identity: str = "bb_managed_provider"
+    capability_profile_id: str = "native_session_binding"
+    capability_profile_revision: str = "revision_1"
+    trust_class: str = "managed"
+    supported_operations_json: str = BB_SUPPORTED_OPERATIONS_JSON
+    challenge_algorithm: str = "sha256"
+    challenge_ttl_seconds: int = 60
+
+    def authority(self) -> SessionAuthority:
+        return SessionAuthority(
+            authority_kind="native_runtime",
+            identity=self.authority_identity,
+            implementation_revision=self.provider_revision,
+            capability_profile_id=self.capability_profile_id,
+            capability_profile_revision=self.capability_profile_revision,
+        )
+
+    def descriptor(self) -> Mapping[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "provider_revision": self.provider_revision,
+            "trust_class": self.trust_class,
+            "supported_operations_json": self.supported_operations_json,
+            "challenge_algorithm": self.challenge_algorithm,
+            "challenge_ttl_seconds": self.challenge_ttl_seconds,
+        }
+
+    def attest(
+        self,
+        subject: LifecycleSubject,
+        *,
+        runtime_home: RuntimeHomeIdentity,
+        observed_at_utc: str,
+        correlation_id: str,
+        trusted_project_root: TrustedProjectRoot | None = None,
+    ) -> Mapping[str, object]:
+        # _repository_binding raises when the project root is absent or does not
+        # match the subject scope. Refusing is the point: a bb thread attested
+        # against the wrong project root would bind a worker to someone else's
+        # repository.
+        repository = _repository_binding(subject, trusted_project_root)
+        return build_session_ref(
+            workspace_id=subject.workspace_id,
+            scope=subject.scope(),
+            endpoint_id=subject.endpoint_id,
+            native_session_id=subject.native_session_id,
+            runtime_home=runtime_home,
+            authority=self.authority(),
+            observed_at_utc=observed_at_utc,
+            correlation_id=correlation_id,
+            repository_binding=repository,
+        )
+
+    def open_ui(self, subject: LifecycleSubject) -> dict[str, object]:
+        # bb owns its own UI. Presenting a thread is bb's concern, not a
+        # lifecycle operation llm-collab performs, and `open_ui` is absent from
+        # this provider's advertised operations. Fail closed rather than inherit
+        # FakeLifecycleProvider's success-returning stub.
+        raise SessionLifecycleError(
+            "BbLifecycleProvider does not implement open_ui; bb owns thread presentation"
+        )
+
+
 @dataclass(frozen=True, kw_only=True)
 class ClaudeLifecycleProvider(FakeLifecycleProvider):
     """Identity-only Claude attester over injected hook/channel evidence.
