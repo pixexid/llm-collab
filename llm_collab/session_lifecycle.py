@@ -548,10 +548,6 @@ class CodexLifecycleProvider(FakeLifecycleProvider):
         )
 
 
-# Exactly what the bb managed-start flow uses, and nothing more. `start` is
-# mandatory (the store enforces it); `reserve` and `inspect` are the other two
-# operations Slice 1B calls. Anything else would be advertising a capability
-# this provider does not implement.
 # Exactly the operation the managed-start store path requires. `reserve` and
 # `inspect` were advertised without a caller that needs them: nothing in
 # TASK-A1B97C or the managed-start saga drives this provider through either, and

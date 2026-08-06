@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from llm_collab.codex_runtime_home import bind_runtime_home
+from llm_collab.codex_session_ref import SessionRefError
 from llm_collab.session_lifecycle import (
     BB_SUPPORTED_OPERATIONS_JSON,
     DEFAULT_SUPPORTED_OPERATIONS_JSON,
@@ -156,7 +157,13 @@ class AttestTest(unittest.TestCase):
             self._attest(runtime_home=self.runtime_home, trusted_project_root=other_root)
 
     def test_missing_runtime_home_refuses_with_a_valid_project_root(self):
-        with self.assertRaises(Exception):
+        """The exact typed refusal, not any exception.
+
+        `assertRaises(Exception)` passed on an incidental AttributeError, so it
+        held with the typed guard deleted — it proved that something went wrong,
+        not that this guard fired.
+        """
+        with self.assertRaises(SessionRefError):
             self._attest(
                 runtime_home=None,  # type: ignore[arg-type]
                 trusted_project_root=self.trusted_root,

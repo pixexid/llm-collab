@@ -89,6 +89,27 @@ def execution_ok() -> BbTransportResult:
     return BbTransportResult(0, fixture("thread_log_execution_high.json"), "")
 
 
+def execution_events(**mutations) -> BbTransportResult:
+    """The recorded execution log with the spawn-authority event field replaced.
+
+    Mutating the archived event rather than hand-writing one keeps the rest of
+    the record real, so the test isolates exactly the selector under proof.
+    """
+    events = json.loads(fixture("thread_log_execution_high.json"))
+    for key, value in mutations.items():
+        if key == "type":
+            events[0]["type"] = value
+        else:
+            events[0]["data"][key] = value
+    return BbTransportResult(0, json.dumps(events), "")
+
+
+def spawn_envelope_without(field: str) -> BbTransportResult:
+    envelope = json.loads(fixture("thread_spawn.json"))
+    del envelope[field]
+    return BbTransportResult(0, json.dumps(envelope), "")
+
+
 def enabled_client(responses=None, **kwargs) -> tuple[BbClient, RecordingTransport]:
     merged = {"settings version": version_ok()}
     merged.update(responses or {})
@@ -247,6 +268,38 @@ class ProfileTest(unittest.TestCase):
         execution = events[0]["data"]["execution"]
         self.assertEqual("kimi-coding/k3", execution["model"])
         self.assertEqual("high", execution["reasoningLevel"])
+
+    def test_execution_evidence_from_another_event_type_is_refused(self):
+        """The profile record must come from the spawn's own turn event.
+
+        The archived spawn also emits `client/thread/start` carrying `source:
+        "spawn"`, so source alone does not identify the authority.
+        """
+        client, _ = spawning_client(
+            **{"thread log": execution_events(type="client/thread/start")}
+        )
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
+
+    def test_execution_evidence_from_a_non_spawn_source_is_refused(self):
+        """A later `client/turn/requested` from a tell carries the same type."""
+        client, _ = spawning_client(**{"thread log": execution_events(source="tell")})
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
+
+    def test_a_malformed_envelope_still_reports_the_created_thread(self):
+        """bb created the thread before this envelope existed.
+
+        Dropping the id here would report a real thread as a clean failure and
+        invite a retry that creates a second one.
+        """
+        client, _ = spawning_client(**{"thread spawn": spawn_envelope_without("status")})
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
+        self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
 
     def test_native_provider_disagreement_is_refused_as_an_orphan(self):
         """The native result is validated against the request, not trusted."""

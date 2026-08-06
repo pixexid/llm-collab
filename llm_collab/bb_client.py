@@ -53,6 +53,8 @@ MAX_EVENT_PAGE = 100
 # a future leading event does not silently break profile validation; if the block
 # is not in the window the client refuses instead of assuming.
 EXECUTION_PROBE_EVENTS = 3
+SPAWN_EVENT_TYPE = "client/turn/requested"
+SPAWN_EVENT_SOURCE = "spawn"
 
 # Refusal reasons. Distinct values because callers act differently on each: a
 # version mismatch is an environment repair, a malformed response is a contract
@@ -353,12 +355,18 @@ class BbClient:
         payload = self._task_json(argv)
         if isinstance(payload, BbRefusal):
             return payload
-        thread = self.validate_spawn_envelope(payload)
-        if isinstance(thread, BbRefusal):
-            return thread
+        # Read the native id BEFORE full validation. bb has already created the
+        # thread by the time this envelope exists, so a refusal on any other
+        # field must still carry the id — otherwise a real thread is reported as
+        # a clean failure and the caller is invited to retry into a second one.
+        spawned_id = _require_str(payload, "id") if isinstance(payload, Mapping) else None
 
         def orphan(reason: str, detail: str) -> BbRefusal:
-            return BbRefusal(reason, detail, native_thread_id=thread.thread_id)
+            return BbRefusal(reason, detail, native_thread_id=spawned_id)
+
+        thread = self.validate_spawn_envelope(payload)
+        if isinstance(thread, BbRefusal):
+            return orphan(thread.reason, thread.detail)
 
         if thread.project_id != project_id:
             return orphan(
@@ -517,6 +525,12 @@ class BbClient:
         argv proves what was asked for, not what happened; the spawn envelope
         carries neither model nor reasoning level. This block is the only native
         record of both.
+
+        Both selectors are load-bearing and neither discriminates alone: the
+        recorded spawn also emits `client/thread/start` carrying `source:
+        "spawn"`, and a later `client/turn/requested` from a `tell` carries the
+        same type. Accepting any event with an execution block would let
+        unrelated later metadata stand in for the spawn's own profile record.
         """
         entries = self._log_entries(
             thread_id, after_seq=None, limit=EXECUTION_PROBE_EVENTS
@@ -524,8 +538,12 @@ class BbClient:
         if isinstance(entries, BbRefusal):
             return entries
         for entry in entries:
+            if entry.get("type") != SPAWN_EVENT_TYPE:
+                continue
             data = entry.get("data")
             if not isinstance(data, Mapping):
+                continue
+            if data.get("source") != SPAWN_EVENT_SOURCE:
                 continue
             execution = data.get("execution")
             if not isinstance(execution, Mapping):
