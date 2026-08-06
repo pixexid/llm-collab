@@ -354,6 +354,19 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
                 f"lane {order} tier mismatch for {task_id}: queue {tier!r} vs task {frontmatter_tier!r}"
             )
 
+        # lane_type decides whether a lane may be selected at all, so a cached
+        # projection that disagrees with the mirror is a scheduling fault, not a
+        # cosmetic drift: a mirror reclassified as coordination while the cache
+        # still says null makes every exclusion here read the tracker as ordinary
+        # work and hand it to a worker. Compared like every other authoritative
+        # field rather than trusted from the cache.
+        frontmatter_lane_type = frontmatter.get("lane_type")
+        if frontmatter_lane_type != lane.get("lane_type"):
+            errors.append(
+                f"lane {order} lane_type mismatch for {task_id}: "
+                f"queue {lane.get('lane_type')!r} vs task {frontmatter_lane_type!r}"
+            )
+
         task_depends = normalize_depends(frontmatter.get("depends_on"))
         if task_depends != depends_on:
             errors.append(
@@ -415,10 +428,18 @@ def lane_reason(lane: dict) -> str:
         return "needs_refinement"
     if lane.get("needs_acceptance"):
         return "needs_acceptance"
+    if is_coordination_lane(lane):
+        return f"{COORDINATION_LANE_TYPE}:{lane.get('queue_state', 'unknown')}"
     return str(lane.get("queue_state", "unknown"))
 
 
 def lane_next_action(lane: dict) -> str:
+    # A coordination lane is a tracker: it is never selected and never activated,
+    # so it must not advertise an executable next action. Checked before every
+    # other branch — `activate` on a lane that can never be activated is exactly
+    # the "skipped implementation lane" misreading GH-527 AC4 forbids.
+    if is_coordination_lane(lane):
+        return COORDINATION_LANE_TYPE
     if lane.get("needs_refinement"):
         return "refine"
     if lane.get("needs_acceptance"):
@@ -428,11 +449,29 @@ def lane_next_action(lane: dict) -> str:
     return lane_reason(lane)
 
 
+COORDINATION_LANE_TYPE = "coordination"
+
+
+def is_coordination_lane(lane: dict) -> bool:
+    """A coordination-only tracker: visible in the projection, never selected as
+    the ready lane, and never suppressing other lanes.
+
+    GH-527: `lane_type` was already carried onto every lane record and read back
+    nowhere, so the queue could express this and never acted on it. GH-85 was the
+    live consequence — activating it stopped every worker, leaving it open blocked
+    everything behind it.
+    """
+    return str(lane.get("lane_type") or "").strip().lower() == COORDINATION_LANE_TYPE
+
+
 def no_ready_lane_errors(project_id: str, payload: dict) -> tuple[list[str], list[str]]:
     lanes = [lane for lane in payload.get("lanes", []) if isinstance(lane, dict)]
     if next_ready_lane(payload) is not None:
         return [], []
-    if any(lane.get("queue_state") in {"active", "review"} for lane in lanes):
+    if any(
+        lane.get("queue_state") in {"active", "review"} and not is_coordination_lane(lane)
+        for lane in lanes
+    ):
         return [], []
     if not lanes:
         return [], []
@@ -655,7 +694,14 @@ def render_markdown(payload: dict) -> str:
     source_issue_label = f"`GH-{source_issue}`" if isinstance(source_issue, int) else "none"
     source_task_label = f"`{source_task}`" if source_task else "none"
 
-    ready_lane = next((lane for lane in lanes if lane.get("queue_state") == "ready"), None)
+    ready_lane = next(
+        (
+            lane
+            for lane in lanes
+            if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
+        ),
+        None,
+    )
     lines = [
         f"# {project_name} Ordered Issue Queue",
         "",
@@ -710,9 +756,15 @@ def render_markdown(payload: dict) -> str:
         depends_on = ", ".join(lane.get("depends_on", [])) or "-"
         tier = lane["tier"] if lane.get("tier") is not None else "-"
         notes = str(lane.get("notes", "-")).replace("|", "/")
+        # Mark coordination in the state cell: a reader judges executability from
+        # Queue State, so an unmarked `queued` row reads as an implementation lane
+        # that was passed over rather than one that is never selectable.
+        queue_state = lane["queue_state"]
+        if is_coordination_lane(lane):
+            queue_state = f"{queue_state} ({COORDINATION_LANE_TYPE})"
         lines.append(
             f"| {lane['order']} | GH-{lane['issue']} | {lane['task_id']} | {lane['owner']} | "
-            f"{lane['task_status']} | {lane['queue_state']} | {tier} | {depends_on} | {notes} |"
+            f"{lane['task_status']} | {queue_state} | {tier} | {depends_on} | {notes} |"
         )
 
     return "\n".join(lines) + "\n"
@@ -753,7 +805,7 @@ def next_ready_lane(payload: dict) -> dict | None:
         (
             lane
             for lane in sorted(payload.get("lanes", []), key=lambda lane: lane["order"])
-            if lane.get("queue_state") == "ready"
+            if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
         ),
         None,
     )
@@ -849,9 +901,15 @@ def normalize_lanes(
         lane["order"] = index
 
     active_like = [
-        lane for lane in lanes if lane.get("queue_state") in {"active", "review"}
+        lane
+        for lane in lanes
+        if lane.get("queue_state") in {"active", "review"} and not is_coordination_lane(lane)
     ]
-    ready_lanes = [lane for lane in lanes if lane.get("queue_state") == "ready"]
+    ready_lanes = [
+        lane
+        for lane in lanes
+        if lane.get("queue_state") == "ready" and not is_coordination_lane(lane)
+    ]
 
     if active_like:
         for lane in ready_lanes:
@@ -868,7 +926,11 @@ def normalize_lanes(
 
     if canonical_ready is None:
         canonical_ready = next(
-            (lane for lane in lanes if lane.get("queue_state") == "queued"),
+            (
+                lane
+                for lane in lanes
+                if lane.get("queue_state") == "queued" and not is_coordination_lane(lane)
+            ),
             None,
         )
         if canonical_ready is not None:

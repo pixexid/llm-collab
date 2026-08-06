@@ -1143,3 +1143,258 @@ accepted_by: null
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoordinationLaneTest(unittest.TestCase):
+    """GH-527: a coordination-only tracker must stay visible but never select and
+    never suppress. Both exclusions are load-bearing — either alone leaves half
+    the deadlock (GH-85 blocked everything either way)."""
+
+    def _lane(self, order, issue, state, lane_type=None, task=None, depends_on=None):
+        return {
+            "order": order,
+            "issue": issue,
+            "task_id": task or f"TASK-{issue}",
+            "owner": "codex",
+            "task_status": "open",
+            "queue_state": state,
+            "lane_type": lane_type,
+            "depends_on": depends_on or [],
+            "blocked_by": [],
+        }
+
+    def _fm(self, payload):
+        """normalize_lanes blocks a lane when direct-app policy evidence is
+        unavailable; supply minimal frontmatter so these fixtures exercise the
+        coordination logic rather than that unrelated gate."""
+        return {
+            lane["task_id"]: {
+                "project_id": "llm-collab",
+                "status": lane.get("task_status", "open"),
+                "lane_type": lane.get("lane_type"),
+            }
+            for lane in payload["lanes"]
+        }
+
+    def test_coordination_lane_is_never_the_ready_lane(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        self.assertEqual(93, project_issue_queue.next_ready_lane(payload)["issue"])
+
+    def test_active_coordination_lane_does_not_suppress(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        by_issue = {l["issue"]: l for l in payload["lanes"]}
+        self.assertEqual("ready", by_issue[93]["queue_state"])
+
+    def test_coordination_lane_is_not_promoted_from_queued(self) -> None:
+        """The site my own refinement missed: when nothing is ready the queue
+        promotes the first `queued` lane, which would hand GH-85 straight back."""
+        payload = {"project_id": "llm-collab", "lanes": [self._lane(1, 85, "queued", "coordination")]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        self.assertEqual("queued", payload["lanes"][0]["queue_state"])
+        self.assertIsNone(project_issue_queue.next_ready_lane(payload))
+
+    def test_coordination_lane_stays_visible(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        project_issue_queue.normalize_lanes(payload, task_frontmatters=self._fm(payload))
+        self.assertIn(85, {l["issue"] for l in payload["lanes"]})
+
+    def test_ordinary_lane_types_are_unaffected(self) -> None:
+        """AC5 regression — the one that matters most: every non-coordination
+        value must behave exactly as before."""
+        for lane_type in (None, "design", "design-spec", "template-implementation"):
+            with self.subTest(lane_type=lane_type):
+                payload = {"project_id": "llm-collab", "lanes": [
+                    self._lane(1, 85, "ready", lane_type),
+                    self._lane(2, 93, "ready"),
+                ]}
+                self.assertEqual(85, project_issue_queue.next_ready_lane(payload)["issue"])
+
+    def test_dependency_blocking_is_unaffected(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        self.assertIsNone(project_issue_queue.next_ready_lane(payload))
+
+    def test_v4_no_ready_lane_errors_reports_a_genuine_no_ready_diagnostic(self) -> None:
+        """V4/AC6. The early return at no_ready_lane_errors keys on {active, review};
+        once a coordination lane is excluded from suppression it can sit there
+        looking like work in flight, and the queue would report a healthy
+        'nothing to do' while every executable lane is blocked."""
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertTrue(
+            errors,
+            "a queue whose only non-blocked lane is coordination must not report healthy",
+        )
+
+    def test_v4_active_implementation_lane_still_suppresses_the_diagnostic(self) -> None:
+        """The unchanged direction for V4: a real active lane still means 'work in
+        flight', so no_ready_lane_errors stays quiet. Without this, an
+        always-report mutation would pass the test above."""
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "active"),
+            self._lane(2, 94, "blocked", depends_on=["TASK-93"]),
+        ]}
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertEqual([], errors)
+
+    def test_amiga_coordination_selection_and_suppression(self) -> None:
+        """AGENTS.md: a shared-contract change needs focused coverage for Amiga AND
+        a non-Amiga project. The other cases here are llm-collab plus a synthetic
+        strict project; neither is Amiga, and Amiga is the one that enables
+        `ui_ux.direct_app_only`, so it exercises a different validator path.
+
+        Both halves of the deadlock, on Amiga: never selected, never suppressing.
+        """
+        payload = {"project_id": "amiga", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        self.assertEqual(93, project_issue_queue.next_ready_lane(payload)["issue"])
+
+        active = {"project_id": "amiga", "lanes": [
+            self._lane(1, 85, "active", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        fm = {
+            lane["task_id"]: {
+                "project_id": "amiga",
+                "status": lane.get("task_status", "open"),
+                "lane_type": lane.get("lane_type"),
+            }
+            for lane in active["lanes"]
+        }
+        project_issue_queue.normalize_lanes(active, task_frontmatters=fm)
+        by_issue = {l["issue"]: l for l in active["lanes"]}
+        self.assertEqual("ready", by_issue[93]["queue_state"])
+        self.assertIn(85, by_issue)
+
+    def _mirror(self, temp, *, lane_type):
+        """One task mirror on disk, differing from the lane ONLY in lane_type."""
+        body = (
+            "---\n"
+            "task_id: TASK-85\n"
+            "title: GH-85 tracker\n"
+            "status: open\n"
+            "owner: codex\n"
+            "project_id: llm-collab\n"
+            "depends_on: []\n"
+            f"lane_type: {lane_type}\n"
+            "---\n\n# GH-85\n"
+        )
+        path = Path(temp) / "TASK-85.md"
+        path.write_text(body)
+        return path
+
+    def _validate_with_mirror(self, temp, *, cache_lane_type, mirror_lane_type):
+        mirror = self._mirror(temp, lane_type=mirror_lane_type)
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", cache_lane_type, task="TASK-85"),
+        ]}
+        with patch.object(project_issue_queue, "find_task_by_id", return_value=mirror):
+            errors, _ = project_issue_queue.validate_queue("llm-collab", payload)
+        return errors
+
+    def test_validate_flags_lane_type_drift_between_cache_and_mirror(self) -> None:
+        """Connector P1 on PR #550, and a state I actually observed tonight: the
+        cached projection carried `lane_type: null` for GH-85 while the mirror said
+        `coordination`, and validation reported healthy. Every exclusion in this
+        module reads the CACHED lane, so an unvalidated mismatch silently restores
+        the deadlock this whole lane removes.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            errors = self._validate_with_mirror(
+                temp, cache_lane_type=None, mirror_lane_type="coordination"
+            )
+        self.assertTrue(
+            any("lane_type mismatch" in e for e in errors),
+            f"stale cached lane_type must be a validation error, got {errors!r}",
+        )
+
+    def test_validate_accepts_matching_lane_type(self) -> None:
+        """Unchanged direction: agreement must stay silent, or an always-report
+        mutation would satisfy the mismatch test above."""
+        with tempfile.TemporaryDirectory() as temp:
+            errors = self._validate_with_mirror(
+                temp, cache_lane_type="coordination", mirror_lane_type="coordination"
+            )
+        self.assertFalse(
+            [e for e in errors if "lane_type mismatch" in e],
+            f"matching lane_type must not error, got {errors!r}",
+        )
+
+    def test_v6_coordination_token_survives_the_strict_direct_app_validator(self) -> None:
+        """V6/AC8. llm-collab does not set `ui_ux.direct_app_only`, so validating
+        there proves nothing — the collision would only appear on a strict
+        project. Inject one and check the token on that path.
+
+        The second half is what makes this non-vacuous: `coordination-spec` MUST
+        be rejected by the same fixture. Without it, a fixture where the policy
+        was simply off would pass the first assertion and prove nothing at all.
+        """
+        import task_contract
+
+        strict_project = {"id": "strictproj", "ui_ux": {"direct_app_only": True}}
+
+        def errors_for(lane_type):
+            frontmatter = {
+                "project_id": "strictproj",
+                "status": "open",
+                "lane_type": lane_type,
+            }
+            errors, _ = task_contract.validate_direct_app_policy(
+                frontmatter, project_override=strict_project
+            )
+            return errors
+
+        self.assertEqual(
+            [], errors_for("coordination"),
+            "bare `coordination` must be accepted under direct_app_only",
+        )
+        self.assertTrue(
+            errors_for("coordination-spec"),
+            "the fixture's policy must actually be strict, or the check above is vacuous",
+        )
+
+    def test_ac4_coordination_lane_never_advertises_an_executable_next_action(self) -> None:
+        """AC4. `activate` on a lane that can never be activated reads as an
+        implementation lane someone skipped."""
+        coordination = self._lane(1, 85, "ready", "coordination")
+        ordinary = self._lane(2, 93, "ready")
+        self.assertEqual("coordination", project_issue_queue.lane_next_action(coordination))
+        self.assertEqual("activate", project_issue_queue.lane_next_action(ordinary))
+
+    def test_ac4_show_queue_and_markdown_mark_the_coordination_row(self) -> None:
+        """AC4 at both rendered surfaces. show_queue must not print
+        `next=activate`, and the markdown row must carry the marker in the cell a
+        reader uses to judge executability."""
+        payload = {"project_id": "llm-collab", "project_name": "llm-collab", "lanes": [
+            self._lane(1, 85, "ready", "coordination"),
+            self._lane(2, 93, "ready"),
+        ]}
+        shown = project_issue_queue.show_queue(payload)
+        coordination_row = [line for line in shown.splitlines() if "GH-85" in line][0]
+        ordinary_row = [line for line in shown.splitlines() if "GH-93" in line][0]
+        self.assertIn("next=coordination", coordination_row)
+        self.assertNotIn("next=activate", coordination_row)
+        self.assertIn("next=activate", ordinary_row)
+
+        markdown = project_issue_queue.render_markdown(payload)
+        md_coordination = [line for line in markdown.splitlines() if "GH-85" in line][0]
+        md_ordinary = [line for line in markdown.splitlines() if "GH-93" in line][0]
+        self.assertIn("(coordination)", md_coordination)
+        self.assertNotIn("(coordination)", md_ordinary)

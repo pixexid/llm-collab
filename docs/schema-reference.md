@@ -1672,6 +1672,35 @@ Do not use `design-queue.json` as a second backlog source. New design-first work
 - for lanes depending on accepted-but-not-yet-main design outputs, set `dependency_materialization_gate: true` and `required_dependency_artifacts` in the task mirror; validation fails ready/active/review lanes when the assigned worktree lacks those artifacts
 - when migrating an old design queue, copy active design lanes into `issue-queue.json`, preserve their `lane_type`, then archive the legacy design queue
 
+### Coordination Lane Rules
+
+A lane carrying `lane_type: coordination` is a **tracker**, not work. It exists so a long-running
+umbrella issue stays on the board without ever being handed to a worker. Four rules, and all four
+are load-bearing:
+
+- **Visible.** It keeps its order, issue, task id and owner in the projection and in `validate`
+  output. Excluding it from *selection* must never remove it from *traceability*.
+- **Never selected.** `next_ready_lane` can never return it, and it is never promoted from `queued`
+  to `ready`. A tracker that becomes the ready lane blocks the queue behind work nobody can finish.
+- **Never suppressing.** Setting it `active` or `review` must not rewrite other `ready` lanes to
+  `queued`. Both this and the previous rule are required: either one alone leaves half the deadlock
+  intact, which is exactly how GH-85 stalled the queue in both directions at once.
+- **One owner.** It still names a single owner, so the tracker has someone accountable for closing
+  it even though it is never dispatched.
+
+Queue output must name the status distinctly: `lane_next_action` returns `coordination` rather than
+`activate`, and the markdown row marks the state cell. An unmarked coordination row reads as an
+implementation lane that was passed over rather than one that is never selectable.
+
+`lane_type` reaches the mirror through the normal task/issue materialization path and the projection
+is refreshed with `project_issue_queue.py reconcile` — never by editing `issue-queue.json` directly.
+
+Keep the token bare. `bin/task_contract.py` rejects any `lane_type` whose hyphen-split tokens
+intersect `DIRECT_APP_ONLY_LANE_TOKENS` (`design`, `handoff`, `parity`, `sandbox`, `spec`) for
+projects with `ui_ux.direct_app_only: true`. Bare `coordination` is clean; a compound such as
+`coordination-spec` would be rejected on those projects and pass on ones that do not set the flag,
+which hides the collision until it reaches a strict project.
+
 ---
 
 Read first by `session_bootstrap.py` so the LLM immediately knows its identity.

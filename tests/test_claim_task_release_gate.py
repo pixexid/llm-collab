@@ -671,3 +671,145 @@ class ClaimTaskMutationSafetyTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class CoordinationLaneClaimGuardTest(unittest.TestCase):
+    """GH-527: a coordination lane is a tracker and is never activated.
+
+    This is a WIRING test, not a predicate test. `is_coordination_lane` already
+    has focused coverage in test_project_issue_queue; what was missing is proof
+    that `claim_task` actually calls it. Reverting the guard must fail HERE —
+    a correct predicate wired to nothing is the defect this guards against.
+    """
+
+    LANE = {
+        "order": 1,
+        "issue": 85,
+        "task_id": "TASK-COORD1",
+        "owner": "codex",
+        "task_status": "open",
+        # `active` is deliberate: AC2 permits a coordination lane to sit here, and
+        # it is inside claim_task's {ready, active, review} allowlist — so the
+        # ordering check would wave it through. No --allow-queue-override needed.
+        "queue_state": "active",
+        "lane_type": "coordination",
+        "depends_on": [],
+        "blocked_by": [],
+    }
+
+    def _claim(self, lane, extra_argv=(), mirror_lane_type="coordination"):
+        """mirror_lane_type is explicit because the MIRROR is the authority: a
+        test that varies only the cached lane cannot say which source the guard
+        actually read."""
+        import project_issue_queue as issue_queue
+
+        with tempfile.TemporaryDirectory() as temp:
+            task = Path(temp) / "TASK-COORD1.md"
+            lane_type_line = (
+                f"lane_type: {mirror_lane_type}\n" if mirror_lane_type is not None else ""
+            )
+            task.write_text(
+                "---\ntask_id: TASK-COORD1\ntitle: GH-85 tracker\nstatus: open\n"
+                "owner: codex\nproject_id: llm-collab\ndepends_on: []\n"
+                f"{lane_type_line}---\n\n# tracker\n"
+            )
+            argv = ["claim_task.py", "--task", "TASK-COORD1",
+                    "--owner", "codex", "--status", "in_progress",
+                    "--skip-preflight", *extra_argv]
+            payload = {"project_id": "llm-collab", "lanes": [lane]}
+            err = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(claim_task, "find_task_by_id", return_value=task),
+                patch.object(issue_queue, "queue_exists", return_value=True),
+                patch.object(issue_queue, "load_queue", return_value=payload),
+                redirect_stderr(err),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    claim_task.main()
+            return raised.exception.code, err.getvalue()
+
+    def test_coordination_lane_cannot_be_claimed_even_from_an_allowlisted_state(self):
+        code, err = self._claim(self.LANE)
+        self.assertEqual(1, code)
+        self.assertIn("coordination lanes are trackers and are never activated", err)
+
+    def test_the_override_flag_does_not_unlock_a_coordination_lane(self):
+        """--allow-queue-override bypasses ORDERING; it must not bypass this."""
+        code, err = self._claim(self.LANE, extra_argv=("--allow-queue-override",))
+        self.assertEqual(1, code)
+        self.assertIn("coordination lanes are trackers and are never activated", err)
+
+    def test_stale_cached_lane_cannot_activate_a_coordination_mirror(self):
+        """Connector P1 on the amended head (discussion_r3724962908).
+
+        The mirror says `coordination`; the cached projection is stale and says
+        ordinary. Guarding on the cached lane alone left exactly this open —
+        `validate_queue` detects the drift but `claim_task` never calls it. The
+        mirror is the authority, so the claim must refuse on mirror evidence
+        with no help from the cache.
+        """
+        stale_cache = {**self.LANE, "lane_type": None}   # cache: ordinary work
+        code, err = self._claim(stale_cache)             # mirror: coordination
+        self.assertEqual(1, code)
+        self.assertIn("coordination lanes are trackers and are never activated", err)
+        self.assertIn('"authority": "task_mirror"', err)
+
+    def test_stale_cache_refusal_survives_the_override_flag(self):
+        stale_cache = {**self.LANE, "lane_type": None}
+        code, err = self._claim(stale_cache, extra_argv=("--allow-queue-override",))
+        self.assertEqual(1, code)
+        self.assertIn('"authority": "task_mirror"', err)
+
+    def test_coordination_mirror_is_refused_with_no_queue_projection_at_all(self):
+        """The mirror guard sits outside the queue block on purpose: a project
+        with no projection, or a task absent from it, must still refuse."""
+        import project_issue_queue as issue_queue
+
+        with tempfile.TemporaryDirectory() as temp:
+            task = Path(temp) / "TASK-COORD1.md"
+            task.write_text(
+                "---\ntask_id: TASK-COORD1\ntitle: GH-85 tracker\nstatus: open\n"
+                "owner: codex\nproject_id: llm-collab\ndepends_on: []\n"
+                "lane_type: coordination\n---\n\n# tracker\n"
+            )
+            err = io.StringIO()
+            with (
+                patch.object(sys, "argv", ["claim_task.py", "--task", "TASK-COORD1",
+                                           "--owner", "codex", "--status", "in_progress",
+                                           "--skip-preflight"]),
+                patch.object(claim_task, "find_task_by_id", return_value=task),
+                patch.object(issue_queue, "queue_exists", return_value=False),
+                redirect_stderr(err),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    claim_task.main()
+        self.assertEqual(1, raised.exception.code)
+        self.assertIn("never activated", err.getvalue())
+
+    def test_the_guard_is_specific_to_coordination_lanes(self):
+        """Unchanged direction. Without this, a guard that refused EVERY claim
+        would satisfy both assertions above.
+
+        The identical fixture with `lane_type: None` must not trip the
+        coordination guard. It is still refused — by the unrelated refinement
+        gate, which this fixture deliberately does not satisfy — and that is the
+        point: the refusal reason proves which check fired.
+        """
+        ordinary = {**self.LANE, "lane_type": None}
+        code, err = self._claim(ordinary, mirror_lane_type=None)
+        self.assertEqual(1, code)
+        self.assertNotIn("coordination lanes are trackers", err)
+        self.assertIn("has not been refined", err)
+
+    def test_cache_only_coordination_still_refuses(self):
+        """Opposite drift: the cached lane says coordination, the mirror does not.
+        The mirror is the authority, so this proves the second guard is still
+        wired — either source claiming tracker fails closed rather than picking
+        a winner."""
+        code, err = self._claim(self.LANE, mirror_lane_type=None)
+        self.assertEqual(1, code)
+        self.assertIn("coordination lanes are trackers and are never activated", err)
+        self.assertIn('"authority": "cached_queue_lane"', err)
