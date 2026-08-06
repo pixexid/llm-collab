@@ -1847,6 +1847,24 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.assertIn("the automatic first pass's clean model", handoff)
         self.assert_scenario_cases("compact_wait_gate", check)
 
+    def test_automatic_plus_one_fails_closed_on_a_mid_pass_push(self):
+        """GH-549 P1: a PR-level +1 carries no SHA, so the four checks cannot bind
+        it to the reviewed head. A pass started on H1 that ends with a +1 after an
+        H2 push passes all four for H2 though H1 was reviewed. The contract must
+        fail closed in that case (route through the prior-OID local proof) unless a
+        trustworthy connector pickup artifact proves the pass started after the
+        current head's push with no push in between."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "those four checks cannot by themselves bind the `+1` to the reviewed head",
+            text,
+        )
+        self.assertIn("passes all four for H2 though H1 was reviewed", text)
+        self.assertIn(
+            "route it through the prior-OID path below and locally prove every amendment",
+            text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

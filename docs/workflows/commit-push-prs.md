@@ -379,8 +379,15 @@ Use the mandatory one-pass GitHub Codex gate:
   safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
   what keeps this model from reading a pass over unresolved threads
   (llm-collab#317). Any head change voids it, and it grants no second bot pass —
-  locally prove the amended head or remain blocked. A clean automatic `+1` never
-  justifies a second review request. The connector defines this protocol itself: if
+  locally prove the amended head or remain blocked. A PR-level reaction carries no
+  SHA, so those four checks cannot by themselves bind the `+1` to the reviewed
+  head: a pass started on H1 that ends with a `+1` after an H2 push passes all
+  four for H2 though H1 was reviewed. Fail closed unless a trustworthy existing
+  connector pickup artifact (its `eyes` reaction) proves the pass started after
+  the current head's push with no push between pickup and `+1`; otherwise the `+1`
+  is a prior-head signal — route it through the prior-OID path below and locally
+  prove every amendment, never as a terminal clean pass for the current head. A
+  clean automatic `+1` never justifies a second review request. The connector defines this protocol itself: if
   it has suggestions it comments, otherwise it reacts `+1`. This model exists
   because v9/v11 made the automatic pass primary while the two models above both
   presuppose a manual request comment to carry the reaction; without it the
