@@ -183,6 +183,73 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
             ["GH-760/TASK-38DCF3 WAF log-only Phase-1 evidence"],
         )
 
+    def test_normalize_keeps_explicitly_blocked_task_parked_without_dependencies(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 762,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "unassigned",
+                    "task_status": "blocked",
+                    "queue_state": "blocked",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+
+        with patch.object(
+            project_issue_queue,
+            "find_task_by_id",
+            return_value=TaskMirror(project_id="amiga", status="blocked"),
+        ):
+            with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                project_issue_queue.normalize_lanes(payload)
+
+        self.assertEqual(payload["lanes"][0]["queue_state"], "blocked")
+        self.assertEqual(payload["lanes"][0]["blocked_by"], [])
+
+    def test_validate_accepts_explicitly_blocked_task_without_evidence_warning(self) -> None:
+        payload = {
+            "project_id": "amiga",
+            "lanes": [
+                {
+                    "order": 1,
+                    "issue": 762,
+                    "task_id": "TASK-E8C28D",
+                    "owner": "claude",
+                    "task_status": "blocked",
+                    "queue_state": "blocked",
+                    "depends_on": [],
+                    "blocked_by": [],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            mirror = Path(temp) / "2026-08-06_gh-762-parked__TASK-E8C28D.md"
+            mirror.write_text(
+                "---\n"
+                "task_id: TASK-E8C28D\n"
+                "title: GH-762 parked lane\n"
+                "project_id: amiga\n"
+                "status: blocked\n"
+                "owner: claude\n"
+                "depends_on: []\n"
+                "---\n"
+            )
+            with patch.object(project_issue_queue, "find_task_by_id", return_value=mirror):
+                with patch.object(task_contract, "get_project", return_value={"id": "amiga"}):
+                    errors, warnings = project_issue_queue.validate_queue("amiga", payload)
+
+        self.assertEqual(errors, [])
+        self.assertNotIn(
+            "lane 1 is blocked but has no blocked_by/depends_on evidence",
+            warnings,
+        )
+
     def test_normalize_requires_exact_queue_project_before_policy_evaluation(self) -> None:
         for queue_project_id in (None, "nuvyr"):
             with self.subTest(queue_project_id=queue_project_id):
@@ -1240,6 +1307,14 @@ class CoordinationLaneTest(unittest.TestCase):
             errors,
             "a queue whose only non-blocked lane is coordination must not report healthy",
         )
+
+    def test_explicitly_blocked_lane_satisfies_no_ready_health_check(self) -> None:
+        payload = {"project_id": "llm-collab", "lanes": [
+            self._lane(1, 94, "blocked"),
+        ]}
+        payload["lanes"][0]["task_status"] = "blocked"
+        errors, _ = project_issue_queue.no_ready_lane_errors("llm-collab", payload)
+        self.assertEqual([], errors)
 
     def test_v4_active_implementation_lane_still_suppresses_the_diagnostic(self) -> None:
         """The unchanged direction for V4: a real active lane still means 'work in

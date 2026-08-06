@@ -237,6 +237,8 @@ def unblock_satisfied_lanes(payload: dict) -> None:
     for lane in payload.get("lanes", []):
         if not isinstance(lane, dict) or lane.get("queue_state") != "blocked":
             continue
+        if lane.get("task_status") == "blocked":
+            continue
 
         depends_on = normalize_depends(lane.get("depends_on"))
         if depends_on and not all(dependency_is_satisfied(dep, completed_task_ids) for dep in depends_on):
@@ -373,7 +375,12 @@ def validate_queue(project_id: str, payload: dict) -> tuple[list[str], list[str]
                 f"lane {order} depends_on mismatch for {task_id}: queue {depends_on!r} vs task {task_depends!r}"
             )
 
-        if queue_state == "blocked" and not lane.get("blocked_by") and not depends_on:
+        if (
+            queue_state == "blocked"
+            and lane.get("task_status") != "blocked"
+            and not lane.get("blocked_by")
+            and not depends_on
+        ):
             warnings.append(f"lane {order} is blocked but has no blocked_by/depends_on evidence")
 
     if queue_orders and sorted(queue_orders) != list(range(1, len(queue_orders) + 1)):
@@ -478,7 +485,12 @@ def no_ready_lane_errors(project_id: str, payload: dict) -> tuple[list[str], lis
     genuinely_blocked = [
         lane
         for lane in lanes
-        if lane.get("queue_state") == "blocked" and (lane.get("blocked_by") or lane.get("depends_on"))
+        if lane.get("queue_state") == "blocked"
+        and (
+            lane.get("task_status") == "blocked"
+            or lane.get("blocked_by")
+            or lane.get("depends_on")
+        )
     ]
     if len(genuinely_blocked) == len(lanes):
         return [], []
