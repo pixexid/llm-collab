@@ -216,10 +216,13 @@ The GitHub Codex gate is complete when the latest
 `chatgpt-codex-connector` review/comment explicitly covers that exact OID with
 no actionable issues, or a connector-authored `+1` (`thumbs-up`) sits on the exact
 manual-review request comment while the head still equals the SHA that request
-named, or the connector completed an exact-head review and every thread it
-initiated has a thread-linked disposition accepted by the lane owner and
-release-gate worker. A bare `eyes` reaction is accepted-and-in-progress, never
-a verdict. Each outcome is terminal for the bot wait on that head. Their
+named, or a connector-authored `+1` sits at PR level with no manual request
+comment in existence — the automatic first pass's clean model, whose conditions
+are defined in `commit-push-prs.md` — or the connector completed an exact-head
+review and every thread it initiated has a thread-linked disposition accepted by
+the lane owner and release-gate worker. A bare `eyes` reaction is
+accepted-and-in-progress, never a verdict. Each outcome is terminal for the bot
+wait on that head. Their
 post-signal handling differs. A terminal outcome stops waiting for further
 artifacts only; it does not waive the handling below:
 
@@ -242,6 +245,11 @@ artifacts only; it does not waive the handling below:
 - A disposed-review completion receives the same approximately five-minute
   settle and full artifact re-read. Any new or unadjudicated finding cancels
   that completion.
+- An automatic PR-level connector `+1` (no manual request comment in existence)
+  receives the same approximately five-minute post-clean settle and full re-read
+  of [the reviewed artifact set](commit-push-prs.md#reviewed-artifact-set) as a
+  text verdict, for the same reaction-only-CLEAN rationale as the request-comment
+  `+1` above; matching detail lives in `commit-push-prs.md`.
 
 Whether a missing automatic trigger needs the one manual fallback request is the Tier A/B/C rule in
 [`AGENTS.md` → Requesting Code Review](../../AGENTS.md#requesting-code-review-all-workers-every-repository),

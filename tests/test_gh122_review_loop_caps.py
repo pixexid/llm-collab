@@ -461,11 +461,68 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "a bare `eyes` reaction or the request comment itself is never a",
                 sources["review_policy"],
             )
+            # GH-549: a third clean model was added for the automatic pass, so the
+            # count moved 2 -> 3 and the adjudicated non-clean review moved 3 -> 4.
+            # The set stays CLOSED at the new count -- that exclusivity, not the
+            # number itself, is what this test defends.
             self.assertIn(
-                "only two connector-authored clean signal models",
+                "only three connector-authored clean signal models",
                 sources["review_policy"],
             )
-            self.assertIn("third terminal gate outcome", sources["review_policy"])
+            self.assertIn("fourth terminal gate outcome", sources["review_policy"])
+            # Every condition of the automatic model is pinned individually. A later
+            # edit that drops one would leave a `+1` terminal on weaker evidence than
+            # the model was adjudicated on, which is the failure this guards.
+            self.assertIn(
+                "at PR level, with no manual request comment in existence",
+                sources["review_policy"],
+            )
+            self.assertIn("Verify all four", sources["review_policy"])
+            for condition in (
+                "the actor is the connector",
+                "that the reaction post-dates the push of the current head",
+                "that the head has not been amended since",
+                "every other artifact class is empty",
+            ):
+                self.assertIn(condition, sources["review_policy"])
+            # The model must NOT require separate proof that the automatic pass
+            # ran: on a clean pass the reaction is the only artifact the connector
+            # emits, so such a condition is circular and unsatisfiable. The
+            # adjudicated resolution is to define the reaction AS that artifact.
+            self.assertIn(
+                "That reaction is itself the automatic pass's clean artifact",
+                sources["review_policy"],
+            )
+            self.assertNotIn(
+                "that the automatic pass ran for this", sources["review_policy"]
+            )
+            # The model has to be reachable from every wait-gate path, not only the
+            # two enumerations that define it. A precedence rule that waits for a
+            # review object holds every clean automatic PR forever.
+            self.assertIn(
+                "pending until a clean review, a valid automatic PR-level `+1`",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "hold until the bot returns a terminal review or a valid automatic "
+                "PR-level `+1`",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "valid fallback-request `+1`, valid automatic PR-level `+1`",
+                sources["review_policy"],
+            )
+            # The empty-findings clause is the whole safeguard against the #317
+            # shape (clean-looking signal beside unresolved P1 threads), so pin the
+            # consequence, not just the condition.
+            self.assertIn(
+                "a `+1` alongside any finding artifact is **not** terminal",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "A clean automatic `+1` never justifies a second review request",
+                sources["review_policy"],
+            )
 
         self.assert_scenario_cases("canonical_wait_gate", check)
 
@@ -1656,6 +1713,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "as a text verdict",
                 handoff,
             )
+            # GH-549 P2: the automatic PR-level +1 outcome takes the same settle too.
+            self.assertIn(
+                "An automatic PR-level connector `+1` (no manual request comment in existence) "
+                "receives the same approximately five-minute post-clean settle",
+                handoff,
+            )
             self.assertNotIn(
                 "report it immediately and do not wait out the remainder", handoff,
                 "the reaction path must not be exempt from the settle again",
@@ -1760,6 +1823,73 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assertIn("amended current head has complete local exact-head verification", text)
         self.assertNotIn("external reviewer for later exact heads", text)
         self.assertNotIn("connector as the external reviewer for the new exact head", text)
+
+    def test_prior_oid_completion_path_recognizes_the_automatic_clean_model(self):
+        """GH-549: the prior-OID completion path must recognize a first pass that
+        was clean via the automatic PR-level `+1`, not only text verdict or
+        request-comment `+1`. A clean automatic first pass followed by an amended
+        head is the one-pass case the terminal list must still recognize, because
+        the rule says local verification replaces a second bot pass."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "completed the PR's first pass clean on a prior OID (by text verdict, "
+            "request-comment `+1`, or automatic PR-level `+1`)",
+            text,
+        )
+
+    def test_compact_wait_gate_names_the_automatic_pr_level_clean_model(self):
+        """GH-549: the worker-facing GitHub Codex gate completion enumeration in
+        review-and-handoff.md must name the automatic PR-level `+1` clean model.
+        Without it a worker reading only this runbook holds a clean automatic PR,
+        because the enumeration lists only the text verdict, request-comment `+1`,
+        and disposed review."""
+        def check(case, sources):
+            handoff = sources["handoff_wait"]
+            self.assertIn(
+                "a connector-authored `+1` sits at PR level with no manual request "
+                "comment in existence",
+                handoff,
+            )
+            self.assertIn("the automatic first pass's clean model", handoff)
+        self.assert_scenario_cases("compact_wait_gate", check)
+
+    def test_automatic_plus_one_fails_closed_on_a_mid_pass_push(self):
+        """GH-549 P1: a PR-level +1 carries no SHA, so the four checks cannot bind
+        it to the reviewed head. A pass started on H1 that ends with a +1 after an
+        H2 push passes all four for H2 though H1 was reviewed. The contract must
+        fail closed in that case (route through the prior-OID local proof) unless a
+        trustworthy connector pickup artifact proves the pass started after the
+        current head's push with no push in between."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "those four checks cannot by themselves bind the `+1` to the reviewed head",
+            text,
+        )
+        self.assertIn("passes all four for H2 though H1 was reviewed", text)
+        self.assertIn(
+            "route it through the prior-OID path below and locally prove every amendment",
+            text,
+        )
+
+    def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
+        """GH-549 P1 (canonical list): the merge-driving automatic PR-level +1 bullet
+        must carry the same head-binding as the review-policy enumeration -- a PR-level
+        reaction has no SHA, so the four checks do not bind it to the reviewed head.
+        Require a trustworthy connector pickup artifact (eyes) proving the pass started
+        after the current head's push with no push in between, and route an
+        ambiguous/prior-head +1 through the prior-OID local proof."""
+        text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
+        self.assertIn(
+            "terminal on this path only when a trustworthy existing connector pickup "
+            "artifact (its `eyes` reaction) proves the pass started after the current "
+            "head's push with no push between pickup and `+1`",
+            text,
+        )
+        self.assertIn(
+            "an ambiguous or prior-head `+1` is not terminal here — fall back to the "
+            "prior-OID clause below with local proof of every amendment",
+            text,
+        )
 
 
 if __name__ == "__main__":

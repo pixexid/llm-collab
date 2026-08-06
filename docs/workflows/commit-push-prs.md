@@ -314,11 +314,17 @@ has inspected:
 - any requested changes or review replies after follow-up commits
 
 To poll a PR for these, `bin/pr_watch.py --repo <owner/name> --pr <N>` reports the
-first change across the PR timeline, reactions, and check-runs (the connector
-posts its verdict as a comment **and** a reaction, and any check-runs — e.g. a
-manually dispatched verify — arrive separately; none reliably bump `updated_at`),
-then exits with a JSON delta. It watches one PR
+first change across the PR timeline, reactions, and check-runs. The connector's
+two shapes differ: **with findings** it posts a review or comment (and may also
+react), while a **clean** pass is reaction-only — no review object, no comment —
+so a watch that looked only for comments would never see a clean verdict. It
+covers PR-level reactions and review-request-comment reactions, which is where the
+two reaction models respectively live. Any check-runs — e.g. a manually dispatched
+verify — arrive separately, and none of these reliably bump `updated_at`. It then
+exits with a JSON delta. It watches one PR
 and exits on the first event, so re-arm it to catch the next event on the same PR.
+It reports *changes against the state at arm time*, so a verdict that already
+landed before it started is baseline, not an event — arm it when the PR opens.
 
 Do not idle on review while `mergeStateStatus` is dirty. A dirty merge state is
 an active blocker: refresh the branch against the target base, resolve conflicts,
@@ -361,16 +367,42 @@ Use the mandatory one-pass GitHub Codex gate:
   permission for a second bot pass: locally prove the amended head or remain blocked.
   An ambiguous or removed reaction is non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
+- a connector-authored `+1` (`thumbs-up`) **at PR level, with no manual request
+  comment in existence**, is terminal CLEAN for the PR's automatic first pass.
+  **That reaction is itself the automatic pass's clean artifact.** The connector
+  emits nothing else when it has no suggestions, so there is no separate proof that
+  the pass ran, and requiring one would make this model unsatisfiable — the exact
+  deadlock it exists to remove. Verify all four: the actor is the connector, that
+  the reaction post-dates the push of the current head, that the head has
+  not been amended since, and that **every other artifact class is empty** — no
+  review object, no top-level comment, no inline thread. That last condition is the
+  safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
+  what keeps this model from reading a pass over unresolved threads
+  (llm-collab#317). Any head change voids it, and it grants no second bot pass —
+  locally prove the amended head or remain blocked. A PR-level reaction carries no
+  SHA, so those four checks cannot by themselves bind the `+1` to the reviewed
+  head: a pass started on H1 that ends with a `+1` after an H2 push passes all
+  four for H2 though H1 was reviewed. Fail closed unless a trustworthy existing
+  connector pickup artifact (its `eyes` reaction) proves the pass started after
+  the current head's push with no push between pickup and `+1`; otherwise the `+1`
+  is a prior-head signal — route it through the prior-OID path below and locally
+  prove every amendment, never as a terminal clean pass for the current head. A
+  clean automatic `+1` never justifies a second review request. The connector defines this protocol itself: if
+  it has suggestions it comments, otherwise it reacts `+1`. This model exists
+  because v9/v11 made the automatic pass primary while the two models above both
+  presuppose a manual request comment to carry the reaction; without it the
+  connector has nowhere to put a clean verdict but PR level, and requiring a posted
+  text review would deadlock every clean automatic pass
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
   mandatory final-head request, required local exact-head verification, mutation and
   verification evidence, and settle plus adjudication. Requiring a posted text
   review for Tier A would deadlock whenever the connector's clean protocol is
   reaction-only, and the request plus a connector-authored `+1` is already a durable
   GitHub artifact
-- the clean verdict and request-comment `+1` are the only two connector-authored
-  clean signal models. A completed non-clean review becomes a third terminal
-  gate outcome only after every thread it initiated has the accepted
-  dispositions defined below; nothing else in
+- the clean verdict, the request-comment `+1` and the automatic PR-level `+1` are
+  the only three connector-authored clean signal models. A completed non-clean
+  review becomes a fourth terminal gate outcome only after every thread it
+  initiated has the accepted dispositions defined below; nothing else in
   [the reviewed artifact set](#reviewed-artifact-set) is terminal
 - **a connector review body that lists no findings is not a clean verdict.** The
   connector posts its findings as inline review threads, and the review body can be
@@ -516,7 +548,10 @@ else is a second source that goes stale the moment this one moves.
 eyes-only artifacts, and prior-head artifacts are non-signals with no clock:
 
 - **No terminal first pass.** At Tier A, request once if the automatic trigger
-  never started. At every tier, hold until the bot returns a terminal review.
+  never started. At every tier, hold until the bot returns a terminal review or a
+  valid automatic PR-level `+1`. A clean automatic pass emits only that reaction,
+  so its absence — not the absence of a review object — is what "no terminal first
+  pass" means.
 - **Eyes-only current-head artifact.** A current-head `eyes` reaction is not a
   terminal signal and never becomes one. It neither blocks nor ripens anything.
 - **Prior-head artifacts only.** A prior-head clean verdict is not evidence for
@@ -525,8 +560,10 @@ eyes-only artifacts, and prior-head artifacts are non-signals with no clock:
 
 #### First-pass precedence
 
-The first bot pass is pending until a clean review or a completed review with
-findings arrives. An `eyes` reaction is pickup only. If the automatic trigger did
+The first bot pass is pending until a clean review, a valid automatic PR-level
+`+1`, or a completed review with findings arrives. A clean automatic pass produces
+the reaction and nothing else, so a document that waits only for a review object
+would hold every clean PR forever. An `eyes` reaction is pickup only. If the automatic trigger did
 not start, Tier A may issue one manual fallback request; do not retry it and do
 not replace a missing terminal review with a timer or disposition. Non-GitHub
 lanes use an exact-OID mailbox request and verdict, with the same no-silence rule.
@@ -573,16 +610,33 @@ Codex review gate as complete when any of these holds:
   has **not been edited** since the reaction was left. The last two are not optional
   refinements: GitHub preserves reactions across an edit, so a request edited to swap
   an old SHA for the current one carries a `+1` for a review of the *old* head and the
-  first four checks all pass. A `+1` attributable only by timestamp, or sitting on any
-  other artifact, is **not** terminal. That reaction is terminal for the bot wait on that
+  first four checks all pass. Within **this** model a `+1` attributable only by timestamp,
+  or sitting on any other artifact, is **not** terminal — the automatic model below is the
+  only PR-level exception, and it carries its own five conditions. That reaction is
+  terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict,
   or
+- a connector-authored `+1` sits **at PR level** with no manual request comment in
+  existence, the reaction post-dates the push of the
+  current head, the head has not been amended since, and **every other artifact class is
+  empty** — no review object, no top-level comment, no inline thread. A PR-level reaction
+  has no SHA, so those checks do not by themselves bind it to the reviewed head: the `+1`
+  is terminal on this path only when a trustworthy existing connector pickup artifact
+  (its `eyes` reaction) proves the pass started after the current head's push with no push
+  between pickup and `+1`; an ambiguous or prior-head `+1` is not terminal here — fall
+  back to the prior-OID clause below with local proof of every amendment. The reaction is
+  itself the automatic pass's clean artifact; do not look for a separate proof that the
+  pass ran. A `+1` alongside any
+  finding artifact is not terminal. This is the automatic first pass's clean shape: the
+  connector comments when it has suggestions and reacts `+1` when it does not. It receives
+  the same settle and full re-read as a text verdict, and grants no second bot pass,
+  or
 - the connector completed the PR's first pass clean on a prior OID (by text
-  verdict or request-comment `+1`), and the amended current head has complete
-  local exact-head verification. The original artifact remains the one bot pass;
-  every change since its reviewed/requested OID must be included in the local
-  proof, and no arriving finding may remain unadjudicated, or
+  verdict, request-comment `+1`, or automatic PR-level `+1`), and the amended
+  current head has complete local exact-head verification. The original artifact
+  remains the one bot pass; every change since its reviewed/requested OID must be
+  included in the local proof, and no arriving finding may remain unadjudicated, or
 - the connector completed the PR's first review with findings and every thread
   it initiated has a thread-linked disposition accepted by the lane owner and
   release-gate worker. Any amended current head also needs local exact-head proof.
@@ -600,7 +654,8 @@ settle and then re-read [the reviewed artifact set](#reviewed-artifact-set) in f
 exact-head review raises findings, apply their written dispositions; do not
 request another connector review on the unchanged head.
 
-If no clean verdict, valid fallback-request `+1`, or disposed-review completion
+If no clean verdict, valid fallback-request `+1`, valid automatic PR-level `+1`,
+or disposed-review completion
 exists for this PR, it does not merge at any tier — there is no elapsed-time
 substitute:
 
