@@ -49,6 +49,12 @@ AMIGA_PROJECT_SPECIFIC_SUPABASE_SURFACES = {
     "supabase_amiga.get_advisors",
 }
 DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
+# Marker recorded in db_impact_detection_reasons when an explicit db_impact is not a
+# member. It has to survive `sync_db_contract`, because lifecycle callers sync BEFORE
+# they validate — `bin/claim_task.py:361` syncs straight after parsing and only
+# validates at :612/:632 — so a check that reads the raw frontmatter alone never fires
+# on the path that actually persists the transition.
+DB_IMPACT_INVALID_REASON_PREFIX = "invalid explicit db_impact: "
 PRODUCTION_SCHEMA_GUARD_STAGES = {"assignment", "review", "pr", "done"}
 DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
 DB_LOCAL_SCHEMA_ONLY_APPROVER = "operator"
@@ -759,7 +765,18 @@ def detect_db_contract(
     if explicit_impact in DB_IMPACT_VALUES:
         return explicit_impact, "manual", reasons or ["manual override"], schema_change_detected
 
+    # Classify from the DETECTED markers only. The invalid-value marker below is a
+    # defect record, not evidence of database work, so it must not turn a task with
+    # no markers into `shared-supabase-required`.
     auto_impact = "shared-supabase-required" if reasons else "none"
+
+    if explicit_impact:
+        # A non-member explicit value is a defect, not a missing value. Record it so
+        # the signal survives synchronization: callers that sync before validating
+        # would otherwise see only the automatic classification this discarded value
+        # produced, and validate a task the author never actually classified.
+        reasons = [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons]
+
     return auto_impact, "auto", reasons, schema_change_detected
 
 
@@ -1166,11 +1183,33 @@ def validate_db_contract(
 ) -> tuple[list[str], dict]:
     errors: list[str] = []
     project = _exact_task_project(frontmatter, project_override)
+    # Read the ORIGINAL explicit value before sync. `detect_db_contract` accepts a
+    # value only when it is already a member, so an invalid one falls through to
+    # automatic classification and sync overwrites it — by the time `fm` exists the
+    # malformed value is gone and the task is misclassified. Reporting that as a
+    # missing Supabase field points at the wrong authority; the actual defect is a
+    # closed-enum member that does not exist.
+    raw_impact = _normalize_text(frontmatter.get("db_impact"))
+    invalid_explicit_impact = bool(raw_impact) and raw_impact not in DB_IMPACT_VALUES
     fm, _ = sync_db_contract(
         frontmatter,
         body,
         project_override=project,
     )
+    if not invalid_explicit_impact:
+        # The caller may have synced before validating — `bin/claim_task.py:361` does,
+        # then validates at :612/:632 — in which case the raw read above sees the
+        # already-substituted value and the defect is invisible.
+        #
+        # Read the reason off the INCOMING frontmatter, not off `fm`. Re-synchronising
+        # an already-synchronised record sees a now-valid `db_impact`, takes the manual
+        # branch, and replaces the reasons with ["manual override"] — so the marker
+        # exists only on what the caller handed us.
+        for reason in _normalize_list(frontmatter.get("db_impact_detection_reasons")):
+            if reason.startswith(DB_IMPACT_INVALID_REASON_PREFIX):
+                raw_impact = reason[len(DB_IMPACT_INVALID_REASON_PREFIX) :]
+                invalid_explicit_impact = True
+                break
     db_impact = _normalize_text(fm.get("db_impact"))
     raw_project_ref = _normalize_text(frontmatter.get("db_project_ref"))
     summary = {
@@ -1192,6 +1231,18 @@ def validate_db_contract(
         "enabled": production_guard_enabled,
         "concrete_schema_paths": concrete_schema_paths,
     }
+
+    if invalid_explicit_impact:
+        # Report the real defect and stop. Every check below reasons about the
+        # AUTO-classified impact, which was derived only because this value was
+        # silently discarded — so continuing would emit diagnostics naming an
+        # authority the task never claimed.
+        errors.append(
+            f"db_impact {raw_impact!r} is not a valid value; expected one of: "
+            + ", ".join(sorted(DB_IMPACT_VALUES))
+            + "."
+        )
+        return errors, summary
 
     historical_done = (
         stage == "done"
