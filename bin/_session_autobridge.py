@@ -3449,17 +3449,32 @@ def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
             env["CLAUDE_HOME"] = str(runtime_home)
         elif runtime_family == "gemini_cli":
             env["GEMINI_HOME"] = str(runtime_home)
-    result = subprocess.run(
-        command,
-        input=None if derived else json.dumps(payload),
-        stdin=subprocess.DEVNULL if derived else None,
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        env=env,
-        timeout=timeout_seconds,
-        check=False,
+    starter_fence = (
+        _session_write_lock()
+        if livecraft_runtime_command
+        else contextlib.nullcontext()
     )
+    with starter_fence:
+        if livecraft_runtime_command:
+            starter_ok, starter_reason = livecraft_starter_binding_status(session)
+            if not starter_ok:
+                return {
+                    "status": starter_reason,
+                    "runtime_family": "pi",
+                    "returncode": 1,
+                    "delivery_accepted": False,
+                }
+        result = subprocess.run(
+            command,
+            input=None if derived else json.dumps(payload),
+            stdin=subprocess.DEVNULL if derived else None,
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            env=env,
+            timeout=timeout_seconds,
+            check=False,
+        )
     trigger_result = {
         "command": command,
         "derived_command": derived,

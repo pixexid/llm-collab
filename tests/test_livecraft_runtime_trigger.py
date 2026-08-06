@@ -233,9 +233,52 @@ class LivecraftRuntimeTriggerTest(unittest.TestCase):
         with mock.patch.object(bridge, "livecraft_starter_binding_status", return_value=(
             False, bridge.LIVECRAFT_STARTER_CONTEXT_MISSING_REASON,
         )), mock.patch.object(bridge.subprocess, "run") as run:
-            result = bridge.execute_runtime_trigger(session, {"path": "Chats/wake.md"})
+            result = bridge.execute_runtime_trigger(
+                session,
+                {
+                    "path": "Chats/wake.md",
+                    "frontmatter": {"title": "wake", "from": "claude"},
+                },
+            )
         self.assertEqual(1, result["returncode"])
         self.assertEqual(bridge.LIVECRAFT_STARTER_CONTEXT_MISSING_REASON, result["status"])
+        run.assert_not_called()
+
+    def test_execute_runtime_trigger_rechecks_starter_under_wake_fence(self):
+        fingerprint = {
+            "cwd": "/repo", "provider": "zai", "model_id": "glm-5.2", "thinking_level": "max",
+        }
+        session = {
+            "session_id": "SESSION-LIVECRAFT-GLMPI",
+            "agent_id": "glmpi",
+            "project_id": "llm-collab", "chat_id": "CHAT-82A03B1D",
+            "endpoint_id": "endpoint_pi_livecraft_local",
+            "binding_id": "binding-livecraft", "binding_generation": 2,
+            "pi_fingerprint": fingerprint,
+            "runtime": {
+                "family": "pi", "session_id": "native", "session_source": "/pi/session.jsonl",
+                "home": "/pi", "command": ["python3", "wake.py"],
+            },
+        }
+        with mock.patch.object(
+            bridge, "livecraft_starter_binding_status",
+            side_effect=[
+                (True, None),
+                (False, bridge.LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON),
+            ],
+        ) as starter_status, \
+             mock.patch.object(bridge, "read_pi_session_fingerprint", return_value=fingerprint), \
+             mock.patch.object(bridge.subprocess, "run") as run:
+            result = bridge.execute_runtime_trigger(
+                session,
+                {
+                    "path": "Chats/wake.md",
+                    "frontmatter": {"title": "wake", "from": "claude"},
+                },
+            )
+        self.assertEqual(2, starter_status.call_count)
+        self.assertEqual(1, result["returncode"])
+        self.assertEqual(bridge.LIVECRAFT_STARTER_CONTEXT_MISMATCH_REASON, result["status"])
         run.assert_not_called()
 
 

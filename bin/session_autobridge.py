@@ -652,12 +652,8 @@ def register_session(args) -> dict:
     if not runtime:
         runtime = None
 
-    session_binding_generation = _next_session_binding_generation(
-        existing, args, runtime,
-    )
-
-    payload = {
-        **existing,
+    session_binding_generation = None
+    fixed_payload = {
         "session_id": args.session,
         "agent_id": args.agent,
         "agent_activation_type": agent.get("activation", {}).get("type"),
@@ -671,12 +667,10 @@ def register_session(args) -> dict:
         "lease_expires_utc": lease_expires_utc,
         "runtime": runtime,
         "supersedes_session_id": args.supersedes_session,
-        "created_utc": existing.get("created_utc", utc_iso()),
         "processed_messages": existing.get("processed_messages", []),
     }
-    if session_binding_generation is not None:
-        payload["session_binding_generation"] = session_binding_generation
     starter_context_raw = getattr(args, "starter_context", None)
+    starter_context = None
     if starter_context_raw is not None:
         try:
             starter_context = normalize_starter_binding_context(
@@ -686,8 +680,14 @@ def register_session(args) -> dict:
             )
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"--starter-context is invalid: {error}") from error
-        payload["starter_binding"] = starter_context
     repo_targets = getattr(args, "repo_targets", None)
+    payload = {
+        **existing,
+        **fixed_payload,
+        "created_utc": existing.get("created_utc", utc_iso()),
+    }
+    if starter_context is not None:
+        payload["starter_binding"] = starter_context
     if repo_targets is not None:
         payload["repo_targets"] = repo_targets
     # Pi dispatch requires the canonical binding to exist. If the native extension
@@ -793,6 +793,26 @@ def register_session(args) -> dict:
                 "routable registration"
             )
         with _session_write_lock():
+            try:
+                locked_existing = load_session(args.session)
+            except FileNotFoundError:
+                locked_existing = {}
+            existing = locked_existing
+            session_binding_generation = _next_session_binding_generation(
+                existing, args, runtime,
+            )
+            fixed_payload["processed_messages"] = existing.get("processed_messages", [])
+            payload = {
+                **existing,
+                **fixed_payload,
+                "created_utc": existing.get("created_utc", utc_iso()),
+            }
+            if starter_context is not None:
+                payload["starter_binding"] = starter_context
+            if repo_targets is not None:
+                payload["repo_targets"] = repo_targets
+            if session_binding_generation is not None:
+                payload["session_binding_generation"] = session_binding_generation
             refuse_native_session_active_elsewhere(
                 args.session, args.project, args.chat,
                 gh468_native_session_id, gh468_native_family, args.status

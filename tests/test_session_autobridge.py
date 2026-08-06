@@ -532,6 +532,57 @@ class SessionAutobridgeTest(unittest.TestCase):
         updated = json.loads(session_path.read_text())
         self.assertEqual(2, updated["session_binding_generation"])
 
+    def test_non_pi_generation_is_recomputed_inside_registration_lock(self):
+        old = {
+            "session_id": "SESSION-CLAUDE", "agent_id": "claude",
+            "project_id": "amiga", "chat_id": "CHAT-STARTER", "status": "active",
+            "runtime": {"family": "claude_app", "session_id": "THREAD-OLD"},
+            "session_binding_generation": 1, "repo_targets": ["app"],
+        }
+        current = {
+            **old,
+            "runtime": {"family": "claude_app", "session_id": "THREAD-CURRENT"},
+            "session_binding_generation": 2,
+        }
+        args = argparse.Namespace(
+            session="SESSION-CLAUDE", agent="claude", project="amiga", chat="CHAT-STARTER",
+            repo_targets=["app"], mode="manual", status="active", wake_strategy="none",
+            lease_owner=None, ttl_seconds=3600, allowed_actions=[], runtime_family="claude_app",
+            runtime_session_id="THREAD-OLD", runtime_session_source="runtime", runtime_home=None,
+            runtime_command=None, runtime_timeout=30, supersedes_session=None, starter_context=None,
+        )
+
+        class Fence:
+            entered = False
+
+            def __enter__(self):
+                self.entered = True
+
+            def __exit__(self, *_args):
+                return False
+
+        fence = Fence()
+        reads = []
+
+        def read_session(_session_id):
+            reads.append(fence.entered)
+            return old if len(reads) == 1 else current
+
+        with patch.object(session_autobridge_cli, "get_agent", return_value={"activation": {}}), \
+             patch.object(session_autobridge_cli, "load_session", side_effect=read_session), \
+             patch.object(session_autobridge_cli, "_session_write_lock", return_value=fence), \
+             patch.object(session_autobridge_cli, "refuse_native_session_active_elsewhere"), \
+             patch.object(session_autobridge_cli, "prepare_session_write", side_effect=lambda payload: (payload, "{}")), \
+             patch.object(session_autobridge_cli, "existing_binding_snapshot_or_refuse", return_value={}), \
+             patch.object(session_autobridge_cli, "update_binding_from_session", return_value=None), \
+             patch.object(session_autobridge_cli, "save_session") as save:
+            session_autobridge_cli.register_session(args)
+
+        self.assertEqual([False, True], reads)
+        saved = save.call_args.args[0]
+        self.assertEqual(3, saved["session_binding_generation"])
+        self.assertEqual("THREAD-OLD", saved["runtime"]["session_id"])
+
     # ---- GH-468: a native session may back at most one ACTIVE chat lease ----
     OWNER_FAMILY = "claude_app"
 
