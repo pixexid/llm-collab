@@ -180,8 +180,8 @@ class BbTransportResult:
 
 
 # A transport takes argv (without the `bb` prefix) plus a deadline and returns a
-# BbTransportResult, or raises BbTransportTimeout. Injecting it is what lets the
-# Slice 1A tests run entirely on recorded fixtures with no live bb server.
+# BbTransportResult, or raises BbTransportTimeout/BbResponseTooLarge. Injecting it is what lets
+# the Slice 1A tests run entirely on recorded fixtures with no live bb server.
 #
 # A transport OWNS its own read bound: by the time it returns, both streams are
 # already materialized, so the client's MAX_RESPONSE_CHARS check can refuse an
@@ -698,6 +698,11 @@ class BbClient:
     def _call(self, argv: Sequence[str]) -> BbTransportResult | BbRefusal:
         try:
             result = self._transport(argv, self._timeout_seconds)
+        except BbResponseTooLarge as exc:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                str(exc) or "response exceeded the transport bound",
+            )
         except BbTransportTimeout as exc:
             return BbRefusal(REFUSAL_TIMED_OUT, str(exc) or " ".join(argv))
         # Bound both streams BEFORE either is parsed or interpolated into a
@@ -804,25 +809,42 @@ def subprocess_transport(
             stderr=subprocess.PIPE,
             text=True,
         )
+        pool = ThreadPoolExecutor(max_workers=2)
+        aborting = False
+
+        def kill_child() -> None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            process.wait()
+
         try:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                out = pool.submit(_read_bounded, process.stdout, max_response_chars)
-                err = pool.submit(_read_bounded, process.stderr, max_response_chars)
-                stdout = out.result(timeout=timeout_seconds)
-                stderr = err.result(timeout=timeout_seconds)
+            out = pool.submit(_read_bounded, process.stdout, max_response_chars)
+            err = pool.submit(_read_bounded, process.stderr, max_response_chars)
+            stdout = out.result(timeout=timeout_seconds)
+            stderr = err.result(timeout=timeout_seconds)
             exit_code = process.wait(timeout=timeout_seconds)
         except FuturesTimeout as exc:
-            process.kill()
+            aborting = True
+            kill_child()
             raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
         except subprocess.TimeoutExpired as exc:
-            process.kill()
+            aborting = True
+            kill_child()
             raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
         except BbResponseTooLarge:
             # Kill before re-raising: the child is still writing, and leaving it
             # running would keep producing output nobody will read.
-            process.kill()
+            aborting = True
+            kill_child()
             raise
         finally:
+            # A timed-out/oversized reader must never be joined before the child
+            # is dead: it may still hold the pipe open and turn the deadline into
+            # a watcher-wide hang. The pipes are closed below so those readers
+            # can unwind without delaying this call.
+            pool.shutdown(wait=not aborting, cancel_futures=True)
             for pipe in (process.stdout, process.stderr):
                 if pipe is not None:
                     pipe.close()

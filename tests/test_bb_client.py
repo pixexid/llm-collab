@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -524,6 +525,22 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
+    def test_native_overflow_is_ambiguous_for_tasks_but_malformed_for_reads(self):
+        """A native stream overflow must use the same task/read split as post-return bounds."""
+        task_client, _ = spawning_client(
+            **{"thread spawn": BbResponseTooLarge("native stdout exceeded the bound")}
+        )
+        task_outcome = spawn(task_client)
+        self.assertIsInstance(task_outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, task_outcome.reason)
+
+        read_client, _ = enabled_client(
+            {"thread show": BbResponseTooLarge("native stdout exceeded the bound")}
+        )
+        read_outcome = read_client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(read_outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, read_outcome.reason)
+
     def test_an_undecodable_task_response_is_ambiguous_not_a_clean_failure(self):
         """bb exited 0, so the thread exists; only its report was unreadable.
 
@@ -853,3 +870,21 @@ class ProductionTransportTest(unittest.TestCase):
         transport = subprocess_transport(self._python("import time; time.sleep(30)"))
         with self.assertRaises(BbTransportTimeout):
             transport([], 0.5)
+
+    def test_timeout_kills_child_before_waiting_for_readers(self):
+        """Partial output plus open pipes must not make the deadline wait for EOF."""
+        script = (
+            "import sys,time; "
+            "sys.stdout.write('partial'); sys.stdout.flush(); "
+            "sys.stderr.write('partial'); sys.stderr.flush(); "
+            "time.sleep(2)"
+        )
+        transport = subprocess_transport(self._python(script))
+        started = time.monotonic()
+        with self.assertRaises(BbTransportTimeout):
+            transport([], 0.2)
+        self.assertLess(
+            time.monotonic() - started,
+            1.0,
+            "timeout returned only after the child released its reader pipes",
+        )
