@@ -19,9 +19,11 @@ from llm_collab.codex_app_server_live_probe import (
     _required_string,
     CodexAppServerLiveProbeError,
 )
+from llm_collab.managed_start_errors import ManagedStartOrphaned, ManagedStartResponseLost
 
 
 THREAD_START_METHOD = "thread/start"
+SUPPORTED_CODEX_CLI_VERSIONS = frozenset(("0.146.0", "0.147.0-alpha.1.2"))
 _THREAD_START_ALLOWED_METHODS = frozenset((THREAD_START_METHOD, THREAD_READ_METHOD))
 _THREAD_START_REQUIRED_FIELDS = frozenset(
     (
@@ -89,15 +91,36 @@ class ManagedCodexStartConfig:
     sandbox_request: str
     sandbox_response: Mapping[str, object]
     approvals_reviewer: str = "user"
+    ephemeral: bool = True
+    expected_user_agent_prefix: str = "llm-collab/0.146.0"
+    expected_cli_version: str = "0.146.0"
 
     def start_params(self) -> dict[str, object]:
         return {
             "approvalPolicy": self.approval_policy,
             "cwd": self.canonical_cwd,
-            "ephemeral": True,
+            "ephemeral": self.ephemeral,
             "model": self.model,
             "sandbox": self.sandbox_request,
         }
+
+
+def _recoverable_thread_id(result: object) -> str | None:
+    """Extract only a bounded exact identity from a post-start response."""
+    if not isinstance(result, Mapping):
+        return None
+    thread = result.get("thread")
+    value = thread.get("id") if isinstance(thread, Mapping) else None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > 256
+        or "\x00" in value
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+        or value.casefold() in {"*", "current", "frontmost", "latest", "newest"}
+    ):
+        return None
+    return value
 
 
 class ManagedCodexStartTransport:
@@ -114,8 +137,13 @@ class ManagedCodexStartTransport:
         if self._used:
             raise ManagedCodexStartError("managed-start connection is single-use")
         self._used = True
+        start_attempted = False
+        native_thread_id: str | None = None
         try:
-            _minimal_initialize(self.connection)
+            self._validate_initialize(_minimal_initialize(self.connection))
+            # Everything after this point is retry-suppressing. The server may
+            # create the thread before the response is lost or rejected locally.
+            start_attempted = True
             start_result = _request(
                 self.connection,
                 2,
@@ -123,6 +151,7 @@ class ManagedCodexStartTransport:
                 self.config.start_params(),
                 allowed_methods=_THREAD_START_ALLOWED_METHODS,
             )
+            native_thread_id = _recoverable_thread_id(start_result)
             thread = self._validate_start_result(start_result)
             native_thread_id = _required_string(thread, "id")
             read_result = _request(
@@ -135,12 +164,50 @@ class ManagedCodexStartTransport:
             )
             read_thread = self._validate_read_result(read_result, native_thread_id)
             return self._candidate(start_result, thread, read_thread, native_thread_id)
+        except (ManagedStartOrphaned, ManagedStartResponseLost):
+            raise
         except ManagedCodexStartError:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise
         except CodexAppServerLiveProbeError as error:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise ManagedCodexStartError(str(error)) from error
         except Exception as error:
+            if start_attempted:
+                self._raise_post_start(native_thread_id)
             raise ManagedCodexStartError("managed-start exchange failed") from error
+
+    @staticmethod
+    def _raise_post_start(native_thread_id: str | None) -> None:
+        if native_thread_id is None:
+            raise ManagedStartResponseLost(
+                "thread/start may have succeeded but no exact native identity was recoverable"
+            )
+        raise ManagedStartOrphaned(
+            "thread/start returned a native identity but completion failed",
+            native_session_id=native_thread_id,
+        )
+
+    def _validate_initialize(self, result: Mapping[str, Any]) -> None:
+        if self.config.expected_cli_version not in SUPPORTED_CODEX_CLI_VERSIONS:
+            raise ManagedCodexStartError("unsupported Codex CLI version")
+        if result.get("codexHome") != self.config.runtime_home_realpath:
+            raise ManagedCodexStartError(
+                "initialize codexHome does not match the expected runtime home"
+            )
+        user_agent = result.get("userAgent")
+        if (
+            not isinstance(self.config.expected_user_agent_prefix, str)
+            or not self.config.expected_user_agent_prefix
+            or not self.config.expected_user_agent_prefix.endswith(
+                "/" + self.config.expected_cli_version
+            )
+            or not isinstance(user_agent, str)
+            or not user_agent.startswith(self.config.expected_user_agent_prefix)
+        ):
+            raise ManagedCodexStartError("unsupported App Server user agent")
 
     def _validate_start_result(self, result: Mapping[str, Any]) -> Mapping[str, Any]:
         fields = set(result)
@@ -164,7 +231,9 @@ class ManagedCodexStartTransport:
             raise ManagedCodexStartError("thread/start approvals reviewer mismatch")
         if not isinstance(result["sandbox"], Mapping):
             raise ManagedCodexStartError("thread/start sandbox is invalid")
-        return _required_mapping(result, "thread")
+        thread = _required_mapping(result, "thread")
+        self._validate_thread(thread, _required_string(thread, "id"))
+        return thread
 
     def _validate_read_result(
         self, result: Mapping[str, Any], expected_thread_id: str
@@ -172,15 +241,24 @@ class ManagedCodexStartTransport:
         if set(result) != {"thread"}:
             raise ManagedCodexStartError("thread/read result has unexpected fields")
         thread = _required_mapping(result, "thread")
-        if set(thread) < _THREAD_REQUIRED_FIELDS:
-            raise ManagedCodexStartError("thread/read thread is missing required fields")
-        if _required_string(thread, "id") != expected_thread_id:
-            raise ManagedCodexStartError("thread/read returned a different thread id")
-        if thread.get("cwd") != self.config.canonical_cwd:
-            raise ManagedCodexStartError("thread/read cwd mismatch")
-        if thread.get("modelProvider") != self.config.model_provider:
-            raise ManagedCodexStartError("thread/read model provider mismatch")
+        self._validate_thread(thread, expected_thread_id)
         return thread
+
+    def _validate_thread(
+        self, thread: Mapping[str, Any], expected_thread_id: str
+    ) -> None:
+        if set(thread) < _THREAD_REQUIRED_FIELDS:
+            raise ManagedCodexStartError("thread is missing required fields")
+        if _required_string(thread, "id") != expected_thread_id:
+            raise ManagedCodexStartError("thread returned a different thread id")
+        if thread.get("cwd") != self.config.canonical_cwd:
+            raise ManagedCodexStartError("thread cwd mismatch")
+        if thread.get("modelProvider") != self.config.model_provider:
+            raise ManagedCodexStartError("thread model provider mismatch")
+        if thread.get("cliVersion") != self.config.expected_cli_version:
+            raise ManagedCodexStartError("thread CLI version mismatch")
+        if thread.get("ephemeral") is not self.config.ephemeral:
+            raise ManagedCodexStartError("thread persistence mismatch")
 
     def _candidate(
         self,

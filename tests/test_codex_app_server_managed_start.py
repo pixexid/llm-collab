@@ -7,6 +7,7 @@ from llm_collab.codex_app_server_managed_start import (
     ManagedCodexStartError,
     ManagedCodexStartTransport,
 )
+from llm_collab.session_lifecycle import ManagedStartOrphaned, ManagedStartResponseLost
 
 
 THREAD_ID = "019f9452-6954-7301-bff9-db1c47432bc8"
@@ -43,7 +44,12 @@ def start_result(thread_id=THREAD_ID):
 
 
 class FakeAppServer:
-    def __init__(self, *, start=None, read=None, start_response_id=None, read_response_id=None):
+    def __init__(self, *, initialize=None, start=None, read=None,
+                 start_response_id=None, read_response_id=None):
+        self.initialize = initialize if initialize is not None else {
+            "codexHome": "/trusted/codex-home",
+            "userAgent": "llm-collab/0.146.0",
+        }
         self.start = start if start is not None else start_result()
         self.read = read if read is not None else {"thread": thread()}
         self.start_response_id = start_response_id
@@ -55,7 +61,7 @@ class FakeAppServer:
         self.requests.append(frame)
         method = frame["method"]
         if method == "initialize":
-            return {"jsonrpc": "2.0", "id": frame["id"], "result": {}}
+            return {"jsonrpc": "2.0", "id": frame["id"], "result": self.initialize}
         if method == "thread/start":
             response_id = self.start_response_id or frame["id"]
             return self.start if isinstance(self.start, str) else {
@@ -123,42 +129,62 @@ class ManagedCodexStartTransportTests(unittest.TestCase):
         # The fake result is intentionally not a valid result envelope; use a raw
         # envelope so the shared parser sees the native JSON-RPC error.
         fake.start = '{"jsonrpc":"2.0","id":"llm-collab-2","error":{"code":-1}}'
-        with self.assertRaises(ManagedCodexStartError):
+        with self.assertRaises(ManagedStartResponseLost):
             ManagedCodexStartTransport(fake, config=config())("start")
+
+    def test_runtime_home_mismatch_fails_before_thread_start(self):
+        fake = FakeAppServer(initialize={
+            "codexHome": "/foreign/home",
+            "userAgent": "llm-collab/0.146.0",
+        })
+        with self.assertRaisesRegex(ManagedCodexStartError, "runtime home"):
+            ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(["initialize"], [frame["method"] for frame in fake.requests])
+
+    def test_cli_version_drift_after_start_is_retry_suppressing(self):
+        drifted = thread()
+        drifted["cliVersion"] = "0.147.0"
+        fake = FakeAppServer(start={**start_result(), "thread": drifted})
+        with self.assertRaises(ManagedStartOrphaned) as caught:
+            ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(THREAD_ID, caught.exception.native_session_id)
 
     def test_mismatched_start_response_id_is_rejected(self):
         fake = FakeAppServer(start_response_id="other-id")
-        with self.assertRaisesRegex(ManagedCodexStartError, "response id mismatch"):
+        with self.assertRaises(ManagedStartResponseLost):
             ManagedCodexStartTransport(fake, config=config())("start")
 
     def test_mismatched_read_response_id_is_rejected(self):
         fake = FakeAppServer(read_response_id="other-id")
-        with self.assertRaisesRegex(ManagedCodexStartError, "response id mismatch"):
+        with self.assertRaises(ManagedStartOrphaned) as caught:
             ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(THREAD_ID, caught.exception.native_session_id)
 
     def test_readback_id_mismatch_is_rejected(self):
         fake = FakeAppServer(read={"thread": thread("different-thread")})
-        with self.assertRaisesRegex(ManagedCodexStartError, "different thread id"):
+        with self.assertRaises(ManagedStartOrphaned) as caught:
             ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(THREAD_ID, caught.exception.native_session_id)
 
     def test_missing_create_field_is_rejected_and_is_load_bearing(self):
         malformed = start_result()
         del malformed["sandbox"]
         fake = FakeAppServer(start=malformed)
-        with self.assertRaisesRegex(ManagedCodexStartError, "missing required fields"):
+        with self.assertRaises(ManagedStartOrphaned) as caught:
             ManagedCodexStartTransport(fake, config=config())("start")
+        self.assertEqual(THREAD_ID, caught.exception.native_session_id)
 
     def test_attach_shaped_result_is_rejected(self):
         attach_shaped = {"thread": thread()}
         fake = FakeAppServer(start=attach_shaped)
-        with self.assertRaises(ManagedCodexStartError):
+        with self.assertRaises(ManagedStartOrphaned):
             ManagedCodexStartTransport(fake, config=config())("start")
 
     def test_ambiguous_multiple_threads_are_rejected(self):
         ambiguous = start_result()
         ambiguous["threads"] = [thread(), thread("another-thread")]
         fake = FakeAppServer(start=ambiguous)
-        with self.assertRaises(ManagedCodexStartError):
+        with self.assertRaises(ManagedStartOrphaned):
             ManagedCodexStartTransport(fake, config=config())("start")
 
     def test_duplicate_nested_response_member_is_rejected(self):
@@ -167,13 +193,13 @@ class ManagedCodexStartTransportTests(unittest.TestCase):
             '{"approvalPolicy":"never","approvalPolicy":"never"}}'
         )
         fake = FakeAppServer(start=raw)
-        with self.assertRaises(ManagedCodexStartError):
+        with self.assertRaises(ManagedStartResponseLost):
             ManagedCodexStartTransport(fake, config=config())("start")
 
     def test_server_initiated_request_is_rejected(self):
         raw = '{"jsonrpc":"2.0","id":"server-1","method":"item/permissions/requestApproval","params":{}}'
         fake = FakeAppServer(start=raw)
-        with self.assertRaises(ManagedCodexStartError):
+        with self.assertRaises(ManagedStartResponseLost):
             ManagedCodexStartTransport(fake, config=config())("start")
 
     def test_connection_is_single_use(self):

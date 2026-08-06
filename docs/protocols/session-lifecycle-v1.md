@@ -57,20 +57,28 @@ The registry entry defines:
 - whether the provider may create a fresh native session, attach an existing
   one, or only inspect.
 
-The merged providers deliberately occupy three different roles; they MUST NOT
+The merged providers deliberately occupy distinct roles; they MUST NOT
 be treated as one interchangeable implementation pattern:
 
-1. **IDENTITY-ONLY attester** — Codex, and incoming Claude/OpenCode providers,
+1. **IDENTITY-ONLY attester** — Codex provider revision 1, and incoming Claude/OpenCode providers,
    call an injected exact-evidence source first, compare the exact native ID,
    then construct `SessionRefV1`; they support exactly `reserve` and `attach`,
    and `open_ui` fails closed. New attached-session providers MUST mirror only
    this role.
-2. **START-FIXTURE** — `FakeLifecycleProvider` directly constructs
+2. **MANAGED CODEX START** — Codex provider revision 2 advertises only `start`.
+   It consumes the same exact attester through the managed-start reservation
+   saga and does not alter revision 1's already-approved descriptor.
+3. **START-FIXTURE** — `FakeLifecycleProvider` directly constructs
    `SessionRefV1`, advertises the broad default operations including `start` and
    presentation-only `open_ui`, and exists for tests/inert managed-start work.
-3. **NATIVE-ATTACHED** — `PiLifecycleProvider` independently owns the
+4. **NATIVE-ATTACHED** — `PiLifecycleProvider` independently owns the
    authority/descriptor/attestation plumbing for the native Pi extension path
    and retains presentation-only `open_ui`.
+
+Provider registration accepts any unique subset of the closed lifecycle
+operation vocabulary. The operation that consumes a descriptor enforces its own
+required capability (`reserve`, `start`, and so on); registration does not
+silently add or require an unrelated operation.
 
 Untrusted payloads, remote messages, adapter output, window titles, cwd claims,
 display labels, "latest", sidebar order, and AX state cannot select a lifecycle
@@ -156,11 +164,42 @@ compound participant. `reserved`, `ambiguous_start`, and `failed` rows carry no
 native session, SessionRef, or evidence digest. `orphaned`, `bound`, and
 `retired` rows retain the exact validated native identity and evidence digest.
 
-A lost start response becomes `ambiguous_start` and MUST NOT trigger a blind
-retry. A validated native start whose binding transaction fails becomes
-`orphaned`; later cleanup may retire only that exact re-attested native session.
-A failed start with no validated native identity becomes `failed`. None of
-these paths may select a replacement by latest, frontmost, or display state.
+A failure proven before the native start becomes `failed`. Once the native start
+may have run, every later failure is retry-suppressing: a fully validated native
+identity and SessionRef become `orphaned`, while a lost response or incomplete
+validation becomes `ambiguous_start`. Neither state may trigger a blind retry;
+later cleanup may retire only an exact re-attested orphan. None of these paths
+may select a replacement by latest, frontmost, or display state.
+
+The production Codex start is deliberately two commands. Trusted setup first
+pre-approves the immutable revision-2 descriptor for the workspace. The
+`--project` argument selects a registered project configuration in that
+workspace; it does not narrow the provider approval to that project:
+
+```bash
+bin/llm-collab worker.py approve-codex-start --project <project>
+```
+
+Only then may the worker operation consume it:
+
+```bash
+bin/llm-collab worker.py start-codex <worker_id> \
+  --project <project> --repo-id <repo> --cwd <exact-worktree-cwd> \
+  --codex-home <exact-CODEX_HOME> --endpoint ws://127.0.0.1:<port> \
+  --token-file <token-file> --endpoint-id <endpoint-id> \
+  --runtime-instance <runtime-instance-id> --model <model>
+```
+
+`start-codex` accepts only a loopback WebSocket, proves that `cwd` belongs to
+the configured repository through the exact Git common directory, pins one
+no-follow descriptor chain through that worktree and cwd, and validates the
+App Server runtime home and supported CLI version before `thread/start`. It
+creates one persistent thread with `approvalPolicy=never` and a read-only
+sandbox, then performs an exact same-connection `thread/read`; it never issues
+`turn/start`. `--expected-cli-version` defaults to the exercised Codex 0.146.0
+contract and accepts only exact values in the closed
+`SUPPORTED_CODEX_CLI_VERSIONS` allowlist. Runtime-home, user-agent, and thread
+version checks still fail closed for whichever exact value is selected.
 
 ## Dispatch freeze
 

@@ -23,7 +23,10 @@ from llm_collab.daemon.gate import (
     read_exact_nofollow,
     read_exact_nofollow_at,
 )
-from llm_collab.codex_session_ref import RepositoryDescriptorChain
+from llm_collab.codex_session_ref import (
+    RepositoryDescriptorChain,
+    open_repository_descriptor_chain as _open_repository_descriptor_chain,
+)
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 REQUEST_LIMIT = 4 * 1024
@@ -171,56 +174,6 @@ def _resolve_authoritative_repo(
     else:
         descriptor_chain_out.append(descriptor_chain)
     return repo_id, str(repo_root), str(cwd)
-
-
-def _open_repository_descriptor_chain(
-    repo_root: Path,
-    cwd: Path,
-    *,
-    base_fd: int | None = None,
-    relative_root_parts: tuple[str, ...] | None = None,
-) -> RepositoryDescriptorChain:
-    """Open one no-follow descriptor chain from filesystem root through cwd."""
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise OSError("O_NOFOLLOW is required to pin repository authority")
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-    fds: list[int] = []
-    try:
-        if base_fd is None:
-            fd = os.open(os.sep, flags)
-            fds.append(fd)
-            for part in repo_root.parts[1:]:
-                fd = os.open(part, flags, dir_fd=fd)
-                fds.append(fd)
-        else:
-            if relative_root_parts is None:
-                raise ValueError("relative repository parts are required with base_fd")
-            fd = os.dup(base_fd)
-            fds.append(fd)
-            for part in relative_root_parts:
-                fd = os.open(part, flags, dir_fd=fd)
-                fds.append(fd)
-        root_index = len(fds) - 1
-        relative_cwd = cwd.relative_to(repo_root)
-        for part in relative_cwd.parts:
-            fd = os.open(part, flags, dir_fd=fd)
-            fds.append(fd)
-        cwd_index = len(fds) - 1
-        stats = tuple(os.fstat(fd) for fd in fds)
-        if not all(stat.S_ISDIR(info.st_mode) for info in stats):
-            raise OSError("repository descriptor chain contains a non-directory")
-        identities = tuple((info.st_dev, info.st_ino, info.st_mode) for info in stats)
-        return RepositoryDescriptorChain(
-            tuple(fds), root_index, cwd_index, str(repo_root), str(cwd), identities,
-        )
-    except Exception:
-        for fd in reversed(fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        raise
 
 
 # The probe's COVERAGE, not a claim that verification happened. `ok` alone would

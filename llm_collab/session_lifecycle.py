@@ -20,18 +20,21 @@ from llm_collab.codex_session_ref import (
 )
 from llm_collab.ledger import LedgerStore
 from llm_collab.ledger.store import CanonicalConflictError
+from llm_collab.managed_start_errors import (
+    ManagedStartOrphaned,
+    ManagedStartResponseLost,
+    SessionLifecycleError,
+)
 
 if TYPE_CHECKING:
     from llm_collab.claude_attach_evidence import ClaudeAttachEvidenceResult
 
 
-class SessionLifecycleError(ValueError):
-    """Raised when lifecycle attestation or state transition fails closed."""
-
-
 DEFAULT_SUPPORTED_OPERATIONS_JSON = (
     '["reserve","start","attach","inspect","heartbeat","retire","open_ui"]'
 )
+CODEX_MANAGED_START_PROVIDER_REVISION = "revision_2"
+CODEX_MANAGED_START_SUPPORTED_OPERATIONS_JSON = '["start"]'
 
 
 @dataclass(frozen=True)
@@ -129,10 +132,6 @@ class ManagedStartRequest:
     agent_id: str
     endpoint_id: str
     runtime_instance_id: str
-
-
-class ManagedStartResponseLost(SessionLifecycleError):
-    """The native start request may have succeeded but its response was lost."""
 
 
 @dataclass(frozen=True)
@@ -848,7 +847,7 @@ class SessionLifecycleCore:
         correlation_id: str,
         start_native: Callable[[str], Mapping[str, object]],
     ) -> dict[str, object]:
-        """Run the fake/provider start saga without enabling live transport."""
+        """Fence, attest, and bind one provider-owned native start."""
         if not isinstance(request, ManagedStartRequest):
             raise SessionLifecycleError("managed start request is invalid")
         if request.scope_kind != "project" or request.scope_identity != trusted_project_root.project_id:
@@ -879,6 +878,64 @@ class SessionLifecycleCore:
         )
         try:
             candidate = start_native(start_id)
+        except ManagedStartOrphaned as error:
+            orphan_subject = LifecycleSubject(
+                workspace_id=request.workspace_id,
+                scope_kind=request.scope_kind,
+                scope_identity=request.scope_identity,
+                conversation_id=request.conversation_id,
+                participant_id=request.participant_id,
+                agent_id=request.agent_id,
+                endpoint_id=request.endpoint_id,
+                native_session_id=error.native_session_id,
+                runtime_instance_id=request.runtime_instance_id,
+            )
+            try:
+                orphan_ref = self.provider.attest(
+                    orphan_subject,
+                    runtime_home=runtime_home,
+                    observed_at_utc=created_at_utc,
+                    correlation_id=correlation_id,
+                    trusted_project_root=trusted_project_root,
+                )
+            except Exception as attest_error:
+                ambiguous = ManagedStartResponseLost(
+                    "native start returned an identity but exact re-attestation failed",
+                    native_session_id=error.native_session_id,
+                )
+                store.mark_managed_start(
+                    workspace_id=request.workspace_id,
+                    start_id=start_id,
+                    state="ambiguous_start",
+                    updated_at_utc=created_at_utc,
+                    failure_reason=type(attest_error).__name__,
+                )
+                raise ambiguous from attest_error
+            orphan_ref_id = str(orphan_ref["session_ref_id"])
+            store.mark_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                state="orphaned",
+                updated_at_utc=created_at_utc,
+                failure_reason=type(error).__name__,
+                native_session_id=error.native_session_id,
+                session_ref_id=orphan_ref_id,
+                evidence_sha256=_sha256_text(
+                    "|".join(
+                        (
+                            "managed-start-orphan-v1",
+                            request.workspace_id,
+                            request.scope_identity,
+                            request.conversation_id,
+                            request.participant_id,
+                            error.native_session_id,
+                            orphan_ref_id,
+                            type(error).__name__,
+                        )
+                    )
+                ),
+            )
+            raise
         except ManagedStartResponseLost:
             store.mark_managed_start(
                 workspace_id=request.workspace_id,
@@ -963,22 +1020,30 @@ class SessionLifecycleCore:
                 store.mark_managed_start(
                     workspace_id=request.workspace_id,
                     start_id=start_id,
-                    state="failed",
+                    state="ambiguous_start",
                     updated_at_utc=created_at_utc,
                     failure_reason=type(error).__name__,
                 )
-            else:
-                store.mark_managed_start(
-                    workspace_id=request.workspace_id,
-                    start_id=start_id,
-                    state="orphaned",
-                    updated_at_utc=created_at_utc,
-                    failure_reason=type(error).__name__,
-                    native_session_id=evidence.native_thread_id,
-                    session_ref_id=session_ref_id,
-                    evidence_sha256=codex_start_evidence_digest(evidence),
-                )
-            raise
+                raise ManagedStartResponseLost(
+                    "native start returned but exact completion failed",
+                    native_session_id=(
+                        evidence.native_thread_id if evidence is not None else None
+                    ),
+                ) from error
+            store.mark_managed_start(
+                workspace_id=request.workspace_id,
+                start_id=start_id,
+                state="orphaned",
+                updated_at_utc=created_at_utc,
+                failure_reason=type(error).__name__,
+                native_session_id=evidence.native_thread_id,
+                session_ref_id=session_ref_id,
+                evidence_sha256=codex_start_evidence_digest(evidence),
+            )
+            raise ManagedStartOrphaned(
+                "native start returned an exact identity but binding failed",
+                native_session_id=evidence.native_thread_id,
+            ) from error
         return {
             "start_id": start_id,
             "evidence": evidence,
