@@ -74,16 +74,21 @@ def _flatten_pages(pages):
     return out
 
 
-def _gh_call(path):
-    """One `gh api` invocation, bounded by a timeout; returns stripped stdout."""
+def _gh_call(path, deadline=None):
+    """One `gh api` invocation, bounded by the shared deadline."""
+    timeout = GH_CALL_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise RuntimeError(f"gh api {path}: watcher deadline reached")
     try:
         r = subprocess.run(
             ["gh", "api", path],
-            capture_output=True, text=True, timeout=GH_CALL_TIMEOUT,
+            capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
-            f"gh api {path} exceeded {GH_CALL_TIMEOUT:.0f}s"
+            f"gh api {path} exceeded {timeout:.3f}s"
         ) from error
     if r.returncode != 0:
         raise RuntimeError(f"gh api {path}: {r.stderr.strip()}")
@@ -113,7 +118,12 @@ def _gh_pages(path, budget=None):
     for page_num in range(1, MAX_PAGES + 1):
         if budget is not None:
             budget.charge(path)
-        body = _gh_call(f"{path}{sep}per_page={PER_PAGE}&page={page_num}")
+        request_path = f"{path}{sep}per_page={PER_PAGE}&page={page_num}"
+        body = (
+            _gh_call(request_path)
+            if budget is None or budget.deadline is None
+            else _gh_call(request_path, budget.deadline)
+        )
         if not body:
             break
         value = json.loads(body)
@@ -267,15 +277,19 @@ def settle_after_push(repo, pr, interval, timeout):
     started = time.monotonic()
     deadline = started + timeout
     last = None
+    tail_snapshot_success = False
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining < 0:
             break
         time.sleep(min(interval, remaining))
+        last = None
         try:
             current, _ = snapshot(repo, pr, deadline)
         except RuntimeError as error:
             print(f"WARN: {error}", file=sys.stderr)
+            if time.monotonic() >= deadline:
+                break
             continue
         last = current
         if current["head"] != head:
@@ -296,14 +310,21 @@ def settle_after_push(repo, pr, interval, timeout):
                 "connector_review_oids": current["connector_review_oids"],
             }, indent=2))
             return 0
+        if time.monotonic() >= deadline:
+            tail_snapshot_success = True
+            break
 
-    if last is None:
-        print("ERROR: no successful post-push snapshot during settle window", file=sys.stderr)
+    if not tail_snapshot_success or last is None:
+        print(
+            "ERROR: no successful tail snapshot at the end of the settle window",
+            file=sys.stderr,
+        )
         return 2
+    waited_seconds = min(timeout, max(0.0, time.monotonic() - started))
     print(json.dumps({
         "settle": "no_connector_review",
         "head": head,
-        "waited_seconds": round(time.monotonic() - started, 3),
+        "waited_seconds": round(waited_seconds, 3),
         "connector_review_oids": last.get("connector_review_oids", []),
     }, indent=2))
     return 0

@@ -103,6 +103,13 @@ class PrWatchDiffTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.pw._gh_pages("repos/x/y/issues/1/timeline")
 
+    def test_gh_call_clamps_timeout_to_shared_deadline(self):
+        completed = subprocess.CompletedProcess([], 0, "[]", "")
+        with patch.object(self.pw.subprocess, "run", return_value=completed) as run, \
+                patch.object(self.pw.time, "monotonic", return_value=10.0):
+            self.pw._gh_call("repos/x/y/issues/1/timeline", deadline=15.0)
+        self.assertEqual(5.0, run.call_args.kwargs["timeout"])
+
     def test_page_budget_enforced_during_pagination(self):
         # Every page comes back full, so more always remains: the budget must be
         # spent BEFORE the check — never more than MAX_PAGES requests — then fail
@@ -236,7 +243,7 @@ class PrWatchDiffTest(unittest.TestCase):
     def test_settle_after_push_reports_no_review_after_bounded_window(self):
         base = _sig(connector_review_oids=[])
         snapshots = iter([(base, {}), (base, {})])
-        clock = iter([0.0, 0.0, 1.0, 1.0])
+        clock = iter([0.0, 0.0, 1.0, 1.0, 1.0])
         with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
                 patch.object(self.pw.time, "sleep") as sleep, \
@@ -246,6 +253,18 @@ class PrWatchDiffTest(unittest.TestCase):
         output = "".join(call.args[0] for call in stdout.write.call_args_list)
         self.assertIn('"settle": "no_connector_review"', output)
         self.assertIn('"head":', output)
+
+    def test_settle_after_push_rejects_stale_snapshot_when_tail_poll_fails(self):
+        base = _sig(connector_review_oids=[])
+        snapshots = iter([(base, {}), RuntimeError("transport unavailable")])
+        clock = iter([0.0, 0.0, 1.0, 1.0])
+        with patch.object(self.pw, "snapshot", side_effect=snapshots), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(self.pw.sys, "stderr") as stderr:
+            self.assertEqual(2, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        output = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("tail snapshot", output)
 
     def test_settle_after_push_accepts_review_for_the_captured_head(self):
         head = "a" * 40
