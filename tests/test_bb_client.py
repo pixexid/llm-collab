@@ -931,12 +931,13 @@ class ProductionTransportTest(unittest.TestCase):
             f"launch cost was not charged against the budget: wait got {timed_waits[0]:.2f}s",
         )
 
-    def test_launch_returns_within_bound_while_popen_is_still_stalling(self):
-        """GH-592: the caller's bound runs while Popen itself is blocked."""
+    def test_stalled_launch_returns_without_a_non_daemon_survivor(self):
+        """GH-592: a permanently stalled launch cannot wedge interpreter exit."""
         import llm_collab.bb_client as bb
 
         launch_started = threading.Event()
         launch_finished = threading.Event()
+        release_launch = threading.Event()
         late_killed = threading.Event()
         late_waited = threading.Event()
         launched = []
@@ -944,7 +945,7 @@ class ProductionTransportTest(unittest.TestCase):
         class StalledLaunch:
             def __init__(self, *_args, **_kwargs):
                 launch_started.set()
-                time.sleep(0.8)
+                release_launch.wait()
                 self.stdout = io.StringIO("{}")
                 self.stderr = io.StringIO("")
                 launch_finished.set()
@@ -960,22 +961,39 @@ class ProductionTransportTest(unittest.TestCase):
                 late_killed.set()
 
         transport = subprocess_transport(["irrelevant"])
+        before_threads = set(threading.enumerate())
+        launch_threads = []
         started = time.monotonic()
-        with patch.object(bb.subprocess, "Popen", StalledLaunch):
-            with self.assertRaises(BbTransportTimeout):
-                transport([], 0.2)
-        elapsed = time.monotonic() - started
-        self.assertLess(
-            elapsed,
-            0.5,
-            f"launch call exceeded its bound while Popen was still stalling: {elapsed:.2f}s",
-        )
-        self.assertTrue(launch_started.is_set(), "fake Popen never entered its stall")
-        self.assertFalse(
-            launch_finished.is_set(),
-            "transport returned only after the fake Popen stall finished",
-        )
-        self.assertTrue(late_killed.wait(1.0), "late process was not killed")
+        try:
+            with patch.object(bb.subprocess, "Popen", StalledLaunch):
+                with self.assertRaises(BbTransportTimeout):
+                    transport([], 0.2)
+            elapsed = time.monotonic() - started
+            self.assertLess(
+                elapsed,
+                0.5,
+                f"launch call exceeded its bound while Popen was still stalling: {elapsed:.2f}s",
+            )
+            self.assertTrue(launch_started.is_set(), "fake Popen never entered its stall")
+            self.assertFalse(
+                launch_finished.is_set(),
+                "transport returned only after the fake Popen stall finished",
+            )
+            launch_threads = [
+                thread
+                for thread in threading.enumerate()
+                if thread not in before_threads and thread.name == "bb-subprocess-launch"
+            ]
+            self.assertTrue(launch_threads, "transport created no visible launch thread")
+            self.assertTrue(
+                all(thread.daemon for thread in launch_threads),
+                "stalled launch left a non-daemon launch thread alive",
+            )
+        finally:
+            release_launch.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+        self.assertTrue(late_killed.is_set(), "late process was not killed")
         self.assertTrue(late_waited.is_set(), "late process was not reaped")
         self.assertTrue(launched[0].stdout.closed, "late stdout pipe was not closed")
         self.assertTrue(launched[0].stderr.closed, "late stderr pipe was not closed")

@@ -820,9 +820,7 @@ def subprocess_transport(
         # The budget starts at the launch boundary so whatever Popen costs is
         # subtracted from what the waits below get.
         deadline = time.monotonic() + timeout_seconds
-        pool = ThreadPoolExecutor(max_workers=2)
         process = None
-        aborting = False
 
         def kill_child() -> None:
             assert process is not None
@@ -832,11 +830,7 @@ def subprocess_transport(
                 pass
             process.wait()
 
-        def discard_late_process(launch) -> None:
-            try:
-                late_process = launch.result()
-            except Exception:
-                return
+        def discard_late_process(late_process) -> None:
             try:
                 try:
                     late_process.kill()
@@ -848,13 +842,6 @@ def subprocess_transport(
                     if pipe is not None:
                         pipe.close()
 
-        def discard_late_process_async(launch) -> None:
-            threading.Thread(
-                target=discard_late_process,
-                args=(launch,),
-                daemon=True,
-            ).start()
-
         # ONE end-to-end deadline, established above at the launch boundary.
         def remaining() -> float:
             # Never pass a non-positive timeout: 0 is "poll once and raise",
@@ -862,16 +849,51 @@ def subprocess_transport(
             # negative value is rejected by process.wait().
             return max(0.0, deadline - time.monotonic())
 
-        try:
-            launch = pool.submit(
-                subprocess.Popen,
-                [*bb_executable, *argv],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            process = launch.result(timeout=remaining())
+        launch_done = threading.Event()
+        launch_decided = threading.Event()
+        launch_abandoned = threading.Event()
+        launch_result = []
+        launch_error = []
 
+        def launch_process() -> None:
+            try:
+                launched = subprocess.Popen(
+                    [*bb_executable, *argv],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except BaseException as exc:
+                launch_error.append(exc)
+                launch_done.set()
+                return
+            launch_result.append(launched)
+            launch_done.set()
+            launch_decided.wait()
+            if launch_abandoned.is_set():
+                discard_late_process(launched)
+
+        launch_thread = threading.Thread(
+            target=launch_process,
+            name="bb-subprocess-launch",
+            daemon=True,
+        )
+        launch_thread.start()
+        if not launch_done.wait(timeout=remaining()):
+            launch_abandoned.set()
+            launch_decided.set()
+            raise BbTransportTimeout(
+                f"{' '.join(argv)} exceeded {timeout_seconds}s"
+            )
+        if launch_error:
+            launch_decided.set()
+            raise launch_error[0]
+        process = launch_result[0]
+        launch_decided.set()
+
+        pool = ThreadPoolExecutor(max_workers=2)
+        aborting = False
+        try:
             # Giving each wait a fresh `timeout_seconds` made the configured
             # bound per-wait: a child closing stdout just under the limit, then
             # stderr just under a second limit, returned after nearly twice it,
@@ -884,10 +906,7 @@ def subprocess_transport(
             exit_code = process.wait(timeout=remaining())
         except FuturesTimeout as exc:
             aborting = True
-            if process is not None:
-                kill_child()
-            else:
-                launch.add_done_callback(discard_late_process_async)
+            kill_child()
             raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
         except subprocess.TimeoutExpired as exc:
             aborting = True
