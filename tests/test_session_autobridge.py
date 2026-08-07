@@ -3674,7 +3674,19 @@ class SessionAutobridgeTest(unittest.TestCase):
             chat_id="CHAT-PROTO1",
             project_id="amiga",
         )
-        subprocess.run(
+        self.run_cli(
+            root,
+            "register",
+            "--session", "SESSION-CLAUDE-PROTO",
+            "--agent", "claude",
+            "--project", "amiga",
+            "--chat", "CHAT-PROTO1",
+            "--mode", "notify",
+            "--runtime-family", "claude_app",
+            "--runtime-session-id", "claude-app-session-9",
+            "--runtime-session-source", "first_read",
+        )
+        deliver_result = subprocess.run(
             [
                 sys.executable,
                 str(DELIVER_SCRIPT),
@@ -3712,7 +3724,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         delivered_text = delivered_file.read_text()
         self.assertIn("sender_session_id: codex-app-session-1", delivered_text)
-        self.assertIn("target_session_id: null", delivered_text)
+        self.assertIn("target_session_id: claude-app-session-9", delivered_text)
         self.assertIn("supersedes_session_id: codex-app-session-0", delivered_text)
 
         inbox_result = subprocess.run(
@@ -3729,7 +3741,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             check=True,
         )
         self.assertIn("Sender Session: codex-app-session-1", inbox_result.stdout)
-        self.assertNotIn("Target Session: claude-app-session-9", inbox_result.stdout)
+        self.assertIn("Target Session: claude-app-session-9", inbox_result.stdout)
         self.assertIn("Supersedes: codex-app-session-0", inbox_result.stdout)
 
     def test_discover_runtime_for_codex_remains_read_only_but_inbox_publish_refuses(self):
@@ -4754,7 +4766,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertIsNone(session)
             self.assertEqual(session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON, reason)
 
-    def test_deliver_treats_malformed_binding_as_exact_refusal_and_writes_packet(self):
+    def test_deliver_refuses_malformed_binding_before_writing_packet(self):
         root = self.make_workspace()
         self.add_agent(
             root,
@@ -4811,20 +4823,131 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Write the durable packet even when exact runtime binding is unreadable.",
             capture_output=True,
-            check=True,
+            check=False,
         )
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
-        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
-            result_payload["autobridge_refusal_reason"],
+            result_payload["routing_refusal_reason"],
         )
         self.assertIsNone(result_payload["resolved_target_session_id"])
+        self.assertIn("REFUSED before durable write", deliver_result.stderr)
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
 
-        delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
-        self.assertTrue(delivered_candidates)
-        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
-        self.assertIsNone(frontmatter["target_session_id"])
+    def test_unresolved_worker_target_refuses_before_write_for_amiga_and_non_amiga(self):
+        for project, chat_id in (("amiga", "CHAT-UNBOUND-AMIGA"), ("nuvyr", "CHAT-UNBOUND-NUVYR")):
+            with self.subTest(project=project):
+                root = self.make_workspace()
+                for agent in ("codex", "claude"):
+                    self.add_agent(
+                        root,
+                        {
+                            "id": agent,
+                            "display_name": agent.title(),
+                            "activation": {"type": "cli_session", "watcher_enabled": True},
+                        },
+                    )
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-08-07_unbound__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project,
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "claude",
+                        "--project", project,
+                        "--title", "Unbound worker target",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="This must not become an unroutable packet.",
+                    capture_output=True,
+                    check=False,
+                )
+                payload, _ = json.JSONDecoder().raw_decode(result.stdout.lstrip())
+                self.assertEqual(2, result.returncode, "failures=gh554_unresolved_target_refuses_before_write")
+                self.assertTrue(payload["delivery_refused"])
+                self.assertFalse(payload["durable_write"])
+                self.assertEqual("exact_binding_required", payload["routing_refusal_reason"])
+                self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
+                self.assertEqual([], json.loads((root / "agents" / "claude" / "inbox.json").read_text())["unread"])
+
+    def test_resolved_binding_stays_targeted_for_amiga_and_non_amiga(self):
+        for project, chat_id in (("amiga", "CHAT-BOUND-AMIGA"), ("nuvyr", "CHAT-BOUND-NUVYR")):
+            with self.subTest(project=project):
+                root, chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"],
+                    project=project,
+                    chat_id=chat_id,
+                )
+                payload, _stderr = self.deliver_with_scope(
+                    root, chat_id, project=project, repo_targets="llm-collab"
+                )
+                self.assertTrue(payload["autobridge_ready"], "failures=gh554_resolved_binding_stamped")
+                self.assertEqual("targeted", payload["routing_mode"], "failures=gh554_resolved_binding_routing_mode")
+                packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
+                frontmatter, body = parse_frontmatter(packet.read_text())
+                self.assertEqual("claude-scoped-session", frontmatter["target_session_id"], "failures=gh554_resolved_binding_frontmatter_target")
+                self.assertEqual("targeted", frontmatter["routing_mode"], "failures=gh554_resolved_binding_frontmatter_mode")
+                self.assertIn("scope probe", body)
+
+    def test_watcherless_human_receives_an_explicit_broadcast_for_both_projects(self):
+        for project, chat_id in (("amiga", "CHAT-BROADCAST-AMIGA"), ("nuvyr", "CHAT-BROADCAST-NUVYR")):
+            with self.subTest(project=project):
+                root = self.make_workspace()
+                self.add_agent(
+                    root,
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "activation": {"type": "cli_session", "watcher_enabled": True},
+                    },
+                )
+                self.add_agent(
+                    root,
+                    {
+                        "id": "cdx2",
+                        "display_name": "CDX2",
+                        "activation": {"type": "human_relay", "watcher_enabled": False},
+                    },
+                )
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-08-07_broadcast__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project,
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", chat_id,
+                        "--from", "codex",
+                        "--to", "cdx2",
+                        "--project", project,
+                        "--title", "Explicit broadcast",
+                        "--body-file", "-",
+                    ],
+                    cwd=root,
+                    text=True,
+                    input="This is an explicitly marked broadcast.",
+                    capture_output=True,
+                    check=True,
+                )
+                payload = json.loads(result.stdout.split("\n\n", 1)[0])
+                self.assertEqual("broadcast", payload["routing_mode"], "failures=gh554_broadcast_mode")
+                self.assertIsNone(payload["resolved_target_session_id"])
+                packet = sorted(chat_dir.glob("*_to-cdx2_*.md"))[-1]
+                frontmatter, _body = parse_frontmatter(packet.read_text())
+                self.assertEqual("broadcast", frontmatter["routing_mode"])
+                self.assertIsNone(frontmatter["target_session_id"])
 
     def test_expired_lease_does_not_write_permanently_unroutable_packet(self):
         for project, chat_id in (
@@ -4957,7 +5080,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     session_autobridge_lib.ROUTE_AMBIGUOUS_REASON,
                     refused_payload["autobridge_refusal_reason"],
                 )
-                self.assertIsNone(refused_payload["resolved_target_session_id"])
+                self.assertEqual(runtime_id, refused_payload["resolved_target_session_id"])
                 self.assertEqual(
                     session_id,
                     refused_payload["autobridge_session_id"],
@@ -4976,9 +5099,9 @@ class SessionAutobridgeTest(unittest.TestCase):
                     for frontmatter, _ in [parse_frontmatter(candidate.read_text())]
                     if frontmatter.get("title") == "Expired scope refusal"
                 )
-                self.assertIsNone(refused_frontmatter["target_session_id"])
+                self.assertEqual(runtime_id, refused_frontmatter["target_session_id"])
 
-    def test_mismatched_binding_never_supplies_a_durable_target(self):
+    def test_mismatched_binding_refuses_before_writing_a_packet(self):
         root = self.make_workspace()
         for agent in ("codex", "claude"):
             self.add_agent(
@@ -5031,20 +5154,21 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Do not target the rejected binding.",
             capture_output=True,
-            check=True,
+            check=False,
         )
         payload = json.loads(result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, result.returncode)
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON,
-            payload["autobridge_refusal_reason"],
+            payload["routing_refusal_reason"],
         )
         self.assertIsNone(payload["resolved_target_session_id"])
-        packet = sorted(chat_dir.glob("*_to-claude_*.md"))[-1]
-        frontmatter, _ = parse_frontmatter(packet.read_text())
-        self.assertIsNone(frontmatter["target_session_id"])
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
 
     def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga",
-                           recipient="claude"):
+                           recipient="claude", expect_refusal=False):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [
             sys.executable, str(DELIVER_SCRIPT),
@@ -5059,7 +5183,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         # go digging. The command's own error message is the diagnostic.
         done = subprocess.run(argv, cwd=root, text=True, input="scope probe",
                               capture_output=True, check=False)
-        if done.returncode != 0:
+        if done.returncode != 0 and not (expect_refusal and done.returncode == 2):
             self.fail(f"deliver.py exited {done.returncode}\n"
                       f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
         return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
@@ -5177,16 +5301,19 @@ class SessionAutobridgeTest(unittest.TestCase):
                   "desktop_bridge_required", "operator_relay_required")
     WAKE_PROMPTS = ("ax_doorbell_prompt", "ax_attended_recovery_prompt", "desktop_bridge_prompt")
 
-    def test_the_scope_fixture_uses_its_watcher_when_there_is_no_session(self):
-        root, _chat_dir = self.scoped_subscriber_workspace(
+    def test_unbound_watcher_recipient_is_refused_before_writing(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Codex",
             subscriber_agent="relay", runtime_family="codex_app",
             register_session=False)
-        payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1", recipient="relay")
-        self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["watcher_pickup_ready"])
-        self.assertFalse(payload["activation_unavailable"])
-        self.assertFalse(payload["ax_doorbell_required"])
+        payload, stderr = self.deliver_with_scope(
+            root, "CHAT-SCOPE1", recipient="relay", expect_refusal=True
+        )
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
+        self.assertEqual("exact_binding_required", payload["routing_refusal_reason"])
+        self.assertIn("REFUSED before durable write", stderr)
+        self.assertEqual([], sorted(chat_dir.glob("*_to-relay_*.md")))
 
     def test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all(self):
         """A scope refusal suppresses the worker's watcher pickup too."""
@@ -5226,10 +5353,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                                   "activation": activation})
         self.create_chat(root, chat_dir_name="2026-07-25_no-session__CHAT-NOSESS",
                          chat_id="CHAT-NOSESS", project_id="amiga")
-        payload, _stderr = self.deliver_with_scope(root, "CHAT-NOSESS", recipient="relay")
-        self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["watcher_pickup_ready"])
-        self.assertFalse(payload["activation_unavailable"])
+        payload, _stderr = self.deliver_with_scope(
+            root, "CHAT-NOSESS", recipient="relay", expect_refusal=True
+        )
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
+        self.assertEqual("exact_binding_required", payload["routing_refusal_reason"])
         self.assertFalse(payload["ax_doorbell_required"])
         self.assertIsNone(payload["ax_doorbell_prompt"])
 
@@ -5590,21 +5719,26 @@ class SessionAutobridgeTest(unittest.TestCase):
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         self.oversize_recipient_binding(root)
         payload, stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
-                                                 repo_targets="llm-collab")
-        self.assertFalse(payload["autobridge_ready"])
+                                                 repo_targets="llm-collab",
+                                                 expect_refusal=True)
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
         self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
         self.assertNotIn("exact_binding_required", payload["autobridge_refusal_reason"],
                          "an unreadable binding EXISTS; it must not be reported as absent")
-        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
-                        "the durable packet must survive a runtime refusal")
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
         self.assertNotIn("Traceback", stderr)
 
     def test_an_oversized_recipient_binding_wakes_nobody(self):
-        root, _chat_dir = self.scoped_subscriber_workspace(
+        root, chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         self.oversize_recipient_binding(root)
         payload, _stderr = self.deliver_with_scope(root, "CHAT-SCOPE1",
-                                                  repo_targets="llm-collab")
+                                                  repo_targets="llm-collab",
+                                                  expect_refusal=True)
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
         for flag in self.WAKE_FLAGS:
             self.assertFalse(payload.get(flag),
                              f"{flag} must be false: waking someone to read a packet whose "
@@ -5624,15 +5758,16 @@ class SessionAutobridgeTest(unittest.TestCase):
              "--project", "amiga", "--title", "IO probe", "--sender-session-id", "codex-session-9",
              "--repo-targets", "llm-collab", "--body-file", "-"],
         )
+        self.assertEqual(2, done.returncode)
         self.assertNotIn("Traceback", done.stderr, done.stderr[-500:])
         payload = json.loads(done.stdout.split("\n\n", 1)[0])
-        self.assertFalse(payload["autobridge_ready"])
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
         self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
         self.assertTrue(payload["binding_unreadable_blocker"],
                         "the blocker flag is the only machine-readable signal in this state")
-        self.assertIn("blocker:", done.stderr)
-        self.assertTrue(sorted(chat_dir.glob("*_to-claude_*.md")),
-                        "the durable packet must survive an I/O-failed binding")
+        self.assertIn("REFUSED before durable write", done.stderr)
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
 
     def test_a_readable_binding_is_unaffected(self):
         """The control: this must still dispatch, or the tests above prove only that I broke it."""
@@ -6128,29 +6263,17 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             capture_output=True,
             env=self.subprocess_env(root),
-            check=True,
+            check=False,
         )
+        self.assertEqual(2, result.returncode)
         payload = json.loads(result.stdout.split("\n\n", 1)[0])
-        self.assertFalse(payload["autobridge_ready"])
-        self.assertTrue(payload["watcher_pickup_ready"])
-        self.assertFalse(payload["ax_doorbell_required"])
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
+        self.assertEqual("exact_binding_required", payload["routing_refusal_reason"])
         self.assertIsNone(payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-relay_readiness-drift.md"))
-        self.assertTrue(delivered_candidates)
-        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
-        self.assertEqual("Readiness drift", frontmatter["title"])
-        # Identity now matches the delivered packet, so the refusal has to come from the
-        # real cause -- no exact target was written for a session whose readiness was
-        # false -- rather than from the packet being addressed to another agent.
-        self.assertEqual("relay", frontmatter["to"])
-        self.assertIsNone(frontmatter.get("target_session_id"))
-        self.assertEqual(
-            (False, session_autobridge_lib.ROUTE_AMBIGUOUS_REASON),
-            session_autobridge_lib.message_targets_session(
-                target, {"frontmatter": frontmatter}
-            ),
-        )
+        self.assertEqual([], delivered_candidates)
 
     def test_deliver_refuses_explicit_target_that_disagrees_with_exact_binding(self):
         root = self.make_workspace()
@@ -6223,20 +6346,21 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Do not silently override the explicit target.",
             capture_output=True,
-            check=True,
+            check=False,
         )
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
         self.assertFalse(result_payload["autobridge_ready"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_MISMATCH_REASON,
-            result_payload["autobridge_refusal_reason"],
+            result_payload["routing_refusal_reason"],
         )
         self.assertIsNone(result_payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
-        self.assertTrue(delivered_candidates)
-        frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
-        self.assertIsNone(frontmatter["target_session_id"])
+        self.assertEqual([], delivered_candidates)
 
     def test_deliver_suppresses_codex_self_activation_for_amiga_and_non_amiga(self):
         cases = (("amiga", "CHAT-SELF-AMIGA"), ("nuvyr", "CHAT-SELF-NUVYR"))
@@ -6305,7 +6429,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     delivered_candidates[-1].read_text(),
                 )
 
-    def test_external_workers_can_still_ring_codex_for_amiga_and_non_amiga(self):
+    def test_external_workers_cannot_ring_codex_without_an_exact_binding(self):
         cases = (
             ("amiga", "claude", "Claude", "CHAT-CLAUDE-CODEX"),
             ("nuvyr", "zcode", "ZCode", "CHAT-ZCODE-CODEX"),
@@ -6333,7 +6457,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                         },
                     },
                 )
-                self.create_chat(
+                chat_dir = self.create_chat(
                     root,
                     chat_dir_name=f"2026-07-12_external-to-codex__{chat_id}",
                     chat_id=chat_id,
@@ -6361,15 +6485,19 @@ class SessionAutobridgeTest(unittest.TestCase):
                     text=True,
                     input="Ring root Codex after preserving this packet.",
                     capture_output=True,
-                    check=True,
+                    check=False,
                 )
 
                 result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+                self.assertEqual(2, deliver_result.returncode)
+                self.assertTrue(result_payload["delivery_refused"])
+                self.assertFalse(result_payload["durable_write"])
+                self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
                 self.assertFalse(result_payload["thread_coordination_required"])
-                self.assertTrue(result_payload["ax_doorbell_required"])
-                self.assertIn(f"[from {sender_id}]", result_payload["ax_doorbell_prompt"])
-                self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
-                self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+                self.assertFalse(result_payload["ax_doorbell_required"])
+                self.assertIsNone(result_payload["ax_doorbell_prompt"])
+                self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertEqual([], sorted(chat_dir.glob("*_to-codex_*.md")))
 
     def test_deliver_never_rings_a_claude_cli_session_without_a_binding(self):
         # The case the AX doorbell exists for -- no dispatchable autobridge -- is exactly
@@ -6423,10 +6551,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Durable packet only.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
         self.assertFalse(result_payload["ax_doorbell_required"])
         self.assertIsNone(result_payload["ax_doorbell_prompt"])
         self.assertFalse(result_payload["desktop_bridge_required"])
@@ -6443,11 +6575,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("axsend", deliver_result.stdout)
         self.assertNotIn("Computer Use", deliver_result.stdout)
 
-        # The packet is durable and the watcher owns pickup without a second wake path.
-        self.assertTrue((root / result_payload["to_file"]).exists())
-        self.assertTrue(result_payload["watcher_pickup_ready"])
-        self.assertFalse(result_payload["activation_unavailable"])
-        self.assertIsNone(result_payload["activation_unavailable_reason"])
+        self.assertEqual([], sorted((root / "Chats" / "2026-04-23_claude-no-binding__CHAT-NOBIND").glob("*_to-claude_*.md")))
 
     def test_deliver_never_attends_recovery_for_an_opaque_claude(self):
         # ax_attended_only routes a target to Codex-attended AX/Computer Use. Excluding
@@ -6502,10 +6630,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Durable packet only.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
         self.assertFalse(result_payload["ax_attended_recovery_required"])
         self.assertIsNone(result_payload["ax_attended_recovery_prompt"])
         self.assertFalse(result_payload["ax_doorbell_required"])
@@ -6513,7 +6645,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertNotIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout.upper())
         self.assertNotIn("axsend", deliver_result.stdout)
         self.assertNotIn("Computer Use", deliver_result.stdout)
-        self.assertTrue((root / result_payload["to_file"]).exists())
+        self.assertEqual([], sorted((root / "Chats" / "2026-04-23_claude-opaque__CHAT-OPAQUE").glob("*_to-claude_*.md")))
 
     def test_deliver_never_uses_computer_use_for_a_desktop_bridge_project(self):
         # amiga carries claude_desktop_bridge: true in the fixture, and this Claude is
@@ -6564,10 +6696,14 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Durable packet only.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
         self.assertFalse(result_payload["desktop_bridge_required"])
         self.assertIsNone(result_payload["desktop_bridge_prompt"])
         self.assertFalse(result_payload["ax_doorbell_required"])
@@ -6580,10 +6716,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         # operator to activate Claude. One forbidden wake replaced by another.
         self.assertFalse(result_payload["operator_relay_required"])
         self.assertFalse(result_payload["relay_required"])
-        self.assertTrue(result_payload["watcher_pickup_ready"])
-        self.assertNotIn("RELAY REQUIRED", deliver_result.stdout.upper())
-
-        self.assertTrue((root / result_payload["to_file"]).exists())
+        self.assertFalse(result_payload["watcher_pickup_ready"])
+        self.assertEqual([], sorted((root / "Chats" / "2026-04-23_claude-desktop-fallback__CHAT-BRIDGE2").glob("*_to-claude_*.md")))
 
     def test_non_codex_identity_cannot_get_ax_doorbell_from_spoofed_app(self):
         root = self.make_workspace()
@@ -6631,16 +6765,20 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Use the durable packet, then ring Codex with axsend.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["operator_relay_required"])
         self.assertFalse(result_payload["desktop_bridge_required"])
         self.assertFalse(result_payload["ax_doorbell_required"])
         self.assertIsNone(result_payload["ax_doorbell_prompt"])
-        self.assertTrue(result_payload["watcher_pickup_ready"])
+        self.assertFalse(result_payload["watcher_pickup_ready"])
         self.assertFalse(result_payload["activation_unavailable"])
         self.assertNotIn("AX DOORBELL REQUIRED", deliver_result.stdout)
         self.assertNotIn("axsend-ensure ring", deliver_result.stdout)
@@ -6648,13 +6786,9 @@ class SessionAutobridgeTest(unittest.TestCase):
         delivered_candidates = sorted(
             (root / "Chats" / "2026-06-26_codex-doorbell__CHAT-CODEX2").glob("*_to-cdx2_*.md")
         )
-        self.assertTrue(delivered_candidates)
-        delivered_text = delivered_candidates[-1].read_text()
-        self.assertIn("First-time setup required before task work:", delivered_text)
-        self.assertIn(f"{root}/AGENTS.md", delivered_text)
-        self.assertIn("Use the durable packet, then ring Codex with axsend.", delivered_text)
+        self.assertEqual([], delivered_candidates)
 
-    def test_deliver_reports_terminal_only_cli_session_as_unavailable(self):
+    def test_deliver_refuses_terminal_only_cli_session_before_writing(self):
         # #given
         root = self.make_workspace()
         self.add_agent(
@@ -6702,22 +6836,23 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Use the durable packet.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         # #then
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
-        self.assertTrue(result_payload["activation_unavailable"])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
+        self.assertFalse(result_payload["activation_unavailable"])
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["ax_doorbell_required"])
-        self.assertEqual(
-            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
-            result_payload["activation_unavailable_reason"],
-        )
-        self.assertIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
+        self.assertIsNone(result_payload["activation_unavailable_reason"])
+        self.assertNotIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
-    def test_deliver_reports_api_trigger_without_runtime_as_unavailable(self):
+    def test_deliver_refuses_api_trigger_without_runtime_before_writing(self):
         # #given
         root = self.make_workspace()
         self.add_agent(
@@ -6765,16 +6900,19 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Use the durable packet.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         # #then
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
-        self.assertTrue(result_payload["activation_unavailable"])
+        self.assertEqual(2, deliver_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
+        self.assertEqual("exact_binding_required", result_payload["routing_refusal_reason"])
+        self.assertFalse(result_payload["activation_unavailable"])
         self.assertFalse(result_payload["relay_required"])
         self.assertFalse(result_payload["operator_relay_required"])
-        self.assertIn("api_trigger", result_payload["activation_unavailable_reason"])
-        self.assertIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
+        self.assertNotIn("ACTIVATION UNAVAILABLE", deliver_result.stdout)
         self.assertNotIn("RELAY REQUIRED FOR OPERATOR", deliver_result.stdout)
 
     def test_deliver_suppresses_manual_relay_when_autobridge_target_is_dispatchable(self):
@@ -6931,6 +7069,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual("broadcast", result_payload["routing_mode"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
             result_payload["autobridge_refusal_reason"],
@@ -6946,6 +7085,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(delivered_candidates)
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
         self.assertIsNone(frontmatter["target_session_id"])
+        self.assertEqual("broadcast", frontmatter["routing_mode"])
 
     def test_deliver_refuses_thread_pair_as_dispatch_authority(self):
         root = self.make_workspace()
@@ -6972,7 +7112,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             project_id="amiga",
         )
 
-        subprocess.run(
+        seed_result = subprocess.run(
             [
                 sys.executable,
                 str(DELIVER_SCRIPT),
@@ -6997,8 +7137,12 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Create the paired thread.",
             capture_output=True,
-            check=True,
+            check=False,
         )
+        seed_payload = json.loads(seed_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual(2, seed_result.returncode)
+        self.assertTrue(seed_payload["delivery_refused"])
+        self.assertFalse(seed_payload["durable_write"])
 
         reverse_result = subprocess.run(
             [
@@ -7021,34 +7165,27 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Reply on the paired thread.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(reverse_result.stdout.split("\n\n", 1)[0])
-        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(2, reverse_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
-            result_payload["autobridge_refusal_reason"],
+            result_payload["routing_refusal_reason"],
         )
         self.assertIsNone(result_payload["resolved_target_session_id"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-codex_*.md"))
-        self.assertTrue(delivered_candidates)
-        delivered_text = delivered_candidates[-1].read_text()
-        self.assertIn("target_session_id:", delivered_text)
-        frontmatter, _ = parse_frontmatter(delivered_text)
-        self.assertIsNone(frontmatter["target_session_id"])
+        self.assertEqual([], delivered_candidates)
 
         pair_path = root / "State" / "session_autobridge" / "thread_pairs" / "amiga" / "CHAT-PAIR1" / "cdx2__codex.json"
-        pair = json.loads(pair_path.read_text())
-        self.assertEqual("codex-thread-1", pair["sessions"]["codex"])
+        self.assertFalse(pair_path.exists())
 
         note_candidates = sorted(chat_dir.glob("*_note-cdx2_*.md"))
-        self.assertTrue(note_candidates)
-        note_text = note_candidates[-1].read_text()
-        self.assertIn("summary_event: sent", note_text)
-        self.assertIn("target_session_id:", note_text)
-        self.assertIn("cdx2 sent `Reply to sender thread` to codex.", note_text)
+        self.assertEqual([], note_candidates)
 
     def test_deliver_preserves_thread_pair_sender_state_without_authorizing_dispatch(self):
         root = self.make_workspace()
@@ -7068,7 +7205,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "activation": {"type": "cli_session", "watcher_enabled": True},
             },
         )
-        self.create_chat(
+        chat_dir = self.create_chat(
             root,
             chat_dir_name="2026-04-24_pairing-update__CHAT-PAIR2",
             chat_id="CHAT-PAIR2",
@@ -7076,7 +7213,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
         for sender_session_id in ("codex-thread-1", "codex-thread-2"):
-            subprocess.run(
+            seed_result = subprocess.run(
                 [
                     sys.executable,
                     str(DELIVER_SCRIPT),
@@ -7101,8 +7238,12 @@ class SessionAutobridgeTest(unittest.TestCase):
                 text=True,
                 input=f"Use {sender_session_id}.",
                 capture_output=True,
-                check=True,
+                check=False,
             )
+            seed_payload = json.loads(seed_result.stdout.split("\n\n", 1)[0])
+            self.assertEqual(2, seed_result.returncode)
+            self.assertTrue(seed_payload["delivery_refused"])
+            self.assertFalse(seed_payload["durable_write"])
 
         reverse_result = subprocess.run(
             [
@@ -7125,21 +7266,22 @@ class SessionAutobridgeTest(unittest.TestCase):
             text=True,
             input="Reply on the latest sender thread.",
             capture_output=True,
-            check=True,
+            check=False,
         )
 
         result_payload = json.loads(reverse_result.stdout.split("\n\n", 1)[0])
-        self.assertFalse(result_payload["autobridge_ready"])
+        self.assertEqual(2, reverse_result.returncode)
+        self.assertTrue(result_payload["delivery_refused"])
+        self.assertFalse(result_payload["durable_write"])
         self.assertEqual(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
-            result_payload["autobridge_refusal_reason"],
+            result_payload["routing_refusal_reason"],
         )
         self.assertIsNone(result_payload["resolved_target_session_id"])
 
         pair_path = root / "State" / "session_autobridge" / "thread_pairs" / "amiga" / "CHAT-PAIR2" / "cdx2__codex.json"
-        pair = json.loads(pair_path.read_text())
-        self.assertEqual("codex-thread-2", pair["sessions"]["codex"])
-        self.assertNotIn("cdx2", pair["sessions"])
+        self.assertFalse(pair_path.exists())
+        self.assertEqual([], sorted(chat_dir.glob("*_to-codex_*.md")))
 
     def test_dispatch_writes_operator_picked_up_note(self):
         root = self.make_workspace()

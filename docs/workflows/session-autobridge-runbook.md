@@ -58,6 +58,13 @@ which is the primary wake — survive only as a bounded,
 - one monitor per purpose; clear stale prior monitors before creating a new one
 - must be fixed or removed if it misbehaves on real tasks
 
+The deployed PM2 agent-wide watcher is intentionally notification-only (`--no-autobridge`):
+it has no exact native-session binding and must not guess which sibling session
+should receive a packet. The exact-session native watcher owns routine dispatch.
+For a one-chat repair/diagnostic pass that includes both bound and null-target
+packets, use the canonical `--include-unbound --no-autobridge` command in
+`collab-thread-quickstart.md`.
+
 If the safety-fuse causes stale-context or duplicate-wake issues in practice,
 remove it and rely on exact-session dispatch plus the mailbox-drain self-heal.
 
@@ -339,6 +346,17 @@ Manual one-shot watcher:
 ```bash
 <runtime_root>/bin/llm-collab watch_inbox.py --me codex --max-polls 1 --json
 ```
+
+An unbound chat watcher is explicit and notification-only:
+
+```bash
+<runtime_root>/bin/llm-collab watch_inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --include-unbound --no-autobridge --notify --max-polls 1 --json
+```
+
+It is the only non-exact watcher scope allowed to see a null-target packet.
+Exact `--session` reads remain binding-scoped and never see those packets.
 
 For Codex, manual and PM2 watcher runs default to:
 

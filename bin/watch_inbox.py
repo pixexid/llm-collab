@@ -96,6 +96,11 @@ def parse_args():
     p.add_argument("--max-polls", type=int, default=0, help="Stop after N polls; 0 = forever")
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
     p.add_argument("--no-autobridge", action="store_true", help="Disable automatic session autobridge dispatch on new unread messages")
+    p.add_argument(
+        "--include-unbound",
+        action="store_true",
+        help="Watch every packet for this agent in --project/--chat, including null-target packets; notification-only",
+    )
     p.add_argument("--skip-existing", action="store_true", help="Treat current unread as already seen")
     p.add_argument(
         "--repo-target",
@@ -107,8 +112,14 @@ def parse_args():
     args = p.parse_args()
     if args.repo_target is not None and args.project is None:
         p.error("--repo-target requires --project <id>")
-    if args.chat is not None and args.session is None:
-        p.error("--chat requires --session")
+    if args.include_unbound:
+        if args.session is not None:
+            p.error("--include-unbound cannot be combined with --session")
+        if not args.project or not args.chat:
+            p.error("--include-unbound requires --project and --chat")
+        args.no_autobridge = True
+    elif args.chat is not None and args.session is None:
+        p.error("--chat requires --session or --include-unbound")
     if args.session is not None:
         if not args.session.strip() or args.session != args.session.strip():
             p.error("--session requires a non-empty session id")
@@ -198,6 +209,18 @@ def exact_session_messages(args) -> list[dict]:
                 f"{json.dumps(fatal_refusals, sort_keys=True)}"
             )
     return messages
+
+
+def chat_scope_messages(args) -> dict[str, dict]:
+    """Read one agent/chat mailbox scope without widening exact-session reads."""
+    return {
+        message["path"]: message
+        for message in get_unread_messages(args.me)
+        if message.get("path")
+        and message.get("frontmatter", {}).get("to") == args.me
+        and message.get("frontmatter", {}).get("project_id") == args.project
+        and message.get("frontmatter", {}).get("chat_id") == args.chat
+    }
 
 
 def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
@@ -908,8 +931,11 @@ def main():
                         sys.exit(75)
                     time.sleep(poll_interval)
         elif inbox_path.exists():
-            data = load_agent_inbox(args.me)
-            seen_paths = set(data.get("unread", []))
+            if args.include_unbound:
+                seen_paths = set(chat_scope_messages(args))
+            else:
+                data = load_agent_inbox(args.me)
+                seen_paths = set(data.get("unread", []))
 
     polls = 0
     while True:
@@ -921,9 +947,13 @@ def main():
                     message["path"]: message for message in exact_messages
                 }
             elif inbox_path.exists():
-                data = load_agent_inbox(args.me)
-                unread = set(data.get("unread", []))
-                messages = {message["path"]: message for message in get_unread_messages(args.me)}
+                if args.include_unbound:
+                    messages = chat_scope_messages(args)
+                    unread = set(messages)
+                else:
+                    data = load_agent_inbox(args.me)
+                    unread = set(data.get("unread", []))
+                    messages = {message["path"]: message for message in get_unread_messages(args.me)}
             else:
                 unread = set()
                 messages = {}

@@ -12,10 +12,77 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 import watch_inbox  # noqa: E402
+
+
+class ChatScopedWatcherTest(unittest.TestCase):
+    def test_include_unbound_requires_chat_scope_and_disables_autobridge(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "watch_inbox.py",
+                "--me", "claude",
+                "--project", "amiga",
+                "--chat", "CHAT-ONE",
+                "--include-unbound",
+            ],
+        ):
+            args = watch_inbox.parse_args()
+        self.assertTrue(args.include_unbound)
+        self.assertTrue(args.no_autobridge)
+        self.assertEqual("CHAT-ONE", args.chat)
+
+    def test_chat_scope_surfaces_bound_and_null_target_packets_only(self) -> None:
+        args = SimpleNamespace(me="claude", project="amiga", chat="CHAT-ONE")
+        messages = [
+            {
+                "path": "Chats/one/null.md",
+                "frontmatter": {
+                    "to": "claude",
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-ONE",
+                    "target_session_id": None,
+                },
+            },
+            {
+                "path": "Chats/one/bound.md",
+                "frontmatter": {
+                    "to": "claude",
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-ONE",
+                    "target_session_id": "runtime-1",
+                },
+            },
+            {
+                "path": "Chats/other-chat.md",
+                "frontmatter": {
+                    "to": "claude",
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-TWO",
+                },
+            },
+            {
+                "path": "Chats/other-agent.md",
+                "frontmatter": {
+                    "to": "gemini",
+                    "project_id": "amiga",
+                    "chat_id": "CHAT-ONE",
+                },
+            },
+        ]
+        with patch.object(watch_inbox, "get_unread_messages", return_value=messages):
+            scoped = watch_inbox.chat_scope_messages(args)
+        self.assertEqual(
+            {"Chats/one/null.md", "Chats/one/bound.md"},
+            set(scoped),
+            "failures=gh554_chat_scope_surfaces_bound_and_unbound",
+        )
 
 
 class RefusalFingerprintTest(unittest.TestCase):

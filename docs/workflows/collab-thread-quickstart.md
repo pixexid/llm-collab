@@ -150,6 +150,21 @@ wait for the command to exit and does not need re-arming after a turn. A normal
 background Bash task is the wrong native shape: it only surfaces completion, so
 an infinite watcher can log packets without waking the task.
 
+For a bounded chat-level diagnostic watcher that must surface every packet for
+the agent, including legacy null-target packets, use the explicit notification-only
+scope below. It never widens an exact-session reader and it never dispatches a
+packet into a guessed session:
+
+```bash
+<runtime_root>/bin/llm-collab watch_inbox.py \
+  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
+  --include-unbound --no-autobridge --notify --max-polls 1 --json
+```
+
+The agent-wide PM2 watcher is also notification-only. Use an exact native
+session watcher for routine autobridge dispatch; repair the binding before
+retrying a packet that `deliver.py` refuses.
+
 ### Pi workers
 
 A Pi collaboration session has one exact scope:
@@ -263,12 +278,16 @@ block. Run only its exact printed command, and only when it is
 printed. `watcher_pickup_ready` marks the unbound non-Codex watcher fallback
 only — a bound recipient reports `autobridge_ready: true` with
 `watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
-exit 0 means the durable packet is written and the reply is complete.
+exit 0 means the durable packet is written and the reply is complete. A typed
+`delivery_refused: true` result exits 2 and means no packet or inbox pointer exists.
 
 ## 5. Verify it actually dispatched
 
-`autobridge_ready: true` means a target session was resolved. It is **not** proof
-of delivery. Confirm:
+`routing_mode: "targeted"` means an exact target was stamped. A
+`routing_mode: "broadcast"` packet is explicitly unbound and is reserved for a
+watcherless human recipient or the operator. `delivery_refused: true` means no
+durable packet or inbox pointer was written. `autobridge_ready: true` means a
+target session was resolved. It is **not** proof of delivery. Confirm:
 
 ```bash
 pm2 logs llm-collab-<recipient> --lines 5 --nostream | grep -E "new_message|refused"

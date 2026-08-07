@@ -410,6 +410,25 @@ class PromptBuilderTest(unittest.TestCase):
 
 
 class DeliverFoundationTest(unittest.TestCase):
+    def register_exact_binding(self, root: Path, agent: str, chat_id: str = "CHAT-TEST0001") -> None:
+        runtime_family = "claude_app" if agent == "claude" else "gemini_cli"
+        suffix = chat_id.removeprefix("CHAT-")
+        subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "bin" / "session_autobridge.py"),
+                "register", "--session", f"SESSION-{agent.upper()}-{suffix}",
+                "--agent", agent, "--project", "amiga", "--chat", chat_id,
+                "--mode", "notify", "--runtime-family", runtime_family,
+                "--runtime-session-id", f"{agent}-runtime-{suffix}",
+                "--runtime-session-source", "test_fixture", "--json",
+            ],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "LLM_COLLAB_UI_REFRESH": "0"},
+            check=True,
+        )
+
     def make_workspace(self) -> Path:
         root = Path(tempfile.mkdtemp(prefix="llm-collab-laneA-"))
         write_json(
@@ -445,6 +464,8 @@ class DeliverFoundationTest(unittest.TestCase):
         worktree = root / "worktrees" / "t-test"
         worktree.mkdir(parents=True)
         self.worktree = str(worktree.resolve())
+        for agent in ("claude", "relay"):
+            self.register_exact_binding(root, agent)
         return root
 
     BASE = [
@@ -513,13 +534,9 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertIn(packet_path.name, content)
         self.assertIn("--chat CHAT-TEST0001", content)
 
-    def test_activation_ax_budget_failure_only_when_ax_selected(self):
-        # #455 restricted routine AX wake ownership to Codex: `codex` is the only
-        # routine AX doorbell target, and only when the sender is not codex. The
-        # build_activation_ring_prompt budget failure must therefore surface
-        # (rc 2) ONLY on the codex-doorbell path — never for a non-codex subject
-        # (relay, even with an ax_app), and never once an exact autobridge
-        # session exists.
+    def test_unresolved_activation_recipient_refuses_before_wake_selection(self):
+        # GH-554: an activation-shaped packet cannot fall through to an AX or
+        # relay wake when the recipient has no exact binding.
         root = self.make_workspace()
         agents_path = root / "agents.json"
         agents = json.loads(agents_path.read_text())
@@ -548,17 +565,19 @@ class DeliverFoundationTest(unittest.TestCase):
                 "--worktree", self.worktree, "--branch", "b",
             ]
 
-        # AX selected: recipient codex, non-codex sender, no autobridge session.
-        # The doorbell branch runs build_activation_ring_prompt, which throws.
+        # Recipient codex has no binding, so delivery refuses before any wake
+        # selection or activation prompt construction.
         ax_selected = subprocess.run(
             argv_for("claude", "codex"), cwd=root, text=True,
             capture_output=True, env={**os.environ}, check=False,
         )
         self.assertEqual(2, ax_selected.returncode, ax_selected.stderr)
-        self.assertIn("long-root budget", ax_selected.stderr)
+        self.assertIn("exact_binding_required", ax_selected.stderr)
+        self.assertNotIn("long-root budget", ax_selected.stderr)
 
         # Negative: a non-codex subject (relay) can never reach the AX branch,
         # so the budget failure never fires even though relay has an ax_app.
+        # Its exact binding also proves the resolved-delivery path remains usable.
         relay_selected = subprocess.run(
             argv_for("codex", "relay"), cwd=root, text=True,
             capture_output=True, env={**os.environ}, check=False,
@@ -881,6 +900,7 @@ class DeliverFoundationTest(unittest.TestCase):
         root = self.make_workspace()
         chat2 = root / "Chats" / "2026-01-02_other__CHAT-TEST0002"
         write_json(chat2 / "meta.json", {"chat_id": "CHAT-TEST0002", "project_id": "amiga"})
+        self.register_exact_binding(root, "claude", chat_id="CHAT-TEST0002")
         body = root / "b.md"
         write(body, "work")
         extra_patch = (

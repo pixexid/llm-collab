@@ -201,6 +201,9 @@ const watcherApps = watcherAgents.map((agent) => {
       "--me", agent.id,
       "--poll-seconds", String(pollSeconds),
       "--skip-existing",
+      // PM2 is agent-wide and has no exact session binding; it observes and
+      // notifies only. Exact-session autobridge belongs to the native watcher.
+      "--no-autobridge",
     ];
     if (notificationsEnabled) appArgs.push("--notify");
 

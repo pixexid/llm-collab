@@ -197,6 +197,7 @@ def build_message(args, body: str, chat_id: str, packet_name: str | None = None)
         "sender_agent_id": args.sender_agent_id or args.sender,
         "sender_session_id": args.sender_session_id,
         "target_session_id": args.target_session_id,
+        "routing_mode": getattr(args, "routing_mode", "targeted"),
         "supersedes_session_id": args.supersedes_session_id,
         "title": args.title,
         "priority": args.priority,
@@ -353,6 +354,15 @@ def is_watcher_only_target(recipient_agent: dict, recipient_id: str) -> bool:
     return (
         recipient_id != "codex"
         and activation.get("watcher_enabled") is True
+    )
+
+
+def allows_unbound_broadcast(recipient_agent: dict, recipient_id: str) -> bool:
+    """Only explicitly watcherless human recipients may receive an unbound packet."""
+    activation = recipient_agent.get("activation", {})
+    return recipient_id == "operator" or (
+        activation.get("type") in {"human", "human_relay"}
+        and activation.get("watcher_enabled") is False
     )
 
 
@@ -564,6 +574,9 @@ def main():
             autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
             args.target_session_id = None
         elif resolved_binding_target is not None:
+            args.target_session_id = str(resolved_binding_target)
+            args.target_binding_id = durable_binding.get("binding_id")
+            args.target_binding_generation = durable_binding.get("binding_generation")
             routable, scope_reason = repo_scope_matches(
                 durable_session.get("repo_targets"),
                 packet_repo_targets(args),
@@ -573,12 +586,7 @@ def main():
             if not routable:
                 autobridge_target = None
                 autobridge_refusal_reason = scope_reason
-                args.target_session_id = None
                 dispatch_scope_refused = True
-            else:
-                args.target_session_id = str(resolved_binding_target)
-                args.target_binding_id = durable_binding.get("binding_id")
-                args.target_binding_generation = durable_binding.get("binding_generation")
         else:
             args.target_session_id = None
     autobridge_ready = bool(
@@ -613,6 +621,90 @@ def main():
         sys.exit(2)
     recipient_agent = get_agent(args.recipient)
     recipient_type = recipient_agent.get("activation", {}).get("type")
+
+    if thread_coordination_required:
+        args.routing_mode = "thread_coordination"
+    elif args.target_session_id:
+        args.routing_mode = "targeted"
+    elif explicit_target_session_id is not None:
+        print(
+            json.dumps(
+                {
+                    "delivery_refused": True,
+                    "durable_write": False,
+                    "routing_mode": "refused",
+                    "routing_refusal_reason": EXACT_BINDING_MISMATCH_REASON,
+                    "autobridge_refusal_reason": EXACT_BINDING_MISMATCH_REASON,
+                    "autobridge_ready": False,
+                    "thread_coordination_required": False,
+                    "watcher_pickup_ready": False,
+                    "relay_required": False,
+                    "ax_doorbell_required": False,
+                    "ax_doorbell_prompt": None,
+                    "ax_attended_recovery_required": False,
+                    "ax_attended_recovery_prompt": None,
+                    "operator_relay_required": False,
+                    "desktop_bridge_required": False,
+                    "desktop_bridge_prompt": None,
+                    "activation_unavailable": False,
+                    "activation_unavailable_reason": None,
+                    "recipient": args.recipient,
+                    "project_id": args.project,
+                    "chat_id": chat_id,
+                    "resolved_target_session_id": None,
+                },
+                indent=2,
+            )
+        )
+        print(
+            f"[deliver] REFUSED before durable write: recipient {args.recipient!r} "
+            "has no verified exact binding for the explicitly requested target "
+            f"{explicit_target_session_id!r}; repair the binding and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    elif allows_unbound_broadcast(recipient_agent, args.recipient):
+        args.routing_mode = "broadcast"
+    else:
+        refusal_reason = autobridge_refusal_reason or "exact_binding_required"
+        print(
+            json.dumps(
+                {
+                    "delivery_refused": True,
+                    "durable_write": False,
+                    "routing_mode": "refused",
+                    "routing_refusal_reason": refusal_reason,
+                    "autobridge_refusal_reason": refusal_reason,
+                    "autobridge_ready": False,
+                    "thread_coordination_required": False,
+                    "watcher_pickup_ready": False,
+                    "relay_required": False,
+                    "ax_doorbell_required": False,
+                    "ax_doorbell_prompt": None,
+                    "ax_attended_recovery_required": False,
+                    "ax_attended_recovery_prompt": None,
+                    "operator_relay_required": False,
+                    "desktop_bridge_required": False,
+                    "desktop_bridge_prompt": None,
+                    "activation_unavailable": False,
+                    "activation_unavailable_reason": None,
+                    "recipient": args.recipient,
+                    "project_id": args.project,
+                    "chat_id": chat_id,
+                    "resolved_target_session_id": None,
+                    "binding_unreadable_blocker": binding_unreadable,
+                },
+                indent=2,
+            )
+        )
+        print(
+            f"[deliver] REFUSED before durable write: recipient {args.recipient!r} "
+            f"requires an exact verified session binding ({refusal_reason}); "
+            "repair the binding and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
     first_time_awareness = should_consider_onboarding and not has_collab_awareness(args.recipient)
 
@@ -843,6 +935,7 @@ def main():
         "activation_unavailable": activation_unavailable,
         "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
+        "routing_mode": args.routing_mode,
         "autobridge_ready": autobridge_ready,
         "autobridge_refusal_reason": autobridge_refusal_reason,
         # An explicit machine-readable blocker, because every wake flag AND activation_unavailable

@@ -56,6 +56,13 @@ def sidecars(apps: list[dict]) -> list[dict]:
 
 @unittest.skipIf(NODE is None, "node is required to load the CJS ecosystem config")
 class Pm2EcosystemTest(unittest.TestCase):
+    def test_agent_wide_pm2_watchers_are_notification_only(self) -> None:
+        apps = load_apps({})
+        watcher_apps = [app for app in apps if not app["name"].endswith(SIDECAR_SUFFIX)]
+        self.assertTrue(watcher_apps)
+        for app in watcher_apps:
+            self.assertIn("--no-autobridge", app["args"], f"failures=gh554_pm2_notification_only:{app['name']}")
+
     def test_missing_token_file_leaves_the_app_list_unchanged(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             binary = Path(tmp) / "codex"
