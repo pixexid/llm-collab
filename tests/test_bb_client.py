@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -33,6 +34,9 @@ from llm_collab.bb_client import (
     BbThread,
     BbTransportResult,
     BbTransportTimeout,
+    BbResponseTooLarge,
+    _read_bounded,
+    subprocess_transport,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bb"
@@ -521,6 +525,22 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
+    def test_native_overflow_is_ambiguous_for_tasks_but_malformed_for_reads(self):
+        """A native stream overflow must use the same task/read split as post-return bounds."""
+        task_client, _ = spawning_client(
+            **{"thread spawn": BbResponseTooLarge("native stdout exceeded the bound")}
+        )
+        task_outcome = spawn(task_client)
+        self.assertIsInstance(task_outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, task_outcome.reason)
+
+        read_client, _ = enabled_client(
+            {"thread show": BbResponseTooLarge("native stdout exceeded the bound")}
+        )
+        read_outcome = read_client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(read_outcome, BbRefusal)
+        self.assertEqual(REFUSAL_MALFORMED_RESPONSE, read_outcome.reason)
+
     def test_an_undecodable_task_response_is_ambiguous_not_a_clean_failure(self):
         """bb exited 0, so the thread exists; only its report was unreadable.
 
@@ -741,3 +761,130 @@ class ThreadStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductionTransportTest(unittest.TestCase):
+    """GH-570: the production transport bounds each stream WHILE READING.
+
+    Slice 1A's client check runs after the transport returns, so it can refuse an
+    oversized response but cannot stop one being read into memory. These tests are
+    about the read boundary, which is why they drive a real subprocess rather than
+    a fixture: a fake transport cannot demonstrate that bytes were never
+    accumulated.
+    """
+
+    def _python(self, script: str) -> list[str]:
+        return [sys.executable, "-c", script]
+
+    def test_a_normal_response_is_returned_intact(self):
+        transport = subprocess_transport(self._python("print('{\"ok\": true}')"))
+        result = transport([], 30.0)
+        self.assertEqual(0, result.exit_code)
+        self.assertIn('"ok": true', result.stdout)
+
+    def test_oversized_stdout_raises_instead_of_accumulating(self):
+        """The bound is the point: refusing after the fact is what 1A already did."""
+        script = f"import sys; sys.stdout.write('x' * {MAX_RESPONSE_CHARS + 4096})"
+        transport = subprocess_transport(self._python(script))
+        with self.assertRaises(BbResponseTooLarge):
+            transport([], 30.0)
+
+    def test_oversized_stderr_raises_too(self):
+        """stderr is untrusted input as much as stdout, and reaches detail strings."""
+        script = f"import sys; sys.stderr.write('e' * {MAX_RESPONSE_CHARS + 4096})"
+        transport = subprocess_transport(self._python(script))
+        with self.assertRaises(BbResponseTooLarge):
+            transport([], 30.0)
+
+    def test_a_response_exactly_at_the_bound_is_accepted(self):
+        """Off-by-one matters: the cap is a limit, not a forbidden size."""
+        transport = subprocess_transport(
+            self._python(f"import sys; sys.stdout.write('x' * {MAX_RESPONSE_CHARS})"),
+            max_response_chars=MAX_RESPONSE_CHARS,
+        )
+        result = transport([], 30.0)
+        self.assertEqual(MAX_RESPONSE_CHARS, len(result.stdout))
+
+    def test_one_char_over_the_bound_is_refused(self):
+        transport = subprocess_transport(
+            self._python(f"import sys; sys.stdout.write('x' * {MAX_RESPONSE_CHARS + 1})"),
+            max_response_chars=MAX_RESPONSE_CHARS,
+        )
+        with self.assertRaises(BbResponseTooLarge):
+            transport([], 30.0)
+
+    def test_the_stream_is_never_asked_for_more_than_the_bound_plus_one(self):
+        """The load-bearing property: bytes are not accumulated, then rejected.
+
+        Asserting only that an exception is raised does NOT discriminate — a
+        transport that reads the whole stream and checks the length afterwards
+        raises too, while having already materialised it. This counts what the
+        stream was actually asked to hand over.
+        """
+
+        class CountingStream:
+            def __init__(self, total: int) -> None:
+                self.remaining = total
+                self.served = 0
+
+            def read(self, size: int = -1) -> str:
+                take = self.remaining if size is None or size < 0 else min(size, self.remaining)
+                self.remaining -= take
+                self.served += take
+                return "x" * take
+
+        limit = 4096
+        stream = CountingStream(limit * 50)
+        with self.assertRaises(BbResponseTooLarge):
+            _read_bounded(stream, limit)
+        self.assertLessEqual(
+            stream.served,
+            limit + 1,
+            f"read {stream.served} chars for a {limit} bound — the stream was accumulated",
+        )
+
+    def test_a_stream_shorter_than_the_bound_is_read_whole(self):
+        """The bound must not truncate a legitimate response."""
+
+        class Stream:
+            def __init__(self, text: str) -> None:
+                self.buf = text
+
+            def read(self, size: int = -1) -> str:
+                take = self.buf if size is None or size < 0 else self.buf[:size]
+                self.buf = self.buf[len(take):]
+                return take
+
+        self.assertEqual("hello", _read_bounded(Stream("hello"), 4096))
+
+    def test_a_nonzero_exit_is_reported_not_raised(self):
+        """A failing bb call is a result to classify, not a transport error."""
+        transport = subprocess_transport(
+            self._python("import sys; sys.stderr.write('boom'); sys.exit(3)")
+        )
+        result = transport([], 30.0)
+        self.assertEqual(3, result.exit_code)
+        self.assertIn("boom", result.stderr)
+
+    def test_a_slow_child_raises_the_timeout_the_client_maps_to_ambiguous(self):
+        transport = subprocess_transport(self._python("import time; time.sleep(30)"))
+        with self.assertRaises(BbTransportTimeout):
+            transport([], 0.5)
+
+    def test_timeout_kills_child_before_waiting_for_readers(self):
+        """Partial output plus open pipes must not make the deadline wait for EOF."""
+        script = (
+            "import sys,time; "
+            "sys.stdout.write('partial'); sys.stdout.flush(); "
+            "sys.stderr.write('partial'); sys.stderr.flush(); "
+            "time.sleep(2)"
+        )
+        transport = subprocess_transport(self._python(script))
+        started = time.monotonic()
+        with self.assertRaises(BbTransportTimeout):
+            transport([], 0.2)
+        self.assertLess(
+            time.monotonic() - started,
+            1.0,
+            "timeout returned only after the child released its reader pipes",
+        )

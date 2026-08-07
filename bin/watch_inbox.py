@@ -27,6 +27,7 @@ import platform
 import subprocess
 import time
 from datetime import datetime
+from typing import Any, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import (
@@ -35,16 +36,21 @@ from _helpers import (
     agent_dir,
     agent_inbox_path,
     config_get,
+    get_project,
     get_unread_messages,
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
+    resolve_project_repo_path,
 )
 from _session_autobridge import (
     CanonicalBindingNativeMismatch,
     UnreadableFile,
+    _repo_package_root,
+    _bb_binding_state,
     active_read_budget,
     dispatch_session,
+    execute_bb_bootstrap_plan,
     read_regular_file_bounded,
     iter_sessions,
     load_session,
@@ -59,6 +65,20 @@ from inbox import (
     ExactReadBudget,
     exact_read_messages,
     exact_read_session,
+)
+
+# The deployed launcher runs this file from ``bin/``; the provider packages live
+# one directory above it.  Reuse the existing path seam before importing them.
+_repo_package_root()
+_watcher_repo_root = str(Path(__file__).resolve().parent.parent)
+if not sys.path or sys.path[0] != _watcher_repo_root:
+    sys.path.insert(0, _watcher_repo_root)
+
+from llm_collab.bb_bootstrap import (
+    BOOTSTRAP_STARTED,
+    BootstrapRefusal,
+    plan_bootstrap,
+    resolve_bootstrap_repo_id,
 )
 
 
@@ -380,6 +400,222 @@ def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscrib
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
+def bb_bootstrap_enabled() -> bool:
+    """Global kill switch; keep the adapter unreachable unless explicitly on."""
+    try:
+        return config_get("bb_bootstrap_enabled", False) is True
+    except SystemExit:
+        # The optional adapter is default-off even in an uninitialized checkout;
+        # ordinary autobridge dispatch keeps its existing path in that case.
+        return False
+
+
+def _bb_first_packets(
+    agent_id: str,
+    project_id: str,
+    messages: Mapping[str, dict] | Sequence[dict] | None,
+    repo_targets: list[str] | None = None,
+) -> dict[str, dict]:
+    source = (
+        list(messages.values())
+        if isinstance(messages, Mapping)
+        else list(messages)
+        if messages is not None
+        else get_unread_messages(agent_id)
+    )
+    first: dict[str, dict] = {}
+    for message in source:
+        if not isinstance(message, Mapping):
+            continue
+        frontmatter = message.get("frontmatter")
+        if not isinstance(frontmatter, Mapping) or frontmatter.get("project_id") != project_id:
+            continue
+        # Bootstrap runs BEFORE dispatch_session's repo-scope gate, so without
+        # this a packet scoped to another repository in the same project would
+        # spawn a real bb thread and execute its prompt. The project check above
+        # is kept deliberately: repo_scope_matches short-circuits to True when
+        # the subscriber is unscoped, without comparing projects.
+        scope_ok, _scope_reason = repo_scope_matches(
+            repo_targets,
+            frontmatter.get("repo_targets"),
+            subscriber_project=project_id,
+            packet_project=frontmatter.get("project_id"),
+        )
+        if not scope_ok:
+            continue
+        chat_id = frontmatter.get("chat_id")
+        path = message.get("path")
+        if not isinstance(chat_id, str) or not chat_id or not isinstance(path, str) or not path:
+            continue
+        packet = {
+            "canonical_message_id": frontmatter.get(
+                "canonical_message_id", message.get("canonical_message_id")
+            ),
+            "path": path,
+            "body": message.get("body", ""),
+            "repo_targets": frontmatter.get("repo_targets"),
+        }
+        previous = first.get(chat_id)
+        if previous is None or path < previous["path"]:
+            first[chat_id] = packet
+    return first
+
+
+def _bb_existing_session_ids(agent_id: str, project_id: str, chat_id: str) -> list[str]:
+    return [
+        str(session["session_id"])
+        for session in iter_sessions(agent_id=agent_id, strict=True)
+        if session.get("project_id") == project_id
+        and session.get("chat_id") == chat_id
+        and session.get("session_id")
+    ]
+
+
+def _bb_start_inputs(
+    project_id: str,
+    project: Mapping[str, Any],
+    repo_id: str,
+) -> dict[str, Any]:
+    bb = project.get("bb")
+    if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
+        raise ValueError("bb bootstrap is not enabled for this project")
+
+    def required_text(key: str) -> str:
+        value = bb.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"bb.{key} is required")
+        return value.strip()
+
+    repo_root = resolve_project_repo_path(project_id, repo_id)
+    if repo_root is None or not repo_root.is_dir():
+        raise ValueError(f"bb repo target {repo_id!r} is not a directory")
+    cwd = Path(str(bb.get("cwd") or repo_root)).expanduser().resolve()
+    if not cwd.is_dir():
+        raise ValueError("bb.cwd must be a directory")
+    executable = bb.get("executable", ["bb"])
+    if (
+        not isinstance(executable, list)
+        or not executable
+        or any(not isinstance(token, str) or not token for token in executable)
+    ):
+        raise ValueError("bb.executable must be a non-empty list of strings")
+    timeout_seconds = bb.get("timeout_seconds", 30.0)
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        raise ValueError("bb.timeout_seconds must be positive")
+    session_source = bb.get("session_source")
+    if session_source is not None and (not isinstance(session_source, str) or not session_source):
+        raise ValueError("bb.session_source must be text when provided")
+    native_project_id = bb.get("project_id", project_id)
+    if not isinstance(native_project_id, str) or not native_project_id:
+        raise ValueError("bb.project_id must be text when provided")
+    return {
+        "native_project_id": native_project_id,
+        "endpoint_id": required_text("endpoint_id"),
+        "runtime_instance_id": required_text("runtime_instance_id"),
+        "runtime_home": required_text("runtime_home"),
+        "repo_id": repo_id,
+        "repo_root": str(repo_root),
+        "cwd": str(cwd),
+        "executable": executable,
+        "timeout_seconds": float(timeout_seconds),
+        "session_source": session_source,
+    }
+
+
+def _bootstrap_bb_before_dispatch(
+    agent_id: str,
+    json_output: bool,
+    *,
+    project_id: str | None,
+    repo_targets: list[str] | None,
+    messages: Mapping[str, dict] | Sequence[dict] | None,
+) -> list[str]:
+    if project_id is None or not bb_bootstrap_enabled():
+        return []
+    packets = _bb_first_packets(agent_id, project_id, messages, repo_targets)
+    if not packets:
+        return []
+    project = get_project(project_id)
+    consumed: list[str] = []
+    for chat_id, packet in sorted(packets.items()):
+        try:
+            decision = plan_bootstrap(
+                enabled=True,
+                project=project,
+                project_id=project_id,
+                conversation_id=chat_id,
+                participant_id=f"participant_{agent_id}",
+                agent_id=agent_id,
+                existing_session_ids=_bb_existing_session_ids(agent_id, project_id, chat_id),
+                binding_state=_bb_binding_state(project_id, chat_id, agent_id),
+                first_packet=packet,
+            )
+            if isinstance(decision, BootstrapRefusal):
+                emit(
+                    {
+                        "ts": utc_now_str(),
+                        "event": "bb_bootstrap_refused",
+                        "detail": decision.detail,
+                        "agent": agent_id,
+                        "project_id": project_id,
+                        "chat_id": chat_id,
+                        "message_path": packet["path"],
+                        "reason": decision.reason,
+                    },
+                    json_output,
+                )
+                continue
+            repo_id = resolve_bootstrap_repo_id(project or {}, packet.get("repo_targets"))
+            if isinstance(repo_id, BootstrapRefusal):
+                emit(
+                    {
+                        "ts": utc_now_str(),
+                        "event": "bb_bootstrap_refused",
+                        "detail": repo_id.detail,
+                        "agent": agent_id,
+                        "project_id": project_id,
+                        "chat_id": chat_id,
+                        "message_path": packet["path"],
+                        "reason": repo_id.reason,
+                    },
+                    json_output,
+                )
+                continue
+            inputs = _bb_start_inputs(project_id, project or {}, repo_id)
+            outcome = execute_bb_bootstrap_plan(decision, packet, inputs)
+        except Exception as error:
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "bb_bootstrap_failed",
+                    "detail": str(error),
+                    "agent": agent_id,
+                    "project_id": project_id,
+                    "chat_id": chat_id,
+                    "message_path": packet["path"],
+                },
+                json_output,
+            )
+            continue
+        emit(
+            {
+                "ts": utc_now_str(),
+                "event": "bb_bootstrap",
+                "detail": outcome.detail,
+                "agent": agent_id,
+                "project_id": project_id,
+                "chat_id": chat_id,
+                "message_path": packet["path"],
+                "reason": outcome.state,
+                "native_thread_id": outcome.native_thread_id,
+            },
+            json_output,
+        )
+        if outcome.state == BOOTSTRAP_STARTED:
+            consumed.append(packet["path"])
+    return consumed
+
+
 def dispatch_autobridge(
     agent_id: str,
     json_output: bool,
@@ -388,6 +624,7 @@ def dispatch_autobridge(
     repo_targets: list[str] | None = None,
     refusal_progress: dict | None = None,
     refusal_stats: dict | None = None,
+    messages: Mapping[str, dict] | Sequence[dict] | None = None,
 ) -> list[str]:
     consumed_paths: list[str] = []
     progress = refusal_progress if refusal_progress is not None else {}
@@ -424,6 +661,15 @@ def dispatch_autobridge(
         stats["_new"] = stats.get("_new", 0) + 1
         return True
 
+    consumed_paths.extend(
+        _bootstrap_bb_before_dispatch(
+            agent_id,
+            json_output,
+            project_id=project_id,
+            repo_targets=repo_targets,
+            messages=messages,
+        )
+    )
     for session_id in autobridge_session_ids(agent_id, project_id):
         # Canonical binding gate (#95): resolve the session's exact binding from
         # the ledger store BEFORE dispatch. A stale or foreign session (its
@@ -738,6 +984,7 @@ def main():
                                 repo_targets=args.repo_target,
                                 refusal_progress=refusal_progress,
                                 refusal_stats=refusal_stats,
+                                messages=messages,
                             )
                         )
                     )
