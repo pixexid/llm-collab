@@ -1,5 +1,29 @@
 # Session Autobridge Runbook
 
+> **Current fleet status: dormant.** The current workers run through BB, whose
+> threads are not `llm-collab` participants, session bindings, watcher
+> recipients, or receipt-bearing endpoints. No AX-reachable worker surface is
+> currently available, so neither this autobridge wake lane nor its AX fallback
+> is a live BB worker path. Use
+> [`bb-workers.md`](bb-workers.md) for current BB operations; none of the AX lane
+> applies to BB. The durable-packet and receipt reasoning below still applies
+> when the orchestrator itself authors a collab packet after verifying a BB
+> result, not to the BB worker.
+>
+> The mechanics remain here because watcher-backed recipients may return. The
+> watcher recovery sequence in
+> [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane)—read the lifecycle log,
+> reconcile what it names, restart cleanly, prove one fresh probe receipt, then
+> consider the stranded packet—remains the proven repair path; the diagnostic
+> mechanics below support it. Contract v12's fallback predicate is unchanged
+> and remains the authority for whether
+> `deliver.py` offers a doorbell. Whether an offered doorbell can land is a live
+> runtime property, never a standing process or window-count claim. In
+> particular, `pgrep -x Codex` is not a valid reachability check: it can return
+> no match while the surface is live inside `ChatGPT.app`. Follow the live
+> capability guidance in [`bb-workers.md`](bb-workers.md) before acting on an
+> offered doorbell.
+
 Session autobridge lets a worker bind the current runtime thread to a
 project/chat so future messages can be routed to that parked worker session.
 
