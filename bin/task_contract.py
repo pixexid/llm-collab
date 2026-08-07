@@ -771,11 +771,25 @@ def detect_db_contract(
     auto_impact = "shared-supabase-required" if reasons else "none"
 
     if explicit_impact:
-        # A non-member explicit value is a defect, not a missing value. Record it so
-        # the signal survives synchronization: callers that sync before validating
-        # would otherwise see only the automatic classification this discarded value
-        # produced, and validate a task the author never actually classified.
-        reasons = [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons]
+        # A non-member explicit value is a defect, not a missing value — and it must
+        # SURVIVE synchronization, so the value itself is kept rather than a marker
+        # recorded alongside a substitute.
+        #
+        # GH-580: recording the marker in the reasons list was not enough, because
+        # `detect_db_contract` recomputes that list on every call. The first sync
+        # substituted a valid value and recorded the marker; the second saw the now
+        # valid value, took the manual branch, and replaced the reasons with
+        # ["manual override"] — after which validation was silent. Derived state
+        # cannot carry a fact that must outlive its own recomputation.
+        #
+        # Keeping the invalid value in place makes every later sync a no-op and every
+        # later validation report the same defect, for any number of syncs.
+        return (
+            explicit_impact,
+            "invalid",
+            [f"{DB_IMPACT_INVALID_REASON_PREFIX}{explicit_impact}", *reasons],
+            schema_change_detected,
+        )
 
     return auto_impact, "auto", reasons, schema_change_detected
 
@@ -1180,16 +1194,18 @@ def validate_db_contract(
     stage: str,
     transition: bool = False,
     project_override=_PROJECT_UNSET,
+    original_frontmatter: dict | None = None,
 ) -> tuple[list[str], dict]:
     errors: list[str] = []
     project = _exact_task_project(frontmatter, project_override)
+    evidence_frontmatter = frontmatter if original_frontmatter is None else original_frontmatter
     # Read the ORIGINAL explicit value before sync. `detect_db_contract` accepts a
     # value only when it is already a member, so an invalid one falls through to
     # automatic classification and sync overwrites it — by the time `fm` exists the
     # malformed value is gone and the task is misclassified. Reporting that as a
     # missing Supabase field points at the wrong authority; the actual defect is a
     # closed-enum member that does not exist.
-    raw_impact = _normalize_text(frontmatter.get("db_impact"))
+    raw_impact = _normalize_text(evidence_frontmatter.get("db_impact"))
     invalid_explicit_impact = bool(raw_impact) and raw_impact not in DB_IMPACT_VALUES
     fm, _ = sync_db_contract(
         frontmatter,
@@ -1205,7 +1221,7 @@ def validate_db_contract(
         # an already-synchronised record sees a now-valid `db_impact`, takes the manual
         # branch, and replaces the reasons with ["manual override"] — so the marker
         # exists only on what the caller handed us.
-        for reason in _normalize_list(frontmatter.get("db_impact_detection_reasons")):
+        for reason in _normalize_list(evidence_frontmatter.get("db_impact_detection_reasons")):
             if reason.startswith(DB_IMPACT_INVALID_REASON_PREFIX):
                 raw_impact = reason[len(DB_IMPACT_INVALID_REASON_PREFIX) :]
                 invalid_explicit_impact = True
@@ -1215,7 +1231,11 @@ def validate_db_contract(
     summary = {
         "db_impact": db_impact,
         "db_impact_detection": fm.get("db_impact_detection", "auto"),
-        "db_impact_detection_reasons": _normalize_list(fm.get("db_impact_detection_reasons")),
+        "db_impact_detection_reasons": _normalize_list(
+            evidence_frontmatter.get("db_impact_detection_reasons")
+            if invalid_explicit_impact
+            else fm.get("db_impact_detection_reasons")
+        ),
         "db_project_ref": raw_project_ref,
         "db_schema_change_detected": _normalize_bool(fm.get("db_schema_change_detected")) is True,
     }
@@ -1347,6 +1367,7 @@ def validate_task_contract(
     stage: str,
     transition: bool = False,
     project_override=_PROJECT_UNSET,
+    original_frontmatter: dict | None = None,
 ) -> tuple[list[str], dict]:
     project_id = _normalize_text(frontmatter.get("project_id"))
     project = _exact_task_project(frontmatter, project_override)
@@ -1372,6 +1393,7 @@ def validate_task_contract(
         stage=stage,
         transition=transition,
         project_override=project,
+        original_frontmatter=original_frontmatter,
     )
     return project_errors + direct_app_errors + ui_errors + db_errors, {
         "project": {"project_id": project_id or None, "registered": bool(project_id and not project_errors)},

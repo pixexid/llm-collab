@@ -102,6 +102,7 @@ def build_release_evidence_record(
     body: str = "",
     evaluator=None,
     evaluated_at: str | None = None,
+    original_frontmatter: dict | None = None,
 ) -> dict:
     """Validate a review -> done request without mutating task or queue state."""
     task_id = frontmatter.get("task_id")
@@ -129,6 +130,7 @@ def build_release_evidence_record(
         stage="done",
         transition=True,
         project_override=project,
+        original_frontmatter=original_frontmatter,
     )
     if contract_errors:
         raise ReleaseGateError(
@@ -358,6 +360,7 @@ def main():
 
     content = task_file.read_text()
     fm, body = parse_frontmatter(content)
+    original_frontmatter = dict(fm)
     fm, _ = sync_task_contract(fm, body)
 
     if args.accepted_by is not None:
@@ -416,6 +419,7 @@ def main():
                 args.released_by,
                 args.release_evidence,
                 body=body,
+                original_frontmatter=original_frontmatter,
             )
         except ReleaseGateError as error:
             print(
@@ -609,7 +613,12 @@ def main():
 
         validation_fm = dict(fm)
         validation_fm["status"] = args.status
-        errors, summary = validate_task_contract(validation_fm, body, stage="assignment")
+        errors, summary = validate_task_contract(
+            validation_fm,
+            body,
+            stage="assignment",
+            original_frontmatter=original_frontmatter,
+        )
         if errors:
             print(
                 json.dumps(
@@ -629,7 +638,12 @@ def main():
     if args.status == "review":
         validation_fm = dict(fm)
         validation_fm["status"] = args.status
-        errors, summary = validate_task_contract(validation_fm, body, stage="review")
+        errors, summary = validate_task_contract(
+            validation_fm,
+            body,
+            stage="review",
+            original_frontmatter=original_frontmatter,
+        )
         if errors:
             print(
                 json.dumps(
