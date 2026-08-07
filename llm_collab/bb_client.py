@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -808,52 +809,74 @@ def subprocess_transport(
     than deferred: both streams are bounded at the read boundary, and an overflow
     kills the child and raises instead of returning a truncated result.
 
-    A deadline is enforced with ``communicate``-free manual reads so the bound
-    applies before the whole stream is materialized; on timeout the child is
-    killed and ``BbTransportTimeout`` is raised, which the client maps to an
-    AMBIGUOUS outcome for task-bearing calls.
+    A deadline is enforced with an off-thread launch and ``communicate``-free
+    manual reads so neither launch nor reading can block the calling thread past
+    the bound. On timeout an available child is killed and
+    ``BbTransportTimeout`` is raised, which the client maps to an AMBIGUOUS
+    outcome for task-bearing calls.
     """
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
-        # The budget starts at the launch boundary so launch time is ACCOUNTED
-        # FOR: whatever Popen costs is subtracted from what the waits below get,
-        # instead of each wait starting from a full budget.
-        #
-        # This does NOT bound Popen itself. Popen is synchronous, so no timed
-        # operation runs while it stalls -- an interpreter on a hung mount still
-        # blocks here indefinitely. Bounding that needs the launch performed off
-        # this thread with its own timeout, which is a different shape; tracked
-        # separately. Do not restate this as "launch is bounded".
+        # The budget starts at the launch boundary so whatever Popen costs is
+        # subtracted from what the waits below get.
         deadline = time.monotonic() + timeout_seconds
-        process = subprocess.Popen(
-            [*bb_executable, *argv],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
         pool = ThreadPoolExecutor(max_workers=2)
+        process = None
         aborting = False
 
         def kill_child() -> None:
+            assert process is not None
             try:
                 process.kill()
             except ProcessLookupError:
                 pass
             process.wait()
 
+        def discard_late_process(launch) -> None:
+            try:
+                late_process = launch.result()
+            except Exception:
+                return
+            try:
+                try:
+                    late_process.kill()
+                except ProcessLookupError:
+                    pass
+                late_process.wait()
+            finally:
+                for pipe in (late_process.stdout, late_process.stderr):
+                    if pipe is not None:
+                        pipe.close()
+
+        def discard_late_process_async(launch) -> None:
+            threading.Thread(
+                target=discard_late_process,
+                args=(launch,),
+                daemon=True,
+            ).start()
+
+        # ONE end-to-end deadline, established above at the launch boundary.
+        def remaining() -> float:
+            # Never pass a non-positive timeout: 0 is "poll once and raise",
+            # which is the correct behaviour once the budget is spent, but a
+            # negative value is rejected by process.wait().
+            return max(0.0, deadline - time.monotonic())
+
         try:
-            # ONE end-to-end deadline, established above at the launch boundary.
+            launch = pool.submit(
+                subprocess.Popen,
+                [*bb_executable, *argv],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            process = launch.result(timeout=remaining())
+
             # Giving each wait a fresh `timeout_seconds` made the configured
             # bound per-wait: a child closing stdout just under the limit, then
             # stderr just under a second limit, returned after nearly twice it,
             # and process.wait() could add a third interval. The watcher's
             # configured bound has to bound the CALL.
-            def remaining() -> float:
-                # Never pass a non-positive timeout: 0 is "poll once and raise",
-                # which is the correct behaviour once the budget is spent, but a
-                # negative value is rejected by process.wait().
-                return max(0.0, deadline - time.monotonic())
-
             out = pool.submit(_read_bounded, process.stdout, max_response_chars)
             err = pool.submit(_read_bounded, process.stderr, max_response_chars)
             stdout = out.result(timeout=remaining())
@@ -861,7 +884,10 @@ def subprocess_transport(
             exit_code = process.wait(timeout=remaining())
         except FuturesTimeout as exc:
             aborting = True
-            kill_child()
+            if process is not None:
+                kill_child()
+            else:
+                launch.add_done_callback(discard_late_process_async)
             raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
         except subprocess.TimeoutExpired as exc:
             aborting = True
@@ -879,9 +905,10 @@ def subprocess_transport(
             # a watcher-wide hang. The pipes are closed below so those readers
             # can unwind without delaying this call.
             pool.shutdown(wait=not aborting, cancel_futures=True)
-            for pipe in (process.stdout, process.stderr):
-                if pipe is not None:
-                    pipe.close()
+            if process is not None:
+                for pipe in (process.stdout, process.stderr):
+                    if pipe is not None:
+                        pipe.close()
         return BbTransportResult(exit_code, stdout, stderr)
 
     return transport

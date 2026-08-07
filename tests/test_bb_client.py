@@ -7,9 +7,11 @@ the response/failure contract Slice 1B will call.
 
 from __future__ import annotations
 
-import json
 import io
+import json
+import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -899,43 +901,84 @@ class ProductionTransportTest(unittest.TestCase):
             transport([], 0.5)
 
     def test_launch_time_is_charged_against_the_budget(self):
-        """GH-584: launch cost is SUBTRACTED from the waits, not bounded itself.
-
-        Deliberately narrow, because the earlier name for this test overclaimed:
-        Popen is synchronous, so nothing timed runs while it stalls and this
-        cannot prove launch is bounded. What it does prove is the accounting --
-        a 0.5s launch against a 0.2s budget leaves the post-launch waits with
-        zero remaining, so the call refuses instead of granting them a fresh
-        full budget each. Truly bounding launch needs it off this thread and is
-        tracked separately.
-        """
+        """GH-584: launch cost is subtracted from the post-launch waits."""
         import llm_collab.bb_client as bb
+
+        timed_waits = []
 
         class SlowLaunch:
             def __init__(self, *_args, **_kwargs):
-                time.sleep(0.5)  # the stall the deadline must already be counting
+                time.sleep(0.2)
                 self.stdout = io.StringIO("{}")
                 self.stderr = io.StringIO("")
 
             def wait(self, timeout=None):
+                if timeout is not None:
+                    timed_waits.append(timeout)
+                    raise subprocess.TimeoutExpired("irrelevant", timeout)
                 return 0
 
             def kill(self):
                 pass
 
         transport = subprocess_transport(["irrelevant"])
-        started = time.monotonic()
         with patch.object(bb.subprocess, "Popen", SlowLaunch):
+            with self.assertRaises(BbTransportTimeout):
+                transport([], 0.5)
+        self.assertLess(
+            timed_waits[0],
+            0.4,
+            f"launch cost was not charged against the budget: wait got {timed_waits[0]:.2f}s",
+        )
+
+    def test_launch_returns_within_bound_while_popen_is_still_stalling(self):
+        """GH-592: the caller's bound runs while Popen itself is blocked."""
+        import llm_collab.bb_client as bb
+
+        launch_started = threading.Event()
+        launch_finished = threading.Event()
+        late_killed = threading.Event()
+        late_waited = threading.Event()
+        launched = []
+
+        class StalledLaunch:
+            def __init__(self, *_args, **_kwargs):
+                launch_started.set()
+                time.sleep(0.8)
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+                launch_finished.set()
+                launched.append(self)
+
+            def wait(self, timeout=None):
+                if timeout is not None and timeout <= 0:
+                    raise subprocess.TimeoutExpired("irrelevant", timeout)
+                late_waited.set()
+                return 0
+
+            def kill(self):
+                late_killed.set()
+
+        transport = subprocess_transport(["irrelevant"])
+        started = time.monotonic()
+        with patch.object(bb.subprocess, "Popen", StalledLaunch):
             with self.assertRaises(BbTransportTimeout):
                 transport([], 0.2)
         elapsed = time.monotonic() - started
-        # 0.5s launch + a spent budget: the waits must get ~0 remaining, so the
-        # call ends near the launch cost rather than adding another 0.2s per wait.
         self.assertLess(
             elapsed,
-            0.9,
-            f"launch cost was not charged against the budget: {elapsed:.2f}s",
+            0.5,
+            f"launch call exceeded its bound while Popen was still stalling: {elapsed:.2f}s",
         )
+        self.assertTrue(launch_started.is_set(), "fake Popen never entered its stall")
+        self.assertFalse(
+            launch_finished.is_set(),
+            "transport returned only after the fake Popen stall finished",
+        )
+        self.assertTrue(late_killed.wait(1.0), "late process was not killed")
+        self.assertTrue(late_waited.is_set(), "late process was not reaped")
+        self.assertTrue(launched[0].stdout.closed, "late stdout pipe was not closed")
+        self.assertTrue(launched[0].stderr.closed, "late stderr pipe was not closed")
 
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.
