@@ -42,6 +42,10 @@ MAX_REACTION_COMMENTS = 30
 # deadline by hours. A single shared budget across the whole snapshot bounds the
 # cumulative page count, and the deadline is observed before every request.
 MAX_SNAPSHOT_PAGES = 80
+CONNECTOR_LOGINS = frozenset({"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"})
+# A tail snapshot starts after the observation window, so it gets one bounded
+# request budget of its own rather than making the observation deadline porous.
+FINAL_SNAPSHOT_GRACE = GH_CALL_TIMEOUT
 
 
 class _Budget:
@@ -73,16 +77,21 @@ def _flatten_pages(pages):
     return out
 
 
-def _gh_call(path):
-    """One `gh api` invocation, bounded by a timeout; returns stripped stdout."""
+def _gh_call(path, deadline=None):
+    """One `gh api` invocation, bounded by the shared deadline."""
+    timeout = GH_CALL_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise RuntimeError(f"gh api {path}: watcher deadline reached")
     try:
         r = subprocess.run(
             ["gh", "api", path],
-            capture_output=True, text=True, timeout=GH_CALL_TIMEOUT,
+            capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
-            f"gh api {path} exceeded {GH_CALL_TIMEOUT:.0f}s"
+            f"gh api {path} exceeded {timeout:.3f}s"
         ) from error
     if r.returncode != 0:
         raise RuntimeError(f"gh api {path}: {r.stderr.strip()}")
@@ -112,7 +121,12 @@ def _gh_pages(path, budget=None):
     for page_num in range(1, MAX_PAGES + 1):
         if budget is not None:
             budget.charge(path)
-        body = _gh_call(f"{path}{sep}per_page={PER_PAGE}&page={page_num}")
+        request_path = f"{path}{sep}per_page={PER_PAGE}&page={page_num}"
+        body = (
+            _gh_call(request_path)
+            if budget is None or budget.deadline is None
+            else _gh_call(request_path, budget.deadline)
+        )
         if not body:
             break
         value = json.loads(body)
@@ -146,6 +160,21 @@ def _timeline_sig(timeline):
          e.get("updated_at"))
         for e in timeline
     ]
+
+
+def connector_review_oids(timeline):
+    """Return exact commit OIDs reviewed by the Codex connector."""
+    return sorted(
+        {
+            event["commit_id"]
+            for event in timeline
+            if event.get("event") == "reviewed"
+            and (event.get("user") or event.get("actor") or {}).get("login")
+            in CONNECTOR_LOGINS
+            and isinstance(event.get("commit_id"), str)
+            and event["commit_id"]
+        }
+    )
 
 
 def snapshot(repo, pr, deadline=None):
@@ -195,7 +224,8 @@ def snapshot(repo, pr, deadline=None):
 
     sig = {
         "state": state, "merged": merged, "head": sha,
-        "timeline": tl, "reactions": rx, "checks": checks,
+        "timeline": tl, "connector_review_oids": connector_review_oids(timeline),
+        "reactions": rx, "checks": checks,
     }
     return sig, {"timeline": timeline, "reactions": reactions}
 
@@ -214,6 +244,11 @@ def diff(old, new, raw_new):
     if old["checks"] != new["checks"]:
         changed = {k: v for k, v in new["checks"].items() if old["checks"].get(k) != v}
         out.append(f"checks: {changed}")
+    if old.get("connector_review_oids") != new.get("connector_review_oids"):
+        out.append(
+            "connector review OIDs: "
+            f"{new.get('connector_review_oids', [])}"
+        )
     if old["timeline"] != new["timeline"]:
         old_ids = {t[1] for t in old["timeline"]}
         fresh = [e for e in raw_new["timeline"] if (e.get("id") or e.get("sha")
@@ -229,6 +264,82 @@ def diff(old, new, raw_new):
     return out
 
 
+def settle_after_push(repo, pr, interval, timeout):
+    """Observe a pushed head, then take one bounded tail snapshot."""
+    started = time.monotonic()
+    observation_deadline = started + timeout
+    final_deadline = observation_deadline + FINAL_SNAPSHOT_GRACE
+    base, _ = snapshot(repo, pr, observation_deadline)
+    head = base["head"]
+    if head in base.get("connector_review_oids", []):
+        print(json.dumps({
+            "settle": "review_seen",
+            "head": head,
+            "waited_seconds": 0,
+            "connector_review_oids": base["connector_review_oids"],
+        }, indent=2))
+        return 0
+
+    while True:
+        remaining = observation_deadline - time.monotonic()
+        if remaining < 0:
+            break
+        time.sleep(min(interval, remaining))
+        if time.monotonic() >= observation_deadline:
+            break
+        try:
+            current, _ = snapshot(repo, pr, observation_deadline)
+        except RuntimeError as error:
+            print(f"WARN: {error}", file=sys.stderr)
+            continue
+        if current["head"] != head:
+            print(
+                json.dumps({
+                    "settle": "head_changed",
+                    "before": head,
+                    "after": current["head"],
+                }),
+                file=sys.stderr,
+            )
+            return 2
+        if head in current.get("connector_review_oids", []):
+            print(json.dumps({
+                "settle": "review_seen",
+                "head": head,
+                "waited_seconds": round(time.monotonic() - started, 3),
+                "connector_review_oids": current["connector_review_oids"],
+            }, indent=2))
+            return 0
+    try:
+        tail, _ = snapshot(repo, pr, final_deadline)
+    except RuntimeError as error:
+        print(
+            f"ERROR: no successful tail snapshot at the end of the settle window: {error}",
+            file=sys.stderr,
+        )
+        return 2
+    if tail["head"] != head:
+        print(
+            json.dumps({"settle": "head_changed", "before": head, "after": tail["head"]}),
+            file=sys.stderr,
+        )
+        return 2
+    result = {
+        "head": head,
+        "waited_seconds": timeout,
+        "final_snapshot_seconds": round(
+            max(0.0, time.monotonic() - observation_deadline), 3
+        ),
+        "connector_review_oids": tail.get("connector_review_oids", []),
+    }
+    if head in tail.get("connector_review_oids", []):
+        result["settle"] = "review_seen"
+        print(json.dumps(result, indent=2))
+        return 0
+    print(json.dumps({"settle": "no_connector_review", **result}, indent=2))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pr", required=True)
@@ -238,7 +349,22 @@ def main():
     ap.add_argument("--timeout", type=float, default=1800.0)
     ap.add_argument("--once", action="store_true",
                     help="print the current signature and exit (no watching)")
+    ap.add_argument("--settle-after-push", type=float, metavar="SECONDS",
+                    help="wait a bounded post-push window for a connector review")
     args = ap.parse_args()
+
+    if args.once and args.settle_after_push is not None:
+        ap.error("--once and --settle-after-push are mutually exclusive")
+    if args.settle_after_push is not None:
+        if args.settle_after_push <= 0 or args.interval <= 0:
+            ap.error("--interval and --settle-after-push must both be > 0")
+        try:
+            return settle_after_push(
+                args.repo, args.pr, args.interval, args.settle_after_push
+            )
+        except RuntimeError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
 
     try:
         base, raw = snapshot(args.repo, args.pr)
