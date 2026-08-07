@@ -24,8 +24,10 @@ Recommended read order:
 6. `pi-workers.md` — how Pi-runtime workers (glmpi/relay/kimi) use the shared
    Livecraft host, what they inherit by default (ponytail is runtime-global),
    and how the production first-start binding is gated
-7. `task-intake-and-delegation.md`
-8. `review-and-handoff.md`
-9. `isolated-worktrees.md`
-10. `commit-push-prs.md`
-11. `github-projects.md`
+7. `bb-worker-profiles.md` — Phase 2 BB model routing by measured failure mode;
+   prospective analysis-only policy and the current hard-coded bootstrap gap
+8. `task-intake-and-delegation.md`
+9. `review-and-handoff.md`
+10. `isolated-worktrees.md`
+11. `commit-push-prs.md`
+12. `github-projects.md`
