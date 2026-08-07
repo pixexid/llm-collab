@@ -815,11 +815,15 @@ def subprocess_transport(
     """
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
-        # Start the budget at the LAUNCH boundary, before Popen. Establishing it
-        # after the process exists left subprocess startup unbounded: an
-        # executable or interpreter on a hung mount could burn arbitrary time
-        # before the timer began, and the call could then return successfully
-        # well past timeout_seconds despite the end-to-end deadline contract.
+        # The budget starts at the launch boundary so launch time is ACCOUNTED
+        # FOR: whatever Popen costs is subtracted from what the waits below get,
+        # instead of each wait starting from a full budget.
+        #
+        # This does NOT bound Popen itself. Popen is synchronous, so no timed
+        # operation runs while it stalls -- an interpreter on a hung mount still
+        # blocks here indefinitely. Bounding that needs the launch performed off
+        # this thread with its own timeout, which is a different shape; tracked
+        # separately. Do not restate this as "launch is bounded".
         deadline = time.monotonic() + timeout_seconds
         process = subprocess.Popen(
             [*bb_executable, *argv],

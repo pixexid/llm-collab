@@ -898,14 +898,16 @@ class ProductionTransportTest(unittest.TestCase):
         with self.assertRaises(BbTransportTimeout):
             transport([], 0.5)
 
-    def test_the_budget_starts_at_the_launch_boundary(self):
-        """GH-584 follow-up: subprocess startup is inside the deadline.
+    def test_launch_time_is_charged_against_the_budget(self):
+        """GH-584: launch cost is SUBTRACTED from the waits, not bounded itself.
 
-        Establishing the deadline after Popen() left process launch unbounded --
-        an interpreter on a hung mount could burn arbitrary time before the timer
-        began, and the call could then return well past timeout_seconds. A fake
-        Popen that stalls on construction is the only way to exercise that window;
-        a real slow child cannot separate launch cost from read cost.
+        Deliberately narrow, because the earlier name for this test overclaimed:
+        Popen is synchronous, so nothing timed runs while it stalls and this
+        cannot prove launch is bounded. What it does prove is the accounting --
+        a 0.5s launch against a 0.2s budget leaves the post-launch waits with
+        zero remaining, so the call refuses instead of granting them a fresh
+        full budget each. Truly bounding launch needs it off this thread and is
+        tracked separately.
         """
         import llm_collab.bb_client as bb
 
@@ -927,10 +929,12 @@ class ProductionTransportTest(unittest.TestCase):
             with self.assertRaises(BbTransportTimeout):
                 transport([], 0.2)
         elapsed = time.monotonic() - started
+        # 0.5s launch + a spent budget: the waits must get ~0 remaining, so the
+        # call ends near the launch cost rather than adding another 0.2s per wait.
         self.assertLess(
             elapsed,
             0.9,
-            f"launch time was outside the budget: {elapsed:.2f}s for a 0.2s bound",
+            f"launch cost was not charged against the budget: {elapsed:.2f}s",
         )
 
     def test_the_deadline_bounds_the_call_not_each_wait(self):
