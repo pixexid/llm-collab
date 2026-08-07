@@ -36,6 +36,8 @@ BOOTSTRAP_NOT_ENABLED_FOR_PROJECT = "bb_bootstrap_project_not_enabled"
 BOOTSTRAP_SESSION_EXISTS = "bb_bootstrap_session_exists"
 BOOTSTRAP_TERMINAL_BINDING = "bb_bootstrap_terminal_binding"
 BOOTSTRAP_NO_PACKET = "bb_bootstrap_no_first_packet"
+BOOTSTRAP_REPO_TARGET_REQUIRED = "bb_bootstrap_repo_target_required"
+BOOTSTRAP_REPO_TARGET_AMBIGUOUS = "bb_bootstrap_repo_target_ambiguous"
 
 # A binding in any of these states is contested or unreadable. None of them is a
 # first delivery, and none may be bootstrapped through.
@@ -48,6 +50,44 @@ TERMINAL_BINDING_STATES = frozenset(
 class BootstrapRefusal:
     reason: str
     detail: str
+
+
+def resolve_bootstrap_repo_id(
+    project: Mapping[str, Any] | None,
+    packet_repo_targets: Any,
+) -> str | BootstrapRefusal:
+    """Resolve the repository a bootstrap prompt is allowed to execute in.
+
+    An explicit project setting is authoritative. Otherwise the packet must
+    name exactly one repository; bootstrap must not invent a default for a
+    prompt that is about to execute in a real project.
+    """
+    bb = project.get("bb") if isinstance(project, Mapping) else None
+    configured = bb.get("repo_id") if isinstance(bb, Mapping) else None
+    if configured is not None:
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        return BootstrapRefusal(
+            BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
+            "bb.repo_id must be a non-empty string when configured",
+        )
+    if not isinstance(packet_repo_targets, list) or not packet_repo_targets:
+        return BootstrapRefusal(
+            BOOTSTRAP_REPO_TARGET_REQUIRED,
+            "packet must declare exactly one repo target for bb bootstrap",
+        )
+    if len(packet_repo_targets) != 1:
+        return BootstrapRefusal(
+            BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
+            "packet must declare exactly one repo target for bb bootstrap",
+        )
+    repo_id = packet_repo_targets[0]
+    if not isinstance(repo_id, str) or not repo_id.strip():
+        return BootstrapRefusal(
+            BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
+            "packet repo target must be a non-empty string",
+        )
+    return repo_id.strip()
 
 
 @dataclass(frozen=True)

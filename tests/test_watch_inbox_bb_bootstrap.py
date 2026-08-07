@@ -58,6 +58,95 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         )
         self.assertIn("CHAT-ONE", in_scope, "the scope filter excluded a legitimate packet")
 
+    def test_packet_repo_target_binds_unscoped_watcher_and_missing_refuses(self) -> None:
+        project = {"id": "project-one", "bb": {"enabled": True}}
+        outcome = SimpleNamespace(
+            state=watch_inbox.BOOTSTRAP_STARTED,
+            detail="one docs thread started",
+            native_thread_id="thread-docs",
+        )
+        start_repo_ids: list[str] = []
+
+        def start_inputs(_project_id, _project, repo_id):
+            start_repo_ids.append(repo_id)
+            return {"repo_id": repo_id}
+
+        with patch.object(watch_inbox, "bb_bootstrap_enabled", return_value=True), patch.object(
+            watch_inbox, "get_project", return_value=project
+        ), patch.object(
+            watch_inbox, "_bb_existing_session_ids", return_value=[]
+        ), patch.object(
+            watch_inbox, "_bb_binding_state", return_value=None
+        ), patch.object(
+            watch_inbox, "_bb_start_inputs", side_effect=start_inputs
+        ), patch.object(
+            watch_inbox, "execute_bb_bootstrap_plan", return_value=outcome
+        ), patch.object(watch_inbox, "emit") as emit:
+            consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                "glmpi",
+                False,
+                project_id="project-one",
+                repo_targets=None,
+                messages={"Chats/project/first.md": self.scoped_packet(["docs"])},
+            )
+
+            self.assertEqual(
+                ["Chats/project/first.md"],
+                consumed,
+                "failures=gh581_unscoped_docs_packet_must_bootstrap_once",
+            )
+            self.assertEqual(
+                ["docs"],
+                start_repo_ids,
+                "failures=gh581_unscoped_docs_packet_must_not_select_app",
+            )
+
+            start_repo_ids.clear()
+            emit.reset_mock()
+            packet_without_repo = self.packet()
+            packet_without_repo["frontmatter"] = {
+                key: value
+                for key, value in packet_without_repo["frontmatter"].items()
+                if key != "repo_targets"
+            }
+            consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                "glmpi",
+                False,
+                project_id="project-one",
+                repo_targets=None,
+                messages={"Chats/project/first.md": packet_without_repo},
+            )
+            self.assertEqual([], consumed, "failures=gh581_missing_packet_repo_refuses")
+            self.assertEqual([], start_repo_ids, "failures=gh581_missing_packet_repo_no_start")
+            self.assertTrue(
+                any(
+                    call.args[0].get("reason") == "bb_bootstrap_repo_target_required"
+                    for call in emit.call_args_list
+                ),
+                "failures=gh581_missing_packet_repo_typed_refusal",
+            )
+
+            emit.reset_mock()
+            start_repo_ids.clear()
+            consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                "glmpi",
+                False,
+                project_id="project-one",
+                repo_targets=["docs"],
+                messages={"Chats/project/first.md": self.scoped_packet(["docs"])},
+            )
+
+        self.assertEqual(
+            ["Chats/project/first.md"],
+            consumed,
+            "failures=gh581_scoped_docs_control_must_bootstrap",
+        )
+        self.assertEqual(
+            ["docs"],
+            start_repo_ids,
+            "failures=gh581_scoped_docs_control_must_use_docs",
+        )
+
     def test_disabled_gate_does_not_read_project_or_start(self) -> None:
         with patch.object(watch_inbox, "config_get", return_value=False), patch.object(
             watch_inbox, "get_project", side_effect=AssertionError("project lookup")

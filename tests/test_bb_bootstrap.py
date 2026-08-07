@@ -16,10 +16,13 @@ from llm_collab.bb_bootstrap import (
     BOOTSTRAP_NO_PACKET,
     BOOTSTRAP_SESSION_EXISTS,
     BOOTSTRAP_TERMINAL_BINDING,
+    BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
+    BOOTSTRAP_REPO_TARGET_REQUIRED,
     BootstrapPlan,
     BootstrapRefusal,
     plan_bootstrap,
     project_enables_bb,
+    resolve_bootstrap_repo_id,
     execute_bootstrap,
     BOOTSTRAP_STARTED,
     BOOTSTRAP_DUPLICATE,
@@ -93,6 +96,29 @@ class ProjectEnablementTest(unittest.TestCase):
         self.assertFalse(project_enables_bb({"bb": "enabled"}))
         self.assertFalse(project_enables_bb({}))
         self.assertFalse(project_enables_bb(None))
+
+
+class RepoResolutionTest(unittest.TestCase):
+    def test_explicit_project_repo_wins_over_packet(self):
+        self.assertEqual(
+            "app",
+            resolve_bootstrap_repo_id(
+                {"bb": {"repo_id": "app"}}, ["docs"]
+            ),
+        )
+
+    def test_single_packet_repo_is_used_without_project_override(self):
+        self.assertEqual("docs", resolve_bootstrap_repo_id({"bb": {}}, ["docs"]))
+
+    def test_missing_or_multiple_packet_repos_refuse(self):
+        self.assertEqual(
+            BOOTSTRAP_REPO_TARGET_REQUIRED,
+            resolve_bootstrap_repo_id({"bb": {}}, None).reason,
+        )
+        self.assertEqual(
+            BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
+            resolve_bootstrap_repo_id({"bb": {}}, ["app", "docs"]).reason,
+        )
 
 
 class ExactAbsenceTest(unittest.TestCase):

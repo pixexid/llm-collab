@@ -78,6 +78,7 @@ from llm_collab.bb_bootstrap import (
     BOOTSTRAP_STARTED,
     BootstrapRefusal,
     plan_bootstrap,
+    resolve_bootstrap_repo_id,
 )
 
 
@@ -452,6 +453,7 @@ def _bb_first_packets(
             ),
             "path": path,
             "body": message.get("body", ""),
+            "repo_targets": frontmatter.get("repo_targets"),
         }
         previous = first.get(chat_id)
         if previous is None or path < previous["path"]:
@@ -472,7 +474,7 @@ def _bb_existing_session_ids(agent_id: str, project_id: str, chat_id: str) -> li
 def _bb_start_inputs(
     project_id: str,
     project: Mapping[str, Any],
-    repo_targets: list[str] | None,
+    repo_id: str,
 ) -> dict[str, Any]:
     bb = project.get("bb")
     if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
@@ -484,9 +486,6 @@ def _bb_start_inputs(
             raise ValueError(f"bb.{key} is required")
         return value.strip()
 
-    repo_id = bb.get("repo_id")
-    if not isinstance(repo_id, str) or not repo_id:
-        repo_id = repo_targets[0] if repo_targets and len(repo_targets) == 1 else "app"
     repo_root = resolve_project_repo_path(project_id, repo_id)
     if repo_root is None or not repo_root.is_dir():
         raise ValueError(f"bb repo target {repo_id!r} is not a directory")
@@ -566,7 +565,23 @@ def _bootstrap_bb_before_dispatch(
                     json_output,
                 )
                 continue
-            inputs = _bb_start_inputs(project_id, project or {}, repo_targets)
+            repo_id = resolve_bootstrap_repo_id(project or {}, packet.get("repo_targets"))
+            if isinstance(repo_id, BootstrapRefusal):
+                emit(
+                    {
+                        "ts": utc_now_str(),
+                        "event": "bb_bootstrap_refused",
+                        "detail": repo_id.detail,
+                        "agent": agent_id,
+                        "project_id": project_id,
+                        "chat_id": chat_id,
+                        "message_path": packet["path"],
+                        "reason": repo_id.reason,
+                    },
+                    json_output,
+                )
+                continue
+            inputs = _bb_start_inputs(project_id, project or {}, repo_id)
             outcome = execute_bb_bootstrap_plan(decision, packet, inputs)
         except Exception as error:
             emit(
