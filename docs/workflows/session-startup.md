@@ -14,8 +14,12 @@ do not copy its commands here.
 A BB worker is not an llm-collab participant: it has no `agents.json` identity,
 exact-session binding, durable-mailbox authorship, or delivery receipt. The
 orchestrator remains the integration point and communicates with that worker
-through BB. Continue below only for the orchestrator itself or a worker that is
-explicitly being enrolled as a first-class durable-mailbox participant.
+through BB. Only workspace acquisition differs: after `bb-workers.md` provides
+the verified managed worktree, every BB worker must still complete
+[`Read before acting`](#read-before-acting) and
+[`Required preflight`](#required-preflight) before editing. The first-class
+bootstrap, binding, and watcher sections apply only when a worker is explicitly
+being enrolled as a durable-mailbox participant.
 
 ## Bootstrap first
 

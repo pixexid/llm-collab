@@ -17,6 +17,13 @@ its commands here. A BB worker is not registered in `agents.json`, bound to an
 llm-collab session, receipt-bearing, or a canonical-bus participant. Its
 orchestrator remains the integration point and communicates with it through BB.
 
+The former Codex Thread Coordination worker route is dormant. It is the legacy
+`codex -> codex` self-target path, and the Codex app is no longer a worker
+surface. Do not create or drive workers with `read_thread` or
+`send_message_to_thread`. If legacy `deliver.py` output reports
+`thread_coordination_required`, treat that banner as compatibility output and
+use the BB workflow above; retiring the live banner is a separate code change.
+
 Stop here and use that workflow for an ordinary worker assignment. Continue
 below only when the work explicitly requires a first-class durable-mailbox
 participant with its own project/chat/agent coordinates.
