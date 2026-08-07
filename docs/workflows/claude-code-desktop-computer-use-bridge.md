@@ -1,5 +1,24 @@
 # Desktop Computer-Use Doorbell (Agent-to-Agent Comms)
 
+> **Current BB routing status: dormant, retained in place.** The current worker
+> fleet routes through BB. AX is not a BB transport and is not used to reach BB
+> workers, whose threads are not `llm-collab` participants, session bindings, or
+> receipt-bearing endpoints. Use [`bb-workers.md`](bb-workers.md) for current BB
+> operations. None of this document's AX lane applies to BB. Its durable-packet
+> and receipt reasoning still applies when the orchestrator itself authors a
+> collab packet after verifying a BB result, not to the BB worker.
+>
+> This guide stays in `docs/workflows/` because AX is parked rather than proven
+> dead; [GH-560](https://github.com/pixexid/llm-collab/issues/560) tracks the
+> remaining guidance for a surface that may return. Keeping the targeting,
+> verification, and recovery mechanics together avoids reconstructing a safety
+> procedure if that happens. Contract v12's fallback predicate is unchanged and
+> remains the authority for whether `deliver.py` offers a doorbell. When it does,
+> run the exact command it prints or follow the live AX capability check in
+> [`bb-workers.md`](bb-workers.md) and read its current `windows` count. Never
+> infer reachability from `pgrep -x Codex`: it can return no match while the
+> surface is live inside `ChatGPT.app`.
+
 This is the agent-to-agent communication workflow for collaborators running in
 dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 `/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
