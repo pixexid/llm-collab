@@ -96,7 +96,17 @@ def parse_args():
     p.add_argument("--poll-seconds", type=int, default=None, help="Poll interval (default: from config)")
     p.add_argument("--max-polls", type=int, default=0, help="Stop after N polls; 0 = forever")
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
-    p.add_argument("--no-autobridge", action="store_true", help="Disable automatic session autobridge dispatch on new unread messages")
+    autobridge = p.add_mutually_exclusive_group()
+    autobridge.add_argument(
+        "--autobridge",
+        action="store_true",
+        help="Enable binding-owned dispatch for this exact --session",
+    )
+    autobridge.add_argument(
+        "--no-autobridge",
+        action="store_true",
+        help="Disable automatic session autobridge dispatch on new unread messages",
+    )
     p.add_argument(
         "--include-unbound",
         action="store_true",
@@ -116,6 +126,8 @@ def parse_args():
     if args.include_unbound:
         if args.session is not None:
             p.error("--include-unbound cannot be combined with --session")
+        if args.autobridge:
+            p.error("--include-unbound cannot be combined with --autobridge")
         if not args.project or not args.chat:
             p.error("--include-unbound requires --project and --chat")
         args.no_autobridge = True
@@ -127,6 +139,8 @@ def parse_args():
         if not args.project or not args.chat:
             p.error("--session requires --project and --chat")
         args.packet = None
+    if args.autobridge and args.session is None:
+        p.error("--autobridge requires --session")
     return args
 
 
@@ -649,6 +663,7 @@ def dispatch_autobridge(
     refusal_progress: dict | None = None,
     refusal_stats: dict | None = None,
     messages: Mapping[str, dict] | Sequence[dict] | None = None,
+    only_session_id: str | None = None,
 ) -> list[str]:
     consumed_paths: list[str] = []
     progress = refusal_progress if refusal_progress is not None else {}
@@ -694,7 +709,10 @@ def dispatch_autobridge(
             messages=messages,
         )
     )
-    for session_id in autobridge_session_ids(agent_id, project_id):
+    session_ids = autobridge_session_ids(agent_id, project_id)
+    if only_session_id is not None:
+        session_ids = [session_id for session_id in session_ids if session_id == only_session_id]
+    for session_id in session_ids:
         # Canonical binding gate (#95): resolve the session's exact binding from
         # the ledger store BEFORE dispatch. A stale or foreign session (its
         # binding_id/generation differ from the canonical active one) never
@@ -1014,7 +1032,7 @@ def main():
                 # returns returncode 0 and is marked processed), not by this set,
                 # since dispatch_autobridge runs whenever `unread` is nonempty.
                 seen_paths = seen_paths | new_msgs
-                if not args.session and not args.no_autobridge:
+                if (args.autobridge or not args.session) and not args.no_autobridge:
                     refusal_stats: dict = {}
                     before = dict(refusal_progress)
                     consumed_paths = sorted(
@@ -1027,6 +1045,7 @@ def main():
                                 refusal_progress=refusal_progress,
                                 refusal_stats=refusal_stats,
                                 messages=messages,
+                                only_session_id=args.session if args.autobridge else None,
                             )
                         )
                     )

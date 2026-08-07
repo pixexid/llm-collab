@@ -77,12 +77,12 @@ class CoworkerPromptTest(unittest.TestCase):
         p = ncs.coworker_prompt("codex", ncs.wake_channel(activation),
                                 "llm-collab", "CHAT-ABCD1234", "app", "codex_app",
                                 ncs.needs_dispatch_wake(activation))
-        self.assertIn("pm2_watchers.py ensure --agent codex", p)
+        self.assertIn("watch_inbox.py", p)
+        self.assertIn("--autobridge", p)
         self.assertNotIn("NO native session watcher", p)
-        # the register step still names the exact session; only the WATCHER is
-        # agent-wide, because that is the one that dispatches.
+        # The register and dispatcher both name the exact session.
         self.assertIn("--session SESSION-CODEX-ABCD1234 --agent codex", p)
-        self.assertNotIn("--session SESSION-CODEX-ABCD1234 --repo-target", p)
+        self.assertIn("--session SESSION-CODEX-ABCD1234 --repo-target", p)
 
     def test_watcher_prompt_arms_watcher(self):
         p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
@@ -139,10 +139,8 @@ class PickupBlockTest(unittest.TestCase):
         activation = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
         channel = ncs.wake_channel(activation)
         self.assertEqual("watcher", channel)
-        # And it must be the DISPATCHING watcher. watch_inbox.py runs
-        # dispatch_autobridge only when --session is absent, so an exact-session
-        # command would announce and never start Codex's turn — while the bound
-        # binding suppresses AX. Observed, not woken (PR #559 r3725767284).
+        # Codex needs the explicit binding-owned dispatch flag. The default
+        # exact-session watcher remains notification-only for self-reading workers.
         self.assertTrue(ncs.needs_dispatch_wake(activation))
         block = "\n".join(ncs.pickup_block(
             channel, "codex", "llm-collab", "CHAT-ABCD1234",
@@ -151,25 +149,23 @@ class PickupBlockTest(unittest.TestCase):
         # Assert on the COMMAND lines, not the block: the explanatory comment
         # legitimately contains the string "--session".
         command = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
-        # The MANAGED singleton, not a raw poller: pm2 already runs one watcher
-        # per watcher_enabled agent, and a second agent-wide poller would
-        # double-dispatch, since dispatch_session reads processed_messages
-        # before invoking the runtime and records the path after
-        # (PR #559 r3725819269).
-        self.assertIn("pm2_watchers.py ensure --agent codex", command)
-        self.assertNotIn("watch_inbox.py", command)
-        # Transport before binding-dependent wake: ensuring the watcher without
-        # the sidecar leaves a dispatchable binding that suppresses AX with
-        # nowhere to send the turn — the 2026-08-05 silent outage
-        # (PR #559 r3725873619). Order is asserted, not just presence.
+        self.assertIn("watch_inbox.py", command)
+        self.assertIn("--session SESSION-CODEX", command)
+        self.assertIn("--autobridge", command)
+        self.assertNotIn("pm2_watchers.py ensure --agent codex\n", command)
+        # Transport before binding-dependent wake: the sidecar must be ensured
+        # before the exact watcher or a valid binding has nowhere to send its turn.
         cmds = [l.strip() for l in command.splitlines() if l.strip()]
         self.assertEqual(
             [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
-             f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
+             "export LLM_COLLAB_READER_RUNTIME_ID=019f-native",
+             "export LLM_COLLAB_READER_RUNTIME_FAMILY=codex_app",
+             f"{ncs.LAUNCH} watch_inbox.py \\",
+             "--me codex --project llm-collab --chat CHAT-ABCD1234 \\",
+             "--session SESSION-CODEX --repo-target app --autobridge --json"],
             cmds,
             "sidecar must be ensured BEFORE the watcher, and nothing else emitted",
         )
-        self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
 
     def test_self_reading_worker_still_gets_the_exact_session_watcher(self):

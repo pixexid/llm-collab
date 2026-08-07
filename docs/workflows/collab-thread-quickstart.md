@@ -162,9 +162,10 @@ packet into a guessed session:
   --include-unbound --no-autobridge --notify --max-polls 1 --json
 ```
 
-The agent-wide PM2 watcher is also notification-only. Use an exact native
-session watcher for routine autobridge dispatch; repair the binding before
-retrying a packet that `deliver.py` refuses.
+The agent-wide PM2 watcher is also notification-only. A self-reading worker uses
+the exact native session watcher as an observer; a worker whose binding owns the
+runtime turn (Codex) adds `--autobridge` to that exact-session command. Repair the
+binding before retrying a packet that `deliver.py` refuses.
 
 ### Pi workers
 

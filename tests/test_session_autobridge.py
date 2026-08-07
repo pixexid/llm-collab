@@ -10401,6 +10401,55 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual(75, stale.returncode)
         self.assertIn("exact_session_runtime_mismatch", stale.stdout)
 
+    def test_exact_watcher_autobridge_dispatches_only_its_binding(self):
+        message = {
+            "path": "Chats/exact/codex-packet.md",
+            "frontmatter": {
+                "project_id": "amiga",
+                "chat_id": "CHAT-CODEX-EXACT",
+                "to": "codex",
+            },
+        }
+        stdout = StringIO()
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "codex",
+            "--project",
+            "amiga",
+            "--chat",
+            "CHAT-CODEX-EXACT",
+            "--session",
+            "SESSION-CODEX-EXACT",
+            "--autobridge",
+            "--max-polls",
+            "1",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib,
+            "exact_session_messages",
+            return_value=[message],
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_autobridge",
+            return_value=[],
+        ) as dispatch, patch.object(
+            watch_inbox_lib,
+            "load_refusal_progress",
+            return_value={},
+        ), patch.object(
+            watch_inbox_lib,
+            "config_get",
+            return_value=1,
+        ), redirect_stdout(stdout):
+            watch_inbox_lib.main()
+
+        self.assertTrue(any(json.loads(line)["event"] == "new_message"
+                            for line in stdout.getvalue().splitlines()))
+        self.assertEqual("SESSION-CODEX-EXACT", dispatch.call_args.kwargs["only_session_id"])
+        self.assertEqual({message["path"]: message}, dispatch.call_args.kwargs["messages"])
+
     def test_exact_watcher_stays_armed_and_emits_a_later_packet(self):
         old = {
             "path": "Chats/exact/old.md",

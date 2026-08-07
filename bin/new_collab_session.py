@@ -212,7 +212,8 @@ def preflight_starter_binding(*, agent: str, project: str, runtime_session_id: s
 LAUNCH = "<runtime_root>/bin/llm-collab"
 
 
-def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
+def watch_cmd(agent, project, chat, session, repo_target, rsid, family,
+              autobridge: bool = False) -> str:
     # No --skip-existing: on a fresh chat there is no legitimate backlog to
     # suppress, and skipping would drop a packet delivered in the window between
     # the binding going active and the watcher starting.
@@ -220,12 +221,13 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
     # Export the family alongside the id: an activation reader's native id IS this
     # worker's ordinary native, and native identity is (family, id), so the reader
     # must carry the real family (GH-468) rather than synthesize a placeholder.
+    dispatch_flag = " --autobridge" if autobridge else ""
     return (
         f"export LLM_COLLAB_READER_RUNTIME_ID={rsid}\n"
         f"export LLM_COLLAB_READER_RUNTIME_FAMILY={family}\n"
         f"{LAUNCH} watch_inbox.py \\\n"
         f"  --me {agent} --project {project} --chat {chat} \\\n"
-        f"  --session {session} --repo-target {repo_target} --json"
+        f"  --session {session} --repo-target {repo_target}{dispatch_flag} --json"
     )
 
 
@@ -247,26 +249,20 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     when `--session` is absent, so it announces `new_message` and stops. That is
     right for a worker that reads its own inbox on the announcement. A worker
     whose turn is STARTED by autobridge dispatch uses the verified binding;
-    the agent-wide PM2 watcher is notification-only."""
+    the agent-wide PM2 watcher is notification-only; a Codex setup arms an
+    exact-session watcher with explicit binding-owned dispatch."""
     if channel == "watcher" and needs_dispatch:
         return [
-            "# 1) Ensure the TRANSPORT first. A binding that dispatches while",
-            "#    the app-server sidecar is missing suppresses AX and has",
-            "#    nowhere to send the turn — that is the 20-hour silent outage",
-            "#    of 2026-08-05. This fails closed (exit 2) with the exact",
-            "#    remedy when the token is absent or insecure, so a failure",
-            "#    here means STOP, not continue:",
+            "# Ensure the TRANSPORT first. A binding that dispatches while",
+            "# the app-server sidecar is missing suppresses AX and has",
+            "# nowhere to send the turn. This fails closed (exit 2) with",
+            "# the exact remedy when the token is absent or insecure:",
             f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
             "",
-            "# 2) Then ensure the MANAGED dispatching watcher (one per agent,",
-            "#    not per chat). Your turn is started by autobridge dispatch,",
-            "#    and watch_inbox only dispatches when --session is absent —",
-            "#    but a raw second poller alongside the PM2 one would",
-            "#    double-dispatch: both read processed_messages before invoking",
-            "#    the runtime and record after, so each can issue turn/start for",
-            "#    the same unread packet. `ensure` is idempotent: it starts the",
-            "#    singleton only if missing.",
-            f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
+            "# Arm the binding-owned exact-session dispatcher. The --autobridge",
+            "# flag is explicit; without it this watcher only announces packets.",
+            watch_cmd(agent, project, chat, session, repo_target, rsid, family,
+                      autobridge=True),
         ]
     if channel == "watcher":
         return [
