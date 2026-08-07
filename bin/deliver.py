@@ -115,7 +115,6 @@ from _session_autobridge import (
     BINDING_UNREADABLE_REASON,
     BindingUnreadable,
     EXACT_BINDING_MISMATCH_REASON,
-    load_binding,
     load_thread_pair,
     repo_scope_matches,
     resolve_exact_dispatch_pair,
@@ -280,12 +279,12 @@ def resolve_sender_session(
     except FileNotFoundError:
         pair = None
     except (OSError, ValueError) as error:
-        if bound_session_id:
-            pair = None
-        else:
-            raise SenderSessionProvenanceRefusal(
-                f"thread pair could not be read without a current binding: {error}"
-            ) from error
+        # The pair is reread by update_thread_pair() after the durable packet is
+        # written.  Treating this read as optional would turn that later failure
+        # into a retryable error after the side effect already happened.
+        raise SenderSessionProvenanceRefusal(
+            f"thread pair could not be read before delivery: {error}"
+        ) from error
 
     if pair is None:
         return bound_session_id, None
@@ -308,15 +307,18 @@ def resolve_sender_session(
 
 def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: str) -> str | None:
     try:
-        binding = load_binding(project_id, chat_id, agent_id)
-    except FileNotFoundError:
-        return None
+        resolved, _reason, _inactive_pair = resolve_exact_dispatch_pair(
+            project_id, chat_id, agent_id
+        )
     except BindingUnreadable:
         # Refuse the RUNTIME target, never the durable write. Letting this propagate killed
         # deliver.py with a traceback before read_body(), so an oversized recipient binding meant
         # exit 1 and no packet at all -- and the mailbox is the one channel that must survive
         # every runtime failure. main() records the real cause; this only declines to target.
         return None
+    if resolved is None:
+        return None
+    _session, binding = resolved
     runtime_session_id = binding.get("runtime_session_id")
     if not runtime_session_id:
         return None

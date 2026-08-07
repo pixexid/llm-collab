@@ -297,14 +297,20 @@ Every routed message should carry both ids when they are known:
 Delivery should resolve follow-up ids in this order:
 
 1. explicit ids on the send command
-2. the sender's current canonical per-agent runtime binding
+2. the sender's current canonical per-agent runtime binding, but only after its
+   project/chat/agent identity and live backing session validate exactly
 3. remembered paired-thread state for the same project/chat/agent pair as a fallback
 
-The current runtime binding is authoritative after a rebind. If it replaces a
-different paired-thread sender id, delivery keeps the live binding and records the
-old pair value in `supersedes_session_id` on the new packet. If no current binding
-exists and the pair's sender records contradict one another, delivery refuses
-before writing because the sender identity is not provable.
+The current runtime binding is authoritative after a rebind only while that
+validation succeeds. A mismatched or deactivated binding falls through to the
+pair and cannot supersede it. If it replaces a different paired-thread sender
+id, delivery keeps the live binding and records the old pair value in
+`supersedes_session_id` on the new packet. A malformed or unreadable pair is a
+typed refusal before the packet write, because ignoring it would allow a later
+post-write pair update to report a retryable failure after delivery completed.
+If no current binding exists and the pair's sender records contradict one
+another, delivery refuses before writing because the sender identity is not
+provable.
 
 When a sender later emits the same `agent_id` with a different
 `sender_session_id`, the paired-thread state should update that side of the

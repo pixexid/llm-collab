@@ -1674,11 +1674,28 @@ class SessionAutobridgeTest(unittest.TestCase):
         state = root / "State" / "session_autobridge"
         if binding_session_id is not None:
             write_json(
+                state / "sessions" / f"{binding_session_id}.json",
+                {
+                    "session_id": binding_session_id,
+                    "agent_id": "codex",
+                    "project_id": project_id,
+                    "chat_id": chat_id,
+                    "status": "active",
+                    "wake_strategy": "notify",
+                    "runtime": {
+                        "family": "codex_app",
+                        "session_id": binding_session_id,
+                    },
+                },
+            )
+            write_json(
                 state / "bindings" / project_id / chat_id / "codex.json",
                 {
                     "project_id": project_id,
                     "chat_id": chat_id,
                     "agent_id": "codex",
+                    "session_id": binding_session_id,
+                    "runtime_family": "codex_app",
                     "runtime_session_id": binding_session_id,
                 },
             )
@@ -5914,6 +5931,122 @@ class SessionAutobridgeTest(unittest.TestCase):
             list(chat_dir.glob("*_to-claude_*.md")),
             "failures=gh547_pair_conflict_no_packet_write",
         )
+
+    def test_deliver_refuses_unreadable_pair_before_packet_write(self):
+        for project_id, chat_id in (
+            ("amiga", "CHAT-GH585-AMIGA-MALFORMED"),
+            ("nuvyr", "CHAT-GH585-NUVYR-MALFORMED"),
+        ):
+            with self.subTest(project=project_id):
+                root, chat_dir = self.sender_provenance_workspace(
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    binding_session_id="codex-live-new",
+                    pair_session_id="codex-pair-old",
+                )
+                pair_path = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "thread_pairs"
+                    / project_id
+                    / chat_id
+                    / "claude__codex.json"
+                )
+                pair_path.write_text("{malformed", encoding="utf-8")
+
+                delivered = self.run_sender_provenance_delivery(
+                    root,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    title="Malformed pair probe",
+                    body="This must be refused before the packet write.",
+                )
+
+                self.assertEqual(
+                    2,
+                    delivered.returncode,
+                    f"failures=gh585_unreadable_pair_refusal_status project={project_id} "
+                    f"stderr={delivered.stderr}",
+                )
+                self.assertIn(
+                    "sender_session_provenance_refused",
+                    delivered.stderr,
+                    f"failures=gh585_unreadable_pair_typed_refusal project={project_id}",
+                )
+                self.assertFalse(
+                    list(chat_dir.glob("*_to-claude_*.md")),
+                    f"failures=gh585_unreadable_pair_no_packet project={project_id}",
+                )
+
+    def test_deliver_falls_back_to_pair_when_sender_binding_is_not_authoritative(self):
+        for project_id, chat_id, invalid_kind in (
+            ("amiga", "CHAT-GH585-AMIGA-SCOPE", "scope"),
+            ("nuvyr", "CHAT-GH585-NUVYR-SCOPE", "scope"),
+            ("amiga", "CHAT-GH585-AMIGA-STOPPED", "stopped"),
+            ("nuvyr", "CHAT-GH585-NUVYR-STOPPED", "stopped"),
+        ):
+            with self.subTest(project=project_id):
+                root, chat_dir = self.sender_provenance_workspace(
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    binding_session_id="codex-live-new",
+                    pair_session_id="codex-pair-old",
+                )
+                binding_path = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "bindings"
+                    / project_id
+                    / chat_id
+                    / "codex.json"
+                )
+                if invalid_kind == "scope":
+                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                    binding["chat_id"] = "CHAT-FOREIGN"
+                    write_json(binding_path, binding)
+                else:
+                    session_path = (
+                        root
+                        / "State"
+                        / "session_autobridge"
+                        / "sessions"
+                        / "codex-live-new.json"
+                    )
+                    session = json.loads(session_path.read_text(encoding="utf-8"))
+                    session["status"] = "stopped"
+                    write_json(session_path, session)
+
+                delivered = self.run_sender_provenance_delivery(
+                    root,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    title="Invalid binding fallback probe",
+                    body="The valid pair must remain authoritative.",
+                )
+
+                self.assertEqual(
+                    0,
+                    delivered.returncode,
+                    f"failures=gh585_invalid_{invalid_kind}_fallback_status project={project_id} "
+                    f"stderr={delivered.stderr}",
+                )
+                packets = sorted(chat_dir.glob("*_to-claude_*.md"))
+                self.assertTrue(
+                    packets,
+                    f"failures=gh585_invalid_{invalid_kind}_fallback_packet project={project_id}",
+                )
+                frontmatter, _body = parse_frontmatter(packets[-1].read_text())
+                self.assertEqual(
+                    "codex-pair-old",
+                    frontmatter["sender_session_id"],
+                    f"failures=gh585_invalid_{invalid_kind}_pair_wins project={project_id}",
+                )
+                self.assertIsNone(
+                    frontmatter["supersedes_session_id"],
+                    f"failures=gh585_invalid_{invalid_kind}_no_supersession project={project_id}",
+                )
 
     def test_deliver_false_readiness_engages_fallback_and_writes_packet(self):
         # The subject is relay, not claude: this lane asserts the doorbell fallback
