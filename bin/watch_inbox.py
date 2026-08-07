@@ -661,15 +661,24 @@ def dispatch_autobridge(
         stats["_new"] = stats.get("_new", 0) + 1
         return True
 
-    consumed_paths.extend(
-        _bootstrap_bb_before_dispatch(
-            agent_id,
-            json_output,
-            project_id=project_id,
-            repo_targets=repo_targets,
-            messages=messages,
-        )
+    bootstrap_consumed = _bootstrap_bb_before_dispatch(
+        agent_id,
+        json_output,
+        project_id=project_id,
+        repo_targets=repo_targets,
+        messages=messages,
     )
+    consumed_paths.extend(bootstrap_consumed)
+    # Acknowledge the bootstrap result BEFORE session enumeration, not only at the
+    # end of the function. If autobridge_session_ids() raises -- a corrupt session
+    # record aborts enumeration -- the end-of-function mark is never reached, and
+    # the packet is stranded permanently: later polls find the session already
+    # exists so bootstrap returns nothing, while that session already lists the
+    # packet in processed_messages so no dispatch action re-adds it. Marking here
+    # is what makes the executed packet's acknowledgement independent of whether
+    # anything downstream succeeds.
+    if bootstrap_consumed:
+        mark_messages_read(agent_id, sorted(set(bootstrap_consumed)))
     for session_id in autobridge_session_ids(agent_id, project_id):
         # Canonical binding gate (#95): resolve the session's exact binding from
         # the ledger store BEFORE dispatch. A stale or foreign session (its
@@ -863,8 +872,19 @@ def dispatch_autobridge(
                     },
                     json_output,
                 )
-        if consumed_paths:
-            mark_messages_read(agent_id, sorted(set(consumed_paths)))
+    # Marking belongs OUTSIDE the per-session loop. Inside it, any session that
+    # took an early `continue` -- which is exactly what a bootstrap-only delivery
+    # does, because the session it just published already lists the packet in
+    # `processed_messages` and so yields no dispatch actions -- skipped the only
+    # mark_messages_read call. The executed first packet then stayed unread
+    # forever and every later poll revisited and refused it.
+    # Bootstrap paths were already acknowledged above, immediately after they were
+    # produced, so only what dispatch added is left to mark. Marking the whole
+    # accumulated list again would be harmless but would re-issue a write for
+    # every bootstrap packet on every poll.
+    dispatch_only = [path for path in consumed_paths if path not in set(bootstrap_consumed)]
+    if dispatch_only:
+        mark_messages_read(agent_id, sorted(set(dispatch_only)))
 
     return consumed_paths
 

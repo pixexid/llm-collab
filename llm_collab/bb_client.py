@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
@@ -814,6 +815,16 @@ def subprocess_transport(
     """
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
+        # The budget starts at the launch boundary so launch time is ACCOUNTED
+        # FOR: whatever Popen costs is subtracted from what the waits below get,
+        # instead of each wait starting from a full budget.
+        #
+        # This does NOT bound Popen itself. Popen is synchronous, so no timed
+        # operation runs while it stalls -- an interpreter on a hung mount still
+        # blocks here indefinitely. Bounding that needs the launch performed off
+        # this thread with its own timeout, which is a different shape; tracked
+        # separately. Do not restate this as "launch is bounded".
+        deadline = time.monotonic() + timeout_seconds
         process = subprocess.Popen(
             [*bb_executable, *argv],
             stdout=subprocess.PIPE,
@@ -831,11 +842,23 @@ def subprocess_transport(
             process.wait()
 
         try:
+            # ONE end-to-end deadline, established above at the launch boundary.
+            # Giving each wait a fresh `timeout_seconds` made the configured
+            # bound per-wait: a child closing stdout just under the limit, then
+            # stderr just under a second limit, returned after nearly twice it,
+            # and process.wait() could add a third interval. The watcher's
+            # configured bound has to bound the CALL.
+            def remaining() -> float:
+                # Never pass a non-positive timeout: 0 is "poll once and raise",
+                # which is the correct behaviour once the budget is spent, but a
+                # negative value is rejected by process.wait().
+                return max(0.0, deadline - time.monotonic())
+
             out = pool.submit(_read_bounded, process.stdout, max_response_chars)
             err = pool.submit(_read_bounded, process.stderr, max_response_chars)
-            stdout = out.result(timeout=timeout_seconds)
-            stderr = err.result(timeout=timeout_seconds)
-            exit_code = process.wait(timeout=timeout_seconds)
+            stdout = out.result(timeout=remaining())
+            stderr = err.result(timeout=remaining())
+            exit_code = process.wait(timeout=remaining())
         except FuturesTimeout as exc:
             aborting = True
             kill_child()

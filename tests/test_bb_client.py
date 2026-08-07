@@ -8,9 +8,11 @@ the response/failure contract Slice 1B will call.
 from __future__ import annotations
 
 import json
+import io
 import sys
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from llm_collab.bb_client import (
@@ -895,6 +897,81 @@ class ProductionTransportTest(unittest.TestCase):
         transport = subprocess_transport(self._python("import time; time.sleep(30)"))
         with self.assertRaises(BbTransportTimeout):
             transport([], 0.5)
+
+    def test_launch_time_is_charged_against_the_budget(self):
+        """GH-584: launch cost is SUBTRACTED from the waits, not bounded itself.
+
+        Deliberately narrow, because the earlier name for this test overclaimed:
+        Popen is synchronous, so nothing timed runs while it stalls and this
+        cannot prove launch is bounded. What it does prove is the accounting --
+        a 0.5s launch against a 0.2s budget leaves the post-launch waits with
+        zero remaining, so the call refuses instead of granting them a fresh
+        full budget each. Truly bounding launch needs it off this thread and is
+        tracked separately.
+        """
+        import llm_collab.bb_client as bb
+
+        class SlowLaunch:
+            def __init__(self, *_args, **_kwargs):
+                time.sleep(0.5)  # the stall the deadline must already be counting
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+        started = time.monotonic()
+        with patch.object(bb.subprocess, "Popen", SlowLaunch):
+            with self.assertRaises(BbTransportTimeout):
+                transport([], 0.2)
+        elapsed = time.monotonic() - started
+        # 0.5s launch + a spent budget: the waits must get ~0 remaining, so the
+        # call ends near the launch cost rather than adding another 0.2s per wait.
+        self.assertLess(
+            elapsed,
+            0.9,
+            f"launch cost was not charged against the budget: {elapsed:.2f}s",
+        )
+
+    def test_the_deadline_bounds_the_call_not_each_wait(self):
+        """GH-584: one end-to-end deadline, not one per wait.
+
+        The child closes stdout early and holds stderr open past the bound. With
+        a fresh `timeout_seconds` handed to each wait, the stderr wait restarted
+        the clock and the call returned after roughly twice the configured
+        bound; a third interval was then available to process.wait(). Asserting
+        only "it raises" cannot tell the two apart, so this asserts WHEN.
+        """
+        # stdout must consume MOST of the budget before closing. If it closed
+        # immediately the first wait would cost nothing, the stderr wait would
+        # fit inside the bound, and the per-wait bug would not manifest at all --
+        # the first version of this test passed against the defect for exactly
+        # that reason. os.close(1) rather than sys.stdout.close(): the latter
+        # did not produce EOF on the read side, so the FIRST wait timed out in
+        # both variants and the test could not tell them apart. Measured:
+        # 0.41s fixed, 0.78s with the per-wait bound.
+        script = (
+            "import sys,os,time; "
+            "sys.stdout.write('{}'); sys.stdout.flush(); "
+            "time.sleep(0.35); os.close(1); "
+            "time.sleep(5)"
+        )
+        transport = subprocess_transport(self._python(script))
+        started = time.monotonic()
+        with self.assertRaises(BbTransportTimeout):
+            transport([], 0.4)
+        elapsed = time.monotonic() - started
+        # Cumulative: ~0.4s. Per-wait: ~0.35 on stdout, then a FRESH 0.4 on
+        # stderr, so 0.75s or more.
+        self.assertLess(
+            elapsed,
+            0.6,
+            f"deadline was applied per-wait, not to the call: {elapsed:.2f}s for a 0.4s bound",
+        )
 
     def test_timeout_kills_child_before_waiting_for_readers(self):
         """Partial output plus open pipes must not make the deadline wait for EOF."""
