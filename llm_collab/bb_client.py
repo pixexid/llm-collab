@@ -50,10 +50,10 @@ PINNED_BB_VERSION = "0.35.1"
 # and truncating it would turn a resource limit into a correctness bug.
 MAX_RESPONSE_CHARS = 1_048_576
 
-# A hung Popen cannot be cancelled, so bound the daemon threads left waiting for
-# it. A later successful cleanup returns the slot.
+# A hung Popen cannot be cancelled, so reserve before launch and bound every
+# outstanding constructor, including ones not yet abandoned.
 MAX_STALLED_LAUNCHES = 4
-_stalled_launches = 0
+_outstanding_launches = 0
 _stalled_launches_lock = threading.Lock()
 
 # bb's own `thread log --limit` default. Passed EXPLICITLY so the page bound is
@@ -75,6 +75,7 @@ REFUSAL_DISABLED = "bb_adapter_disabled"
 REFUSAL_VERSION_MISMATCH = "bb_version_mismatch"
 REFUSAL_MALFORMED_RESPONSE = "bb_malformed_response"
 REFUSAL_TRANSPORT_FAILED = "bb_transport_failed"
+REFUSAL_LAUNCH_UNAVAILABLE = "bb_launch_unavailable"
 REFUSAL_TIMED_OUT = "bb_timed_out"
 REFUSAL_AMBIGUOUS = "bb_ambiguous_outcome"
 REFUSAL_PROFILE_MISMATCH = "bb_profile_mismatch"
@@ -84,6 +85,10 @@ REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 class BbTransportTimeout(Exception):
     """Raised by a transport when a call exceeds its deadline."""
+
+
+class BbLaunchUnavailable(Exception):
+    """Raised before execution when the stalled-launch cap has no free slot."""
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,20 @@ class BbClient:
     def _gate(self) -> BbRefusal | None:
         checked = self.verify_version()
         return checked if isinstance(checked, BbRefusal) else None
+
+    def reserve_launch(self) -> BbRefusal | None:
+        """Reserve production launch capacity before a caller commits send state."""
+        refusal = self._gate()
+        if refusal is not None:
+            return refusal
+        reserve = getattr(self._transport, "reserve_launch", None)
+        return reserve() if callable(reserve) else None
+
+    def cancel_launch_reservation(self) -> None:
+        """Return a preflight reservation when the caller never reaches send()."""
+        cancel = getattr(self._transport, "cancel_launch_reservation", None)
+        if callable(cancel):
+            cancel()
 
     # ---- envelope validators -------------------------------------------
 
@@ -721,6 +740,11 @@ class BbClient:
     def _call(self, argv: Sequence[str]) -> BbTransportResult | BbRefusal:
         try:
             result = self._transport(argv, self._timeout_seconds)
+        except BbLaunchUnavailable as exc:
+            return BbRefusal(
+                REFUSAL_LAUNCH_UNAVAILABLE,
+                str(exc) or "stalled launch cap reached",
+            )
         except BbResponseReadError as exc:
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE,
@@ -837,16 +861,59 @@ def subprocess_transport(
     outcome for task-bearing calls.
     """
 
-    def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
-        global _stalled_launches
+    reserved_threads: set[int] = set()
 
+    def cap_refusal() -> BbRefusal:
+        return BbRefusal(
+            REFUSAL_LAUNCH_UNAVAILABLE,
+            f"stalled launch cap ({MAX_STALLED_LAUNCHES}) reached",
+        )
+
+    def reserve_launch() -> BbRefusal | None:
+        global _outstanding_launches
+
+        owner = threading.get_ident()
         with _stalled_launches_lock:
-            if _stalled_launches >= MAX_STALLED_LAUNCHES:
-                return BbTransportResult(
-                    1,
-                    "",
-                    f"stalled launch cap ({MAX_STALLED_LAUNCHES}) reached",
-                )
+            if owner in reserved_threads:
+                return None
+            if _outstanding_launches >= MAX_STALLED_LAUNCHES:
+                return cap_refusal()
+            _outstanding_launches += 1
+            reserved_threads.add(owner)
+        return None
+
+    def cancel_launch_reservation() -> None:
+        global _outstanding_launches
+
+        owner = threading.get_ident()
+        with _stalled_launches_lock:
+            if owner in reserved_threads:
+                reserved_threads.remove(owner)
+                _outstanding_launches -= 1
+
+    def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
+        global _outstanding_launches
+
+        owner = threading.get_ident()
+        with _stalled_launches_lock:
+            if owner in reserved_threads:
+                reserved_threads.remove(owner)
+            elif _outstanding_launches >= MAX_STALLED_LAUNCHES:
+                refusal = cap_refusal()
+                raise BbLaunchUnavailable(refusal.detail)
+            else:
+                _outstanding_launches += 1
+
+        reservation_released = False
+
+        def release_launch_slot() -> None:
+            global _outstanding_launches
+            nonlocal reservation_released
+
+            with _stalled_launches_lock:
+                if not reservation_released:
+                    reservation_released = True
+                    _outstanding_launches -= 1
 
         # The budget starts at the launch boundary so whatever Popen costs is
         # subtracted from what the waits below get.
@@ -887,39 +954,37 @@ def subprocess_transport(
         launch_error = []
 
         def launch_process() -> None:
-            global _stalled_launches
-
             launched = None
             try:
-                launched = subprocess.Popen(
-                    [*bb_executable, *argv],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-            except BaseException as exc:
-                launch_error.append(exc)
-            else:
-                launch_result.append(launched)
-            launch_done.set()
-            launch_decided.wait()
-            if launch_abandoned.is_set():
                 try:
-                    if launched is not None:
-                        discard_late_process(launched)
-                finally:
-                    with _stalled_launches_lock:
-                        _stalled_launches -= 1
+                    launched = subprocess.Popen(
+                        [*bb_executable, *argv],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                except BaseException as exc:
+                    launch_error.append(exc)
+                else:
+                    launch_result.append(launched)
+                launch_done.set()
+                launch_decided.wait()
+                if launch_abandoned.is_set() and launched is not None:
+                    discard_late_process(launched)
+            finally:
+                release_launch_slot()
 
         launch_thread = threading.Thread(
             target=launch_process,
             name="bb-subprocess-launch",
             daemon=True,
         )
-        launch_thread.start()
+        try:
+            launch_thread.start()
+        except BaseException:
+            release_launch_slot()
+            raise
         if not launch_done.wait(timeout=remaining()):
-            with _stalled_launches_lock:
-                _stalled_launches += 1
             launch_abandoned.set()
             launch_decided.set()
             raise BbTransportTimeout(
@@ -970,4 +1035,6 @@ def subprocess_transport(
                         pipe.close()
         return BbTransportResult(exit_code, stdout, stderr)
 
+    setattr(transport, "reserve_launch", reserve_launch)
+    setattr(transport, "cancel_launch_reservation", cancel_launch_reservation)
     return transport

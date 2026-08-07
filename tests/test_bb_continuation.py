@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import threading
 import unittest
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from llm_collab.bb_client import BbEvent, BbEventPage, BbQueued, BbRefusal
+from llm_collab.bb_client import (
+    PINNED_BB_VERSION,
+    BbClient,
+    BbEvent,
+    BbEventPage,
+    BbQueued,
+    BbRefusal,
+    BbTransportTimeout,
+    subprocess_transport,
+)
 from llm_collab.bb_continuation import (
     BB_CONTINUATION_AMBIGUOUS,
     BB_CONTINUATION_COMPLETED,
@@ -55,6 +66,12 @@ class FakeBbClient:
         self.event_calls: list[tuple[str, int]] = []
         self.pages = pages or {}
         self.on_send = on_send
+
+    def reserve_launch(self):
+        return None
+
+    def cancel_launch_reservation(self):
+        pass
 
     def send(self, *, thread_id: str, message: str, mode: str = "queue-if-active"):
         if self.on_send is not None:
@@ -295,6 +312,98 @@ class BbContinuationTest(unittest.TestCase):
             self.assertEqual(materialized["delivery_id"], row["last_delivery_id"])
             self.assertEqual(materialized["attempt_id"], row["last_attempt_id"])
         finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_stalled_launch_cap_leaves_delivery_unattempted_and_retryable(self):
+        import llm_collab.bb_client as bb
+
+        tmp, store, session, materialized = self.open_fixture()
+        release_launch = threading.Event()
+        entered_lock = threading.Lock()
+        entered = 0
+        launch_threads = []
+
+        class NeverReturningLaunch:
+            def __init__(self, *_args, **_kwargs):
+                nonlocal entered
+                with entered_lock:
+                    entered += 1
+                    launch_number = entered
+                if launch_number <= bb.MAX_STALLED_LAUNCHES:
+                    release_launch.wait()
+                self.stdout = io.StringIO(
+                    json.dumps({"threadId": NATIVE_THREAD, "ok": True, "mode": "queue"})
+                )
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+        client = BbClient(transport, enabled=True, timeout_seconds=0.05)
+        client._verified_version = PINNED_BB_VERSION
+        before_threads = set(threading.enumerate())
+        try:
+            with patch.object(bb.subprocess, "Popen", NeverReturningLaunch), patch.dict(
+                os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}
+            ):
+                for _ in range(bb.MAX_STALLED_LAUNCHES):
+                    with self.assertRaises(BbTransportTimeout):
+                        transport([], 0.05)
+
+                refused = continue_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+                row = store.read_bb_thread_observation(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id=CHAT,
+                    participant_id=PARTICIPANT,
+                    binding_generation=1,
+                )
+                self.assertEqual(
+                    ("idle", None, None, None),
+                    (
+                        row["dispatch_state"],
+                        row["last_message_id"],
+                        row["last_delivery_id"],
+                        row["last_attempt_id"],
+                    ),
+                    "cap refusal left durable queued delivery state",
+                )
+                self.assertFalse(refused.native_called)
+
+                launch_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                ]
+                release_launch.set()
+                for thread in launch_threads:
+                    thread.join(timeout=1.0)
+
+                retried = continue_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+                self.assertEqual(BB_CONTINUATION_QUEUED, retried.state)
+                self.assertTrue(retried.native_called)
+        finally:
+            release_launch.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
             store.close()
             tmp.cleanup()
 

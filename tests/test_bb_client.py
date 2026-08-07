@@ -14,8 +14,9 @@ import sys
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from llm_collab.bb_client import (
     EXECUTION_PROBE_EVENTS,
@@ -25,6 +26,7 @@ from llm_collab.bb_client import (
     REFUSAL_AMBIGUOUS,
     REFUSAL_DISABLED,
     REFUSAL_IDENTITY_MISMATCH,
+    REFUSAL_LAUNCH_UNAVAILABLE,
     REFUSAL_MALFORMED_RESPONSE,
     REFUSAL_PROFILE_MISMATCH,
     REFUSAL_TRANSPORT_FAILED,
@@ -32,6 +34,7 @@ from llm_collab.bb_client import (
     SLICE_1A_PROFILE,
     BbClient,
     BbEventPage,
+    BbLaunchUnavailable,
     BbProfile,
     BbQueued,
     BbRefusal,
@@ -1077,7 +1080,7 @@ class ProductionTransportTest(unittest.TestCase):
                     "stalled-launch cap refusal created another launch thread",
                 )
                 self.assertIsInstance(outcome, BbRefusal)
-                self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
+                self.assertEqual(REFUSAL_LAUNCH_UNAVAILABLE, outcome.reason)
                 self.assertIn("stalled launch cap", outcome.detail)
                 self.assertEqual(
                     bb.MAX_STALLED_LAUNCHES,
@@ -1089,7 +1092,66 @@ class ProductionTransportTest(unittest.TestCase):
             for thread in launch_threads:
                 thread.join(timeout=1.0)
         with bb._stalled_launches_lock:
-            self.assertEqual(0, bb._stalled_launches, "cleaned launches did not return cap slots")
+            self.assertEqual(0, bb._outstanding_launches, "cleaned launches did not return cap slots")
+
+    def test_concurrent_stalled_launches_reserve_exactly_the_cap(self):
+        """GH-592: concurrent check-and-launch cannot oversubscribe the cap."""
+        import llm_collab.bb_client as bb
+
+        release_launch = threading.Event()
+        entered_lock = threading.Lock()
+        entered = 0
+        callers = bb.MAX_STALLED_LAUNCHES * 3
+        start = threading.Barrier(callers)
+        before_threads = set(threading.enumerate())
+        launch_threads = []
+
+        class NeverReturningLaunch:
+            def __init__(self, *_args, **_kwargs):
+                nonlocal entered
+                with entered_lock:
+                    entered += 1
+                release_launch.wait()
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+
+        def call_transport():
+            start.wait()
+            try:
+                transport([], 0.05)
+            except (BbLaunchUnavailable, BbTransportTimeout):
+                pass
+
+        try:
+            with patch.object(bb.subprocess, "Popen", NeverReturningLaunch):
+                with ThreadPoolExecutor(max_workers=callers) as pool:
+                    futures = [pool.submit(call_transport) for _ in range(callers)]
+                    for future in futures:
+                        future.result(timeout=1.0)
+                launch_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                ]
+                self.assertEqual(
+                    bb.MAX_STALLED_LAUNCHES,
+                    entered,
+                    "concurrent callers entered Popen beyond the reserved cap",
+                )
+        finally:
+            release_launch.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+        with bb._stalled_launches_lock:
+            self.assertEqual(0, bb._outstanding_launches, "launch slots were not fully released")
 
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.

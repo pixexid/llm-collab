@@ -389,14 +389,29 @@ def continue_bb_thread(
         )
 
     current_seq = int(row["last_event_seq"])
-    _advance(
-        store,
-        context,
-        event_seq=current_seq,
-        dispatch_state="queued",
-        now=observed_at_utc,
-        ids=(message_id, delivery_id, attempt_id),
-    )
+    unavailable = client.reserve_launch()
+    if unavailable is not None:
+        return BbContinuationResult(
+            BB_CONTINUATION_FAILED,
+            unavailable.detail,
+            message_id=message_id,
+            delivery_id=delivery_id,
+            attempt_id=attempt_id,
+            last_event_seq=current_seq,
+            native_called=False,
+        )
+    try:
+        _advance(
+            store,
+            context,
+            event_seq=current_seq,
+            dispatch_state="queued",
+            now=observed_at_utc,
+            ids=(message_id, delivery_id, attempt_id),
+        )
+    except BaseException:
+        client.cancel_launch_reservation()
+        raise
 
     try:
         native = client.send(
