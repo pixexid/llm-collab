@@ -998,6 +998,85 @@ class ProductionTransportTest(unittest.TestCase):
         self.assertTrue(launched[0].stdout.closed, "late stdout pipe was not closed")
         self.assertTrue(launched[0].stderr.closed, "late stderr pipe was not closed")
 
+    def test_stalled_launch_cap_refuses_without_growing_the_thread_count(self):
+        """GH-592: repeated hung launches stop consuming daemon threads at the cap."""
+        import llm_collab.bb_client as bb
+
+        release_launch = threading.Event()
+        started = threading.Condition()
+        started_count = 0
+
+        class NeverReturningLaunch:
+            def __init__(self, *_args, **_kwargs):
+                nonlocal started_count
+                with started:
+                    started_count += 1
+                    started.notify_all()
+                release_launch.wait()
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+        before_threads = set(threading.enumerate())
+        launch_threads = []
+        try:
+            with patch.object(bb.subprocess, "Popen", NeverReturningLaunch):
+                for attempt in range(bb.MAX_STALLED_LAUNCHES):
+                    began = time.monotonic()
+                    with self.assertRaises(BbTransportTimeout):
+                        transport([], 0.05)
+                    self.assertLess(
+                        time.monotonic() - began,
+                        0.2,
+                        f"stalled launch attempt {attempt + 1} exceeded its bound",
+                    )
+                    with started:
+                        self.assertTrue(
+                            started.wait_for(lambda: started_count == attempt + 1, timeout=1.0),
+                            f"stalled launch attempt {attempt + 1} never entered Popen",
+                        )
+
+                launch_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                ]
+                threads_at_cap = len(launch_threads)
+                client = BbClient(transport, enabled=True, timeout_seconds=0.05)
+                outcome = client.verify_version()
+                threads_after_refusal = len(
+                    [
+                        thread
+                        for thread in threading.enumerate()
+                        if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                    ]
+                )
+                self.assertEqual(
+                    threads_at_cap,
+                    threads_after_refusal,
+                    "stalled-launch cap refusal created another launch thread",
+                )
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_TRANSPORT_FAILED, outcome.reason)
+                self.assertIn("stalled launch cap", outcome.detail)
+                self.assertEqual(
+                    bb.MAX_STALLED_LAUNCHES,
+                    started_count,
+                    "cap refusal entered Popen",
+                )
+        finally:
+            release_launch.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+        with bb._stalled_launches_lock:
+            self.assertEqual(0, bb._stalled_launches, "cleaned launches did not return cap slots")
+
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.
 

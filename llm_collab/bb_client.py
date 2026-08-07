@@ -50,6 +50,12 @@ PINNED_BB_VERSION = "0.35.1"
 # and truncating it would turn a resource limit into a correctness bug.
 MAX_RESPONSE_CHARS = 1_048_576
 
+# A hung Popen cannot be cancelled, so bound the daemon threads left waiting for
+# it. A later successful cleanup returns the slot.
+MAX_STALLED_LAUNCHES = 4
+_stalled_launches = 0
+_stalled_launches_lock = threading.Lock()
+
 # bb's own `thread log --limit` default. Passed EXPLICITLY so the page bound is
 # this module's, not an implicit default that can move under us.
 MAX_EVENT_PAGE = 100
@@ -817,6 +823,16 @@ def subprocess_transport(
     """
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
+        global _stalled_launches
+
+        with _stalled_launches_lock:
+            if _stalled_launches >= MAX_STALLED_LAUNCHES:
+                return BbTransportResult(
+                    1,
+                    "",
+                    f"stalled launch cap ({MAX_STALLED_LAUNCHES}) reached",
+                )
+
         # The budget starts at the launch boundary so whatever Popen costs is
         # subtracted from what the waits below get.
         deadline = time.monotonic() + timeout_seconds
@@ -856,6 +872,9 @@ def subprocess_transport(
         launch_error = []
 
         def launch_process() -> None:
+            global _stalled_launches
+
+            launched = None
             try:
                 launched = subprocess.Popen(
                     [*bb_executable, *argv],
@@ -865,13 +884,17 @@ def subprocess_transport(
                 )
             except BaseException as exc:
                 launch_error.append(exc)
-                launch_done.set()
-                return
-            launch_result.append(launched)
+            else:
+                launch_result.append(launched)
             launch_done.set()
             launch_decided.wait()
             if launch_abandoned.is_set():
-                discard_late_process(launched)
+                try:
+                    if launched is not None:
+                        discard_late_process(launched)
+                finally:
+                    with _stalled_launches_lock:
+                        _stalled_launches -= 1
 
         launch_thread = threading.Thread(
             target=launch_process,
@@ -880,6 +903,8 @@ def subprocess_transport(
         )
         launch_thread.start()
         if not launch_done.wait(timeout=remaining()):
+            with _stalled_launches_lock:
+                _stalled_launches += 1
             launch_abandoned.set()
             launch_decided.set()
             raise BbTransportTimeout(
