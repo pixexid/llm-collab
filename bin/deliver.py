@@ -540,7 +540,9 @@ def main():
     binding_unreadable = False
     dispatch_scope_refused = False
     explicit_target_refusal_reason = None
-    if not thread_coordination_required:
+    # GH-554: thread coordination suppresses activation only after the exact
+    # recipient binding has been validated; it is not an unbound exception.
+    if not thread_coordination_required or is_codex_self_target(args.sender, args.recipient):
         try:
             pair, autobridge_refusal_reason, inactive_pair = resolve_exact_dispatch_pair(
                 args.project,
@@ -580,19 +582,25 @@ def main():
             autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
             args.target_session_id = None
         elif resolved_binding_target is not None:
-            args.target_session_id = str(resolved_binding_target)
-            args.target_binding_id = durable_binding.get("binding_id")
-            args.target_binding_generation = durable_binding.get("binding_generation")
-            routable, scope_reason = repo_scope_matches(
-                durable_session.get("repo_targets"),
-                packet_repo_targets(args),
-                subscriber_project=durable_session.get("project_id"),
-                packet_project=args.project,
-            )
-            if not routable:
-                autobridge_target = None
-                autobridge_refusal_reason = scope_reason
-                dispatch_scope_refused = True
+            if autobridge_target is None:
+                # An inactive/ambiguous target is useful to the resolver for a
+                # typed refusal, not as an address for a new durable packet.
+                args.target_session_id = None
+            else:
+                args.target_session_id = str(resolved_binding_target)
+                args.target_binding_id = durable_binding.get("binding_id")
+                args.target_binding_generation = durable_binding.get("binding_generation")
+                routable, scope_reason = repo_scope_matches(
+                    durable_session.get("repo_targets"),
+                    packet_repo_targets(args),
+                    subscriber_project=durable_session.get("project_id"),
+                    packet_project=args.project,
+                )
+                if not routable:
+                    autobridge_target = None
+                    autobridge_refusal_reason = scope_reason
+                    args.target_session_id = None
+                    dispatch_scope_refused = True
         else:
             args.target_session_id = None
     autobridge_ready = bool(
@@ -625,6 +633,17 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
+    if thread_coordination_required:
+        if not args.target_session_id:
+            # A Codex self-target without a verified exact binding is the same
+            # unresolved worker route as any other recipient.
+            thread_coordination_required = False
+        else:
+            # The packet is durable coordination history, not an app wake. Keep
+            # the verified address in frontmatter while suppressing wake flags.
+            autobridge_ready = False
+            wake_fallback_allowed = False
+
     recipient_agent = get_agent(args.recipient)
     recipient_type = recipient_agent.get("activation", {}).get("type")
 

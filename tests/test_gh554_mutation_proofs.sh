@@ -35,6 +35,8 @@ PYEOF
 
 BASELINE=(
   tests.test_session_autobridge.SessionAutobridgeTest.test_unresolved_worker_target_refuses_before_write_for_amiga_and_non_amiga
+  tests.test_session_autobridge.SessionAutobridgeTest.test_unbound_codex_self_target_refuses_before_writing_for_both_projects
+  tests.test_session_autobridge.SessionAutobridgeTest.test_an_undispatchable_session_refuses_before_writing
   tests.test_session_autobridge.SessionAutobridgeTest.test_resolved_binding_stays_targeted_for_amiga_and_non_amiga
   tests.test_session_autobridge.SessionAutobridgeTest.test_watcherless_human_receives_an_explicit_broadcast_for_both_projects
   tests.test_watch_inbox_refusal_progress.ChatScopedWatcherTest.test_chat_scope_surfaces_bound_and_null_target_packets_only
@@ -79,6 +81,30 @@ purge_pycache
 expect_killed "unresolved-target-prewrite-guard" \
   tests.test_session_autobridge.SessionAutobridgeTest.test_unresolved_worker_target_refuses_before_write_for_amiga_and_non_amiga \
   gh554_unresolved_target_refuses_before_write
+restore "$DEL"
+
+snapshot "$DEL"
+mutate "$DEL" '            if autobridge_target is None:' '            if False:'
+purge_pycache
+expect_killed "undispatchable-target-prewrite-guard" \
+  tests.test_session_autobridge.SessionAutobridgeTest.test_an_undispatchable_session_refuses_before_writing \
+  gh554_undispatchable_binding_refuses_before_write
+restore "$DEL"
+
+snapshot "$DEL"
+mutate "$DEL" $'                    args.target_session_id = None\n                    dispatch_scope_refused = True' $'                    dispatch_scope_refused = True'
+purge_pycache
+expect_killed "scope-refusal-prewrite-guard" \
+  tests.test_session_autobridge.SessionAutobridgeTest.test_a_scope_refusal_wakes_the_recipient_by_no_lane_at_all \
+  gh554_scope_refusal_before_write
+restore "$DEL"
+
+snapshot "$DEL"
+mutate "$DEL" '        if not args.target_session_id:' '        if False:'
+purge_pycache
+expect_killed "codex-self-binding-resolution" \
+  tests.test_session_autobridge.SessionAutobridgeTest.test_unbound_codex_self_target_refuses_before_writing_for_both_projects \
+  gh554_codex_self_target_requires_binding
 restore "$DEL"
 
 snapshot "$DEL"
