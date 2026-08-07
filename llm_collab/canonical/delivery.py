@@ -104,6 +104,7 @@ def append_receipt(
     evidence: Mapping[str, object],
     session_ref_id: str | None = None,
     created_at_utc: str,
+    _in_transaction: bool = False,
 ) -> tuple[str, bool]:
     return store.append_canonical_delivery_receipt(
         workspace_id=workspace_id,
@@ -115,6 +116,7 @@ def append_receipt(
         evidence=evidence,
         session_ref_id=session_ref_id,
         created_at_utc=created_at_utc,
+        _in_transaction=_in_transaction,
     )
 
 

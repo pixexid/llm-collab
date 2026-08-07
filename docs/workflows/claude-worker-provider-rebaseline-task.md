@@ -6,7 +6,7 @@ surfaces, or live session mutation.
 
 ## Current main facts
 
-- Session lifecycle storage is at `SCHEMA_VERSION == 12`. The v8-v12 children
+- Session lifecycle storage is at `SCHEMA_VERSION == 14`. The v8-v14 children
   added compound participant bindings, challenge/consume, delivery freeze,
   zero-transfer rebind, legacy autobridge provenance import, and read-only
   operator inspection.

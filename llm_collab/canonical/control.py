@@ -113,6 +113,7 @@ def _append_gated_receipt(
     session_ref_id: str | None,
     created_at_utc: str,
     environ: Mapping[str, str] | None,
+    _in_transaction: bool = False,
 ) -> tuple[str, bool]:
     require_canonical_write_gate(
         store,
@@ -134,6 +135,7 @@ def _append_gated_receipt(
         evidence=evidence,
         session_ref_id=session_ref_id,
         created_at_utc=created_at_utc,
+        _in_transaction=_in_transaction,
     )
 
 
@@ -152,6 +154,7 @@ def append_acknowledgment_receipt(
     session_ref_id: str,
     created_at_utc: str,
     environ: Mapping[str, str] | None = None,
+    _in_transaction: bool = False,
 ) -> tuple[str, bool]:
     """Append an authoritative terminal acknowledgment receipt through the gate."""
     if evidence.get("state") not in ACKNOWLEDGMENT_STATES:
@@ -170,6 +173,7 @@ def append_acknowledgment_receipt(
         session_ref_id=session_ref_id,
         created_at_utc=created_at_utc,
         environ=environ,
+        _in_transaction=_in_transaction,
     )
 
 
@@ -188,6 +192,7 @@ def append_dead_letter_receipt(
     created_at_utc: str,
     session_ref_id: str | None = None,
     environ: Mapping[str, str] | None = None,
+    _in_transaction: bool = False,
 ) -> tuple[str, bool]:
     """Append a reconciliation/dead-letter receipt using the existing vocabulary."""
     if evidence.get("state") not in DEAD_LETTER_STATES:
@@ -206,6 +211,7 @@ def append_dead_letter_receipt(
         session_ref_id=session_ref_id,
         created_at_utc=created_at_utc,
         environ=environ,
+        _in_transaction=_in_transaction,
     )
 
 

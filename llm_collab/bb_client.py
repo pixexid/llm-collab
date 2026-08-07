@@ -41,7 +41,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 PINNED_BB_VERSION = "0.35.1"
@@ -163,6 +163,8 @@ class BbEvent:
     seq: int
     event_id: str
     event_type: str
+    data: Mapping[str, Any] = field(default_factory=dict)
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -524,9 +526,22 @@ class BbClient:
             event_type = _require_str(entry, "type")
             if event_id is None or event_type is None:
                 return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event entry missing id/type")
+            data = entry.get("data", {})
+            if not isinstance(data, Mapping):
+                return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event data is not an object")
+            scope = entry.get("scope")
+            turn_id = (
+                _require_str(scope, "turnId")
+                if isinstance(scope, Mapping) and scope.get("kind") == "turn"
+                else None
+            )
             events.append(
                 BbEvent(
-                    seq=int(entry["seq"]), event_id=event_id, event_type=event_type
+                    seq=int(entry["seq"]),
+                    event_id=event_id,
+                    event_type=event_type,
+                    data=dict(data),
+                    turn_id=turn_id,
                 )
             )
         truncated = len(events) == limit

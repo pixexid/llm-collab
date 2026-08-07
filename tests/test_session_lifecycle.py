@@ -1790,6 +1790,9 @@ class LifecycleTest(unittest.TestCase):
             # The daemon-owned GH-94 dispatch boundary constructs the provider
             # only after its independent exact-thread gate is effective.
             Path("llm_collab/daemon/server.py"),
+            # bb continuation (#566) is the explicit managed-runtime adapter
+            # seam that records receipts and replays the bound native thread.
+            Path("llm_collab/bb_continuation.py"),
         }
         offenders = []
         for checked in (root / "bin", root / "scripts", root / "llm_collab"):
