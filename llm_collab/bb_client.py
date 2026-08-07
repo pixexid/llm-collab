@@ -156,6 +156,7 @@ class BbEvent:
     event_id: str
     event_type: str
     data: Mapping[str, Any] = field(default_factory=dict)
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -520,12 +521,19 @@ class BbClient:
             data = entry.get("data", {})
             if not isinstance(data, Mapping):
                 return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "event data is not an object")
+            scope = entry.get("scope")
+            turn_id = (
+                _require_str(scope, "turnId")
+                if isinstance(scope, Mapping) and scope.get("kind") == "turn"
+                else None
+            )
             events.append(
                 BbEvent(
                     seq=int(entry["seq"]),
                     event_id=event_id,
                     event_type=event_type,
                     data=dict(data),
+                    turn_id=turn_id,
                 )
             )
         truncated = len(events) == limit

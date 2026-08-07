@@ -606,6 +606,20 @@ class EventReplayTest(unittest.TestCase):
         self.assertFalse(page.truncated)
         self.assertIsNone(page.next_after_seq)
 
+    def test_turn_scoped_event_preserves_its_native_turn_identity(self):
+        entries = [
+            {
+                "id": "evt_terminal",
+                "type": "turn/completed",
+                "threadId": SHOWN_THREAD,
+                "seq": 1,
+                "scope": {"kind": "turn", "turnId": "turn-native-1"},
+            }
+        ]
+        client, _ = self._log_client(entries)
+        page = client.events_after(SHOWN_THREAD, 0)
+        self.assertEqual("turn-native-1", page.events[0].turn_id)
+
     def test_a_full_page_declares_its_own_truncation(self):
         """A list of exactly `limit` items is indistinguishable from a complete history."""
         entries = [

@@ -36,12 +36,15 @@ NOW = "2026-08-07T06:00:00+00:00"
 
 
 class FakeBbClient:
-    def __init__(self, pages: dict[int, BbEventPage] | None = None) -> None:
+    def __init__(self, pages: dict[int, BbEventPage] | None = None, on_send=None) -> None:
         self.sent: list[tuple[str, str, str]] = []
         self.event_calls: list[tuple[str, int]] = []
         self.pages = pages or {}
+        self.on_send = on_send
 
     def send(self, *, thread_id: str, message: str, mode: str = "queue-if-active"):
+        if self.on_send is not None:
+            self.on_send()
         self.sent.append((thread_id, message, mode))
         return BbQueued(thread_id=thread_id, mode="queue")
 
@@ -183,6 +186,19 @@ def make_delivery(store: LedgerStore) -> dict[str, object]:
     }
 
 
+def requested(seq: int, *, body: str = "packet body") -> BbEvent:
+    return BbEvent(
+        seq,
+        f"event-request-{seq}",
+        "client/turn/requested",
+        {
+            "requestId": f"request-{seq}",
+            "source": "tell",
+            "input": [{"type": "text", "text": body, "mentions": []}],
+        },
+    )
+
+
 class BbContinuationTest(unittest.TestCase):
     def open_fixture(self):
         tmp = TemporaryDirectory(dir="/tmp")
@@ -223,6 +239,7 @@ class BbContinuationTest(unittest.TestCase):
                 scope_identity=PROJECT,
                 conversation_id=CHAT,
                 participant_id=PARTICIPANT,
+                binding_generation=1,
             )
             self.assertEqual("queued", row["dispatch_state"])
         finally:
@@ -262,6 +279,7 @@ class BbContinuationTest(unittest.TestCase):
                 scope_identity=PROJECT,
                 conversation_id=CHAT,
                 participant_id=PARTICIPANT,
+                binding_generation=1,
             )
             self.assertEqual("ambiguous", row["dispatch_state"])
             self.assertEqual(materialized["message_id"], row["last_message_id"])
@@ -318,6 +336,7 @@ class BbContinuationTest(unittest.TestCase):
                     scope_identity=PROJECT,
                     conversation_id=CHAT,
                     participant_id=PARTICIPANT,
+                    binding_generation=1,
                 )["last_event_seq"],
             )
 
@@ -325,15 +344,13 @@ class BbContinuationTest(unittest.TestCase):
                 {
                     2: BbEventPage(
                         events=(
+                            requested(3),
+                            BbEvent(4, "event-started", "turn/started", turn_id="turn-own"),
                             BbEvent(
-                                3,
+                                5,
                                 "event-completed",
                                 "turn/completed",
-                                {
-                                    "canonical_message_id": materialized["message_id"],
-                                    "delivery_id": materialized["delivery_id"],
-                                    "attempt_id": materialized["attempt_id"],
-                                },
+                                turn_id="turn-own",
                             ),
                         ),
                         truncated=False,
@@ -360,7 +377,7 @@ class BbContinuationTest(unittest.TestCase):
                     registry_revision=REVISION,
                 )
             self.assertEqual(BB_CONTINUATION_COMPLETED, completed.state)
-            self.assertEqual(3, completed.last_event_seq)
+            self.assertEqual(5, completed.last_event_seq)
             delivery = store.read_canonical_delivery(
                 workspace_id=WORKSPACE,
                 scope_kind="project",
@@ -392,15 +409,18 @@ class BbContinuationTest(unittest.TestCase):
                         {
                             0: BbEventPage(
                                 events=(
+                                    requested(1),
                                     BbEvent(
-                                        1,
+                                        2,
+                                        "event-started",
+                                        "turn/started",
+                                        turn_id="turn-own",
+                                    ),
+                                    BbEvent(
+                                        3,
                                         "event-failed",
                                         "turn/failed",
-                                        {
-                                            "canonical_message_id": materialized["message_id"],
-                                            "delivery_id": materialized["delivery_id"],
-                                            "attempt_id": materialized["attempt_id"],
-                                        },
+                                        turn_id="turn-own",
                                     ),
                                 ),
                                 truncated=False,
@@ -413,7 +433,7 @@ class BbContinuationTest(unittest.TestCase):
                     registry_revision=REVISION,
                 )
             self.assertEqual("failed", result.state)
-            self.assertEqual(1, result.last_event_seq)
+            self.assertEqual(3, result.last_event_seq)
             delivery = store.read_canonical_delivery(
                 workspace_id=WORKSPACE,
                 scope_kind="project",
@@ -432,9 +452,10 @@ class BbContinuationTest(unittest.TestCase):
                 scope_identity=PROJECT,
                 conversation_id=CHAT,
                 participant_id=PARTICIPANT,
+                binding_generation=1,
             )
             self.assertEqual("failed", row["dispatch_state"])
-            self.assertEqual(1, row["last_event_seq"])
+            self.assertEqual(3, row["last_event_seq"])
         finally:
             store.close()
             tmp.cleanup()
@@ -493,6 +514,221 @@ class BbContinuationTest(unittest.TestCase):
                     observed_at_utc=NOW,
                 )
             self.assertEqual([], client.sent)
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_queued_marker_is_committed_before_native_send(self):
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            observed = []
+
+            def capture_marker():
+                observed.append(
+                    store.read_bb_thread_observation(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id=CHAT,
+                        participant_id=PARTICIPANT,
+                        binding_generation=1,
+                    )
+                )
+
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                continue_bb_thread(
+                    store,
+                    client=FakeBbClient(on_send=capture_marker),
+                    session=session,
+                    message={"body": "packet body"},
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+            self.assertEqual(
+                [
+                    (
+                        "queued",
+                        materialized["message_id"],
+                        materialized["delivery_id"],
+                        materialized["attempt_id"],
+                    )
+                ],
+                [
+                    (
+                        row["dispatch_state"],
+                        row["last_message_id"],
+                        row["last_delivery_id"],
+                        row["last_attempt_id"],
+                    )
+                    for row in observed
+                ],
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_terminal_receipt_waits_for_the_queued_delivery_turn(self):
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            client = FakeBbClient(
+                {
+                    0: BbEventPage(
+                        events=(requested(1),),
+                        truncated=False,
+                        next_after_seq=None,
+                    ),
+                    1: BbEventPage(
+                        events=(
+                            BbEvent(2, "event-own-started", "turn/started", turn_id="turn-own"),
+                            BbEvent(
+                                3,
+                                "event-existing-completed",
+                                "turn/completed",
+                                turn_id="turn-existing",
+                            ),
+                        ),
+                        truncated=False,
+                        next_after_seq=None,
+                    ),
+                    3: BbEventPage(
+                        events=(
+                            BbEvent(
+                                4,
+                                "event-own-completed",
+                                "turn/completed",
+                                turn_id="turn-own",
+                            ),
+                        ),
+                        truncated=False,
+                        next_after_seq=None,
+                    ),
+                }
+            )
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                continue_bb_thread(
+                    store,
+                    client=FakeBbClient(),
+                    session=session,
+                    message={"body": "packet body"},
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+                first = observe_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    observed_at_utc=NOW,
+                    registry_revision=REVISION,
+                )
+                second = observe_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    observed_at_utc=NOW,
+                    registry_revision=REVISION,
+                )
+                delivery_after_existing_turn = store.read_canonical_delivery(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    message_id=str(materialized["message_id"]),
+                    delivery_id=str(materialized["delivery_id"]),
+                )
+                third = observe_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    observed_at_utc=NOW,
+                    registry_revision=REVISION,
+                )
+            self.assertEqual("queued", first.state)
+            self.assertEqual("queued", second.state)
+            self.assertEqual(
+                {"accepted"},
+                {receipt["state"] for receipt in delivery_after_existing_turn["receipts"]},
+            )
+            self.assertEqual(BB_CONTINUATION_COMPLETED, third.state)
+            delivery = store.read_canonical_delivery(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                message_id=str(materialized["message_id"]),
+                delivery_id=str(materialized["delivery_id"]),
+            )
+            self.assertEqual(
+                "event-own-completed",
+                delivery["evidence"]["extensions"]["x_note_bb_event_id"],
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_successor_binding_generation_starts_with_a_fresh_cursor(self):
+        tmp = TemporaryDirectory(dir="/tmp")
+        store = LedgerStore.open_writer(LedgerPaths.derive(tmp.name, WORKSPACE))
+        seed_binding(store)
+        try:
+            first = store.ensure_bb_thread_observation(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                conversation_id=CHAT,
+                participant_id=PARTICIPANT,
+                binding_id=BINDING,
+                binding_generation=1,
+                native_thread_id=NATIVE_THREAD,
+                session_ref_id=SESSION_REF,
+                updated_at_utc=NOW,
+            )
+            store.advance_bb_thread_observation(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                conversation_id=CHAT,
+                participant_id=PARTICIPANT,
+                binding_id=BINDING,
+                binding_generation=1,
+                native_thread_id=NATIVE_THREAD,
+                session_ref_id=SESSION_REF,
+                event_seq=42,
+                dispatch_state="completed",
+                updated_at_utc=NOW,
+            )
+            store._connection.execute(
+                "UPDATE conversation_bindings SET generation = 2, native_session_id = ? "
+                "WHERE workspace_id = ? AND binding_id = ?",
+                ("bb_thread_successor", WORKSPACE, BINDING),
+            )
+            successor = store.ensure_bb_thread_observation(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                conversation_id=CHAT,
+                participant_id=PARTICIPANT,
+                binding_id=BINDING,
+                binding_generation=2,
+                native_thread_id="bb_thread_successor",
+                session_ref_id=SESSION_REF,
+                updated_at_utc=NOW,
+            )
+            predecessor = store.read_bb_thread_observation(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                conversation_id=CHAT,
+                participant_id=PARTICIPANT,
+                binding_generation=1,
+            )
+            self.assertEqual(0, first["last_event_seq"])
+            self.assertEqual(
+                (0, "idle", "bb_thread_successor", 42),
+                (
+                    successor["last_event_seq"],
+                    successor["dispatch_state"],
+                    successor["native_thread_id"],
+                    predecessor["last_event_seq"],
+                ),
+            )
         finally:
             store.close()
             tmp.cleanup()

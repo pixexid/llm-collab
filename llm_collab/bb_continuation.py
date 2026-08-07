@@ -273,6 +273,8 @@ def _advance(
     dispatch_state: str,
     now: str,
     ids: tuple[str, str, str] | None = None,
+    native_request_id: str | None = None,
+    native_turn_id: str | None = None,
 ) -> dict[str, object]:
     message_id, delivery_id, attempt_id = ids or (None, None, None)
     return store.advance_bb_thread_observation(
@@ -291,6 +293,8 @@ def _advance(
         last_message_id=message_id,
         last_delivery_id=delivery_id,
         last_attempt_id=attempt_id,
+        native_request_id=native_request_id,
+        native_turn_id=native_turn_id,
     )
 
 
@@ -532,11 +536,11 @@ def _terminal_state(event: BbEvent) -> str | None:
     return None
 
 
-def _event_ids(event: BbEvent, row: Mapping[str, object]) -> tuple[str, str, str] | None:
+def _pending_ids(row: Mapping[str, object]) -> tuple[str, str, str] | None:
     values = (
-        event.data.get("canonical_message_id") or row.get("last_message_id"),
-        event.data.get("delivery_id") or row.get("last_delivery_id"),
-        event.data.get("attempt_id") or row.get("last_attempt_id"),
+        row.get("last_message_id"),
+        row.get("last_delivery_id"),
+        row.get("last_attempt_id"),
     )
     if not all(isinstance(value, str) for value in values):
         return None
@@ -547,6 +551,19 @@ def _event_ids(event: BbEvent, row: Mapping[str, object]) -> tuple[str, str, str
     ):
         return None
     return values  # type: ignore[return-value]
+
+
+def _tell_request_id(event: BbEvent, body: str) -> str | None:
+    if event.event_type != "client/turn/requested" or event.data.get("source") != "tell":
+        return None
+    inputs = event.data.get("input")
+    if not isinstance(inputs, list) or len(inputs) != 1:
+        return None
+    item = inputs[0]
+    if not isinstance(item, Mapping) or item.get("type") != "text" or item.get("text") != body:
+        return None
+    request_id = event.data.get("requestId")
+    return request_id if isinstance(request_id, str) and request_id else None
 
 
 def observe_bb_thread(
@@ -577,10 +594,42 @@ def observe_bb_thread(
             str(row["dispatch_state"]), "no events after committed cursor", int(row["last_event_seq"]), 0
         )
 
+    ids = _pending_ids(row)
+    request_id = row.get("native_request_id")
+    request_id = request_id if isinstance(request_id, str) else None
+    turn_id = row.get("native_turn_id")
+    turn_id = turn_id if isinstance(turn_id, str) else None
+    body: str | None = None
+    if ids is not None:
+        pending = store.read_canonical_message(
+            workspace_id=str(context["workspace_id"]),
+            scope_kind="project",
+            scope_identity=str(context["project_id"]),
+            message_id=ids[0],
+        )
+        if pending is None:
+            raise CanonicalIntegrityError("bb observation references a missing message")
+        raw_body = pending.get("body")
+        if not isinstance(raw_body, bytes):
+            raise CanonicalIntegrityError("bb observation message body is invalid")
+        try:
+            body = raw_body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise CanonicalIntegrityError("bb observation message body is not UTF-8") from error
+
     terminal: tuple[BbEvent, str] | None = None
     for event in page.events:
+        if ids is None or body is None:
+            continue
+        if request_id is None:
+            request_id = _tell_request_id(event, body)
+            continue
+        if turn_id is None:
+            if event.event_type == "turn/started" and event.turn_id is not None:
+                turn_id = event.turn_id
+            continue
         state = _terminal_state(event)
-        if state is not None:
+        if state is not None and event.turn_id == turn_id:
             terminal = (event, state)
     last_seq = page.events[-1].seq
     if terminal is None:
@@ -590,6 +639,9 @@ def observe_bb_thread(
             event_seq=last_seq,
             dispatch_state=str(row["dispatch_state"]),
             now=observed_at_utc,
+            ids=ids,
+            native_request_id=request_id,
+            native_turn_id=turn_id,
         )
         return BbObservationResult(
             str(next_row["dispatch_state"]),
@@ -599,21 +651,8 @@ def observe_bb_thread(
         )
 
     event, terminal_state = terminal
-    ids = _event_ids(event, row)
-    if ids is None:
-        next_row = _advance(
-            store,
-            context,
-            event_seq=last_seq,
-            dispatch_state=terminal_state,
-            now=observed_at_utc,
-        )
-        return BbObservationResult(
-            terminal_state,
-            "replayed terminal event without a canonical pending delivery",
-            int(next_row["last_event_seq"]),
-            len(page.events),
-        )
+    if ids is None or request_id is None or turn_id is None:
+        raise CanonicalIntegrityError("bb terminal event lost its request/turn correlation")
     if registry_revision is None:
         registry_revision = _latest_project_registry_revision(
             store,
@@ -657,6 +696,8 @@ def observe_bb_thread(
             dispatch_state=terminal_state,
             now=observed_at_utc,
             ids=ids,
+            native_request_id=request_id,
+            native_turn_id=turn_id,
         )
         return BbObservationResult(
             terminal_state,
@@ -668,7 +709,12 @@ def observe_bb_thread(
 
     receipt_state = "completed" if terminal_state == "completed" else "ambiguous"
     quality = "authoritative" if receipt_state == "completed" else "best_effort"
-    detail = {"x_note_bb_event_id": event.event_id, "x_note_bb_event_type": event.event_type}
+    detail = {
+        "x_note_bb_event_id": event.event_id,
+        "x_note_bb_event_type": event.event_type,
+        "x_note_bb_request_id": request_id,
+        "x_note_bb_turn_id": turn_id,
+    }
     require_canonical_write_gate(
         store,
         workspace_id=str(context["workspace_id"]),
@@ -709,6 +755,8 @@ def observe_bb_thread(
             last_message_id=ids[0],
             last_delivery_id=ids[1],
             last_attempt_id=ids[2],
+            native_request_id=request_id,
+            native_turn_id=turn_id,
         )
         store._connection.execute("COMMIT")
     except BaseException:

@@ -966,7 +966,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V11_SQL": "905783c2dda078ff675b51e942fb4786e0ca48612778e09289eb689b26578a2d",
             "V12_SQL": "6db7c4fd394c394fefdcd441ed8ce7e06fb06972e28bfda7cfb87b87a6d3cd44",
             "V13_SQL": "8572fffa356fa7b14a618435e052628a2df6be53cd3f7c67d05e1fa95763b70e",
-            "V14_SQL": "ba9fe431eee6a332a946055749a42ec7dedc6750cd04bfe97d4a7668ae98d685",
+            "V14_SQL": "78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77",
         }
         self.assertEqual(store_module.SCHEMA_VERSION, 14)
         self.assertEqual(
@@ -1021,7 +1021,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe",
                 "sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e",
                 "sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf",
-                "sha256:ba9fe431eee6a332a946055749a42ec7dedc6750cd04bfe97d4a7668ae98d685",
+                "sha256:78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -1035,7 +1035,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081",
                 "sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347",
                 "sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51",
-                "sha256:36e8005522e6d191e5cbb48f81ddb4e7ec2314f288597280c6c9b989edb009fc",
+                "sha256:5d80efe436abcd1993b107e00065871882fd5be251abe218deaade69fc696a44",
             ),
         )
 
@@ -3262,6 +3262,84 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                     )
                 self.assertTrue(created)
                 self.assertRegex(receipt_id, r"^receipt_[0-9a-f]{64}$")
+
+    def test_p2e_transaction_cannot_bypass_the_write_gate_for_any_project(self) -> None:
+        recorded = {}
+        for project in (PROJECT, OTHER_PROJECT):
+            with self.subTest(project=project), TemporaryDirectory(dir="/tmp") as tmp:
+                paths = LedgerPaths.derive(tmp, WORKSPACE)
+                with LedgerStore.open_writer(paths) as store:
+                    revision = record_registry_for_control(
+                        store,
+                        project_canonical_writes=True,
+                        other_canonical_writes=True,
+                    )
+                    message_id, _ = create_or_return_equivalent(
+                        store,
+                        **intent(
+                            scope_identity=project,
+                            dedupe_key=f"transaction-gate-{project}",
+                        ),
+                    )
+                    ((delivery_id, _),) = create_deliveries(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=project,
+                        message_id=message_id,
+                        routes=(("agent_claude", "endpoint_claude_desktop"),),
+                        now_epoch_ms=1_000,
+                        created_at_utc=NOW,
+                    )
+                    attempt_id, _ = create_attempt(
+                        store,
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=project,
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_index=0,
+                        attempt_epoch_ms=1_100,
+                        created_at_utc=NOW,
+                    )
+                    evidence = state_evidence(
+                        message_id=message_id,
+                        delivery_id=delivery_id,
+                        attempt_id=attempt_id,
+                        endpoint_id="endpoint_claude_desktop",
+                        state="pull_pending",
+                    )
+                    evidence["scope"] = {"kind": "project", "project_id": project}
+                    reseal_evidence(evidence)
+                    store._connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        try:
+                            append_dead_letter_receipt(
+                                store,
+                                workspace_id=WORKSPACE,
+                                scope_kind="project",
+                                scope_identity=project,
+                                registry_revision=revision,
+                                allow_canonical_write=False,
+                                message_id=message_id,
+                                delivery_id=delivery_id,
+                                attempt_id=attempt_id,
+                                evidence=evidence,
+                                created_at_utc=NOW,
+                                environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                                _in_transaction=True,
+                            )
+                        except CanonicalControlError:
+                            pass
+                        recorded[project] = store._connection.execute(
+                            "SELECT count(*) FROM canonical_delivery_receipts "
+                            "WHERE workspace_id = ? AND scope_kind = 'project' "
+                            "AND scope_identity = ? AND message_id = ? AND delivery_id = ?",
+                            (WORKSPACE, project, message_id, delivery_id),
+                        ).fetchone()[0]
+                    finally:
+                        store._connection.execute("ROLLBACK")
+        self.assertEqual({PROJECT: 0, OTHER_PROJECT: 0}, recorded)
 
     def test_p2e_acknowledgment_dead_letter_and_inspection_are_honest(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:

@@ -3172,9 +3172,22 @@ V14_SQL = (
                 AND substr(last_attempt_id, 1, 8) = 'attempt_'
                 AND substr(last_attempt_id, 9) NOT GLOB '*[^0-9a-f]*'
             )),
+        native_request_id TEXT
+            CHECK (native_request_id IS NULL OR (
+                instr(native_request_id, char(0)) = 0
+                AND length(CAST(native_request_id AS BLOB)) BETWEEN 1 AND 256
+            )),
+        native_turn_id TEXT
+            CHECK (native_turn_id IS NULL OR (
+                instr(native_turn_id, char(0)) = 0
+                AND length(CAST(native_turn_id AS BLOB)) BETWEEN 1 AND 256
+            )),
         updated_at_utc TEXT NOT NULL
             CHECK (instr(updated_at_utc, char(0)) = 0 AND length(CAST(updated_at_utc AS BLOB)) BETWEEN 1 AND 128),
-        PRIMARY KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+        PRIMARY KEY (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            binding_generation
+        ),
         UNIQUE (workspace_id, native_thread_id),
         FOREIGN KEY (workspace_id, binding_id)
             REFERENCES conversation_bindings (workspace_id, binding_id)
@@ -3186,8 +3199,8 @@ V14_SQL = (
     ) STRICT
     """,
 )
-V14_MIGRATION_CHECKSUM = "sha256:ba9fe431eee6a332a946055749a42ec7dedc6750cd04bfe97d4a7668ae98d685"
-V14_SCHEMA_FINGERPRINT = "sha256:36e8005522e6d191e5cbb48f81ddb4e7ec2314f288597280c6c9b989edb009fc"
+V14_MIGRATION_CHECKSUM = "sha256:78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77"
+V14_SCHEMA_FINGERPRINT = "sha256:5d80efe436abcd1993b107e00065871882fd5be251abe218deaade69fc696a44"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -4631,6 +4644,8 @@ class LedgerStore:
             "last_message_id",
             "last_delivery_id",
             "last_attempt_id",
+            "native_request_id",
+            "native_turn_id",
             "updated_at_utc",
         )
         return dict(zip(keys, row))
@@ -4643,6 +4658,7 @@ class LedgerStore:
         scope_identity: str,
         conversation_id: str,
         participant_id: str,
+        binding_generation: int,
     ) -> dict[str, object] | None:
         """Read the cursor cache; binding resolution remains a separate authority."""
         self._ensure_thread()
@@ -4652,13 +4668,20 @@ class LedgerStore:
         self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
         conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
         participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        if isinstance(binding_generation, bool) or not isinstance(binding_generation, int) or binding_generation <= 0:
+            raise ValueError("binding_generation must be a positive integer")
         row = self._connection.execute(
             "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
             "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, updated_at_utc "
+            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "native_request_id, native_turn_id, updated_at_utc "
             "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
-            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ?",
-            (workspace_id, scope_kind, scope_identity, conversation_id, participant_id),
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            (
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                binding_generation,
+            ),
         ).fetchone()
         return None if row is None else self._bb_observation_row(row)
 
@@ -4693,15 +4716,18 @@ class LedgerStore:
             session_ref_id=session_ref_id,
         )
         updated_at_utc = _utc_timestamp(updated_at_utc, "updated_at_utc")
+        key = (*identity[:5], identity[6])
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             row = self._connection.execute(
                 "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
                 "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-                "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, updated_at_utc "
+                "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                "native_request_id, native_turn_id, updated_at_utc "
                 "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
-                "AND scope_identity = ? AND conversation_id = ? AND participant_id = ?",
-                identity[:5],
+                "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+                "AND binding_generation = ?",
+                key,
             ).fetchone()
             if row is None:
                 self._connection.execute(
@@ -4715,10 +4741,12 @@ class LedgerStore:
                 row = self._connection.execute(
                     "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
                     "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-                    "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, updated_at_utc "
+                    "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                    "native_request_id, native_turn_id, updated_at_utc "
                     "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
-                    "AND scope_identity = ? AND conversation_id = ? AND participant_id = ?",
-                    identity[:5],
+                    "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+                    "AND binding_generation = ?",
+                    key,
                 ).fetchone()
             else:
                 existing = self._bb_observation_row(row)
@@ -4753,6 +4781,8 @@ class LedgerStore:
         last_message_id: str | None = None,
         last_delivery_id: str | None = None,
         last_attempt_id: str | None = None,
+        native_request_id: str | None = None,
+        native_turn_id: str | None = None,
     ) -> dict[str, object]:
         """Advance inside the caller's transaction, never below the cursor."""
         identity = self._bb_observation_identity(
@@ -4777,11 +4807,24 @@ class LedgerStore:
         ):
             if value is not None:
                 validator(value, name)
+        native_request_id = (
+            None if native_request_id is None else _conversation_binding_text(
+                native_request_id, "native_request_id", 256
+            )
+        )
+        native_turn_id = (
+            None if native_turn_id is None else _conversation_binding_text(
+                native_turn_id, "native_turn_id", 256
+            )
+        )
+        key = (*identity[:5], identity[6])
         row = self._connection.execute(
-            "SELECT binding_id, binding_generation, native_thread_id, last_event_seq "
+            "SELECT binding_id, binding_generation, native_thread_id, last_event_seq, "
+            "last_attempt_id, native_request_id, native_turn_id "
             "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
-            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ?",
-            identity[:5],
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            key,
         ).fetchone()
         if row is None:
             raise CanonicalIntegrityError("bb observation cursor is missing")
@@ -4790,30 +4833,42 @@ class LedgerStore:
         current_seq = int(row[3])
         if event_seq < current_seq:
             raise ValueError("bb observation cursor cannot move backwards")
+        new_delivery = last_attempt_id is not None and last_attempt_id != row[4]
+        next_request_id = native_request_id if native_request_id is not None else (
+            None if new_delivery else row[5]
+        )
+        next_turn_id = native_turn_id if native_turn_id is not None else (
+            None if new_delivery else row[6]
+        )
         self._connection.execute(
             "UPDATE bb_thread_observations SET last_event_seq = ?, dispatch_state = ?, "
             "last_message_id = COALESCE(?, last_message_id), "
             "last_delivery_id = COALESCE(?, last_delivery_id), "
-            "last_attempt_id = COALESCE(?, last_attempt_id), updated_at_utc = ? "
+            "last_attempt_id = COALESCE(?, last_attempt_id), native_request_id = ?, "
+            "native_turn_id = ?, updated_at_utc = ? "
             "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
-            "AND conversation_id = ? AND participant_id = ?",
+            "AND conversation_id = ? AND participant_id = ? AND binding_generation = ?",
             (
                 event_seq,
                 dispatch_state,
                 last_message_id,
                 last_delivery_id,
                 last_attempt_id,
+                next_request_id,
+                next_turn_id,
                 updated_at_utc,
-                *identity[:5],
+                *key,
             ),
         )
         row = self._connection.execute(
             "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
             "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, updated_at_utc "
+            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "native_request_id, native_turn_id, updated_at_utc "
             "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
-            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ?",
-            identity[:5],
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            key,
         ).fetchone()
         return self._bb_observation_row(row)
 

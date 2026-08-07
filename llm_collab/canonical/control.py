@@ -115,18 +115,15 @@ def _append_gated_receipt(
     environ: Mapping[str, str] | None,
     _in_transaction: bool = False,
 ) -> tuple[str, bool]:
-    if not _in_transaction:
-        require_canonical_write_gate(
-            store,
-            workspace_id=workspace_id,
-            scope_kind=scope_kind,
-            scope_identity=scope_identity,
-            registry_revision=registry_revision,
-            allow_canonical_write=allow_canonical_write,
-            environ=environ,
-        )
-    elif not store._connection.in_transaction:
-        raise RuntimeError("_in_transaction requires an open writer transaction")
+    require_canonical_write_gate(
+        store,
+        workspace_id=workspace_id,
+        scope_kind=scope_kind,
+        scope_identity=scope_identity,
+        registry_revision=registry_revision,
+        allow_canonical_write=allow_canonical_write,
+        environ=environ,
+    )
     return append_receipt(
         store,
         workspace_id=workspace_id,
