@@ -623,16 +623,8 @@ def main():
     # later cannot silently miss the gate by re-deriving `not autobridge_ready` on its own.
     wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused
 
-    body = read_body(args.body_file)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
-    if not body:
-        candidate = chat_dir / f"{timestamp}_to-{args.recipient}_{slug}.md"
-        print(
-            f"[error] refusing empty message body; packet not written: {candidate}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
     if thread_coordination_required:
         if not args.target_session_id:
             # A Codex self-target without a verified exact binding is the same
@@ -737,6 +729,18 @@ def main():
         )
         sys.exit(2)
 
+    # Read the body only AFTER every unresolved-route refusal above. Reading it
+    # first meant a `--body-file -` delivery to an unroutable recipient blocked on
+    # stdin for a body that would be refused anyway, and a missing body file raised
+    # instead of returning the promised typed exit-2 refusal.
+    body = read_body(args.body_file)
+    if not body:
+        candidate = chat_dir / f"{timestamp}_to-{args.recipient}_{slug}.md"
+        print(
+            f"[error] refusing empty message body; packet not written: {candidate}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
     first_time_awareness = should_consider_onboarding and not has_collab_awareness(args.recipient)
 

@@ -40,7 +40,14 @@ class DeliverEmptyBodyTest(unittest.TestCase):
                         {
                             "id": "claude",
                             "display_name": "Claude",
-                            "activation": {"type": "cli_session", "watcher_enabled": True},
+                            # GH-554 refuses an unresolved route BEFORE the body is
+                            # read, so a bound recipient would make this fixture fail
+                            # on routing setup it never meant to exercise. This suite
+                            # is about BODY handling, so the recipient uses GH-554's
+                            # own documented escape: a watcherless human needs no
+                            # exact binding. Do not "fix" this by weakening that
+                            # refusal.
+                            "activation": {"type": "human", "watcher_enabled": False},
                         },
                     ]
                 }
