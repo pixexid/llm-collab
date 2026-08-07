@@ -28,10 +28,13 @@ Stop here and use that workflow for an ordinary worker assignment. Continue
 below only when the work explicitly requires a first-class durable-mailbox
 participant with its own project/chat/agent coordinates.
 
-## 0. Cold start — first-class mailbox participants collaborate
+The cold start below applies only to those first-class mailbox participants.
 
-First-class mailbox collaboration does not start by itself. Until these steps
-run, the workers have no shared chat or exact-session route.
+## 0. Cold start — the operator asks two workers to collaborate
+
+Collaboration does not start by itself. A worker asked to "work with zcode on the
+checkout refactor" is, until these steps run, working alone: it has no chat to write
+to and no way for anyone to reach it.
 
 The sequence below was run end to end against a scratch workspace; the commands are
 copied from that run, not composed from the help text.
@@ -82,12 +85,12 @@ misbound.
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
 watcher-backed worker — claude, gemini, and Codex alike — arms its own inbox
-watcher, and routine exact-session dispatch wakes it. AX is not a routine lane;
-it is a conditional Codex-only fallback, taken only when `deliver.py` prints the
-exact command. Whether that command can land is a runtime property checked for
-that attempt, never a standing process or window-count fact. **Do your own
-pickup step** (the helper prints yours first); a packet you never see is a
-packet you never answer.
+watcher, and routine exact-session dispatch wakes it. AX is a fallback for Codex
+only, taken only when `deliver.py` prints it. It is not a routine lane, and
+whether the printed command can land is a runtime property checked for that
+attempt, never a standing process or window-count fact. **Do your own pickup
+step** (the helper prints yours first); a packet you never see is a packet you
+never answer.
 
 The manual steps below are exactly what that helper automates; run them by hand
 only when you need to diverge from the defaults.
@@ -223,10 +226,11 @@ exact active binding. A session switch, fork, reload, replacement, or app
 restart invalidates the old session-owned monitor; start a fresh session rather
 than reusing it.
 
-Codex is watcher-backed like every other first-class mailbox participant:
-routine exact-session dispatch is its wake. The AX path described in
-`session-autobridge-runbook.md` is a conditional Codex-only fallback, never a
-routine lane, and applies only when `deliver.py` prints the command.
+Codex is watcher-backed like every other worker: routine exact-session dispatch
+is its wake. The attended AX wake described in `session-autobridge-runbook.md` is
+a Codex-only fallback, and only when `deliver.py` prints the command. In this
+first-class mailbox context it is still not a routine worker lane, and its
+landing capability is checked live for that attempt.
 
 ## 2. Know your three coordinates
 
@@ -282,10 +286,10 @@ happens, but the fix is to declare the scope.
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
-block under contract v12's unchanged fallback predicate. Run only its exact
-printed command, and only when it is printed. Landing capability is a live
-runtime property, not a standing window-count claim. `watcher_pickup_ready`
-marks the unbound non-Codex watcher fallback
+block. Run only its exact printed command, and only when it is
+printed. Contract v12's fallback predicate is unchanged, and landing capability
+is a live runtime property rather than a standing window-count claim.
+`watcher_pickup_ready` marks the unbound non-Codex watcher fallback
 only — a bound recipient reports `autobridge_ready: true` with
 `watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
 exit 0 means the durable packet is written and the reply is complete.

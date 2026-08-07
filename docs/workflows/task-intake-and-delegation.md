@@ -33,15 +33,22 @@ inspection, and completion proof rather than copying its commands here. A BB
 worker is not an llm-collab participant or mailbox author; the orchestrator
 remains the integration point.
 
-For Amiga work, do not stack several BB workers on the same implementation
-lane. Native subagents are focused local support lanes for review, repo mapping,
-docs sync, verification, and recovery. `cdx2` is disabled legacy routing for
-Amiga; use it only when the operator explicitly re-enables cdx2 for one specific
-task.
+For Amiga work, use at most one Codex-managed internal subagent for a task. Do
+not stack several Codex-managed subagents on the same implementation lane.
+External collaborators do not count against that internal subagent limit.
 
-The one-writer rule still applies: do not make two agents or workers
-implementation writers for the same files in the same task. Other workers on
-that lane are reviewers/advisors unless scopes are explicitly disjoint.
+The former Codex Thread Coordination implementation route is dormant. Its
+superseded instruction is retained for audit only: "Codex-owned implementation
+should use managed Codex Thread Coordination workers by default." Do not follow
+that instruction; use BB for the implementation worker. Native subagents remain
+focused local support lanes for review, repo mapping, docs sync, verification,
+and recovery. `cdx2` is disabled legacy routing for Amiga; use it only when the
+operator explicitly re-enables cdx2 for one specific task.
+
+The one-writer rule still applies: do not make two agents (or an agent and a
+Codex-managed internal subagent) implementation writers for the same files in the
+same task. Other workers on that lane are reviewers/advisors unless scopes are
+explicitly disjoint.
 
 ## Intake order
 
@@ -53,11 +60,28 @@ that lane are reviewers/advisors unless scopes are explicitly disjoint.
    Refinement Gate below)
 6. classify the review tier; for Tier A, write the lane contract before any branch
 7. update the queue when owner/order/dependency/activation state changes
-8. provision and verify the BB environment when the lane is worker implementation
+8. provision branch/worktree when the lane is isolated-worker implementation
 9. assign one implementation owner
-10. move the task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
-11. start the BB worker with one frozen delegation
-12. communicate with and inspect the assigned worker through BB
+10. send one clear delegation message
+11. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
+12. then activate the assigned worker directly through its approved transport
+13. then begin implementation
+
+For a BB worker, step 8 uses `bb-workers.md` to obtain and verify the managed
+worktree. Step 10 freezes the delegation without starting the worker; step 12
+starts it through BB only after the `in_progress` gate passes.
+
+Dormant Codex Thread Coordination mechanics are retained below for audit only.
+They must not be executed:
+
+1. create one managed Codex thread for the task/worktree/branch
+2. inspect progress with `read_thread`
+3. send only focused unblocks with `send_message_to_thread`
+4. record progress, blockers, evidence, and handoff state back to the
+   `llm-collab` task/chat
+
+Thread Coordination was an execution surface, not a queue source of truth.
+It has been superseded by BB.
 
 BB is an execution surface, not a queue source of truth. If a result needs a
 durable llm-collab record, the orchestrator reads and verifies the BB result,
@@ -128,17 +152,36 @@ Do not stop on these states:
 - a workflow/process diff exists; classify it into its own PR or an explicit
   bundle before the next lane
 
-Before a BB worker follow-up, update the task or issue if scope changed, then
-communicate through BB as documented in `bb-workers.md`. Use llm-collab delivery
-only for an explicitly registered first-class mailbox participant.
+`llm-collab` messages are part of the loop, not a side channel. Before sending a
+worker follow-up, update the task/issue if scope changed, write one consolidated
+message, and use the approved worker bridge. Only a Codex recipient may use the
+AX command printed by `deliver.py`; a supported `ax_attended_only` target reports
+`ax_attended_recovery_required` instead — route control to Codex-attended
+recovery, never a routine ring. A terminal-only
+CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
+included, is woken by its durable packet and its own watcher **whenever its
+binding dispatches** (`autobridge_ready: true`); only when `deliver.py` reports
+`ax_doorbell_required: true` instead does a Codex packet take the AX fallback.
 
-For that specialized path, contract v12's predicate remains
-`wake_fallback_allowed = not autobridge_ready and not
-dispatch_scope_refused`. AX is not a routine lane or a BB transport. Only a
-Codex recipient may receive the exact AX command printed by `deliver.py`, and
-whether it can land is a live runtime property, never a standing process or
-window-count fact. Follow `session-autobridge-runbook.md` for dispatch,
-receipt, and recovery details rather than duplicating them here.
+Do not read `watcher_pickup_ready` as the signal for that. It requires
+`wake_fallback_allowed` **and** `is_watcher_only_target`, so a dispatchable
+binding turns it off for every recipient, and it excludes Codex besides. A
+healthy bound delivery reports `autobridge_ready: true` with
+`watcher_pickup_ready: false` — that pair is the routine success case, not a
+missing-pickup diagnosis. `watcher_pickup_ready` marks the *unbound* non-Codex
+watcher fallback. Treat `activation_unavailable` as a configuration blocker, record it
+precisely, and do not misreport it as routine operator relay.
+
+For a BB worker, the approved bridge above is BB itself: update the task or
+issue if scope changed, then communicate through `bb-workers.md`. The mailbox
+and wake details above apply only to an explicitly registered first-class
+participant.
+
+Contract v12's predicate remains `wake_fallback_allowed = not autobridge_ready
+and not dispatch_scope_refused`. AX is not a routine lane or a BB transport,
+and whether an offered doorbell can land is a live runtime property, never a
+standing process or window-count fact. Follow `session-autobridge-runbook.md`
+for receipt and recovery details.
 
 There should be one active queue-runner heartbeat for a project loop. A
 task-specific heartbeat may exist only as a child wait for Claude, a worker
@@ -459,9 +502,11 @@ built and the orchestrator waits for work it never assigned.
 
 - **A delegation is a frozen, bounded work order.** Exact scope, the exact
   deliverable the worker returns (a PR head, an activation, named files), and the
-  terminal action that publishes or records it. No open question — the worker
-  can execute it end to end without coming back to ask. State exactly: `Do not
-  end the turn until the deliverable and terminal action are both done.`
+  definition of done. No open question — the worker can execute it end to end
+  without coming back to ask.
+  The definition of done names the terminal action that publishes or records
+  the deliverable. State exactly: `Do not end the turn until the deliverable and
+  terminal action are both done.`
 - **A question is fine; a question is not a delegation.** "Which will you start?",
   "does this look right?" ask for an answer, not a deliverable. Ask them — but
   never inside a delegation packet, and never record the answer as "the task is
@@ -494,20 +539,41 @@ built and the orchestrator waits for work it never assigned.
   blocker, send one narrow question flagged as a `BLOCKER` (not progress), then
   pause — don't guess in order to stay "frozen."
 - **Silence is never a valid state.** If you are blocked, finished, or cannot
-  proceed, report it through the assignment's transport.
+  proceed, say so in a durable packet.
+  For a BB worker, the equivalent report belongs in its BB result rather than
+  an llm-collab packet.
 - **Finish both promised outcomes.** Do not end the turn until the delegated
   deliverable and terminal action are both done. Acknowledgement, partial work,
   or an idle turn is not a substitute.
 
 **Liveness (re-driving only works on a live worker)**
 
-- **Confirm the worker is alive before treating silence as waiting.** For a BB
-  worker, inspect its thread, output, log, and artifact through BB. `idle` says
-  only that the current turn ended; it does not say why or prove completion.
-- **Re-drive through the worker's actual transport.** A BB worker receives the
-  follow-up through BB. A first-class mailbox participant follows
-  `session-autobridge-runbook.md`; never add a hand-chosen ring. Re-driving a
-  question just yields another answer.
+- **For a BB worker, inspect before re-driving.** Read its thread, output, log,
+  and artifact through BB. `idle` says only that the current turn ended; it does
+  not say why or prove completion.
+- **Confirm the worker is alive before treating silence as waiting.** A worker
+  with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
+  turn awaiting its next wake — routine exact-session dispatch for a
+  watcher-backed worker, the `deliver.py`-selected doorbell only when dispatch is
+  unavailable — and a stopped or lease-expired session, or a stopped watcher,
+  hears a re-drive as silence forever. The orchestrator confirms the session is active (or
+  reactivates it) and that the ring/delivery actually landed — a silently-failed
+  delivery is its own defect, not "no progress" — before re-driving. An open lane
+  with nobody acting is a defect, and the orchestrator that owns the lane is who
+  checks.
+  This bullet applies to an explicitly registered first-class mailbox
+  participant, not a BB worker.
+- **Then keep the loop alive — through the recipient's own transport.**
+  Re-driving is a *new durable packet* plus only the wake action `deliver.py`
+  reports for that recipient — never a hand-chosen ring. For a watcher-backed
+  recipient whose binding dispatches (`autobridge_ready: true`) — Claude, the Pi
+  workers, and Codex alike — deliver durably and stop; its watcher owns pickup,
+  so never ring it. Only when `deliver.py` reports `ax_doorbell_required: true`
+  does the alternate path apply: run exactly the AX command it prints, and never
+  re-ring a `QUEUED (UNCONFIRMED)` attempt. Re-driving a question just yields another answer. (See AGENTS.md
+  contract v10 and `## Delegation message requirements`.)
+  This bullet applies to an explicitly registered first-class mailbox
+  participant; a BB worker receives its follow-up through BB.
 
 ## Delegation message requirements
 
@@ -598,18 +664,18 @@ When multiple workers are involved, state activation order explicitly:
 - who should wait
 - what condition triggers next activation
 
-## Activation discipline
+## Activation enforcement (hard rule)
 
-These are operator obligations, not a claim that BB enforces queue readiness.
-Do not start workers that are not ready. The queue owner records activation
-intent, then starts the assigned BB worker through the workflow in
-`bb-workers.md`. Use mailbox activation only for an explicitly registered
-first-class participant.
+This is an operating rule, not a claim that BB enforces queue readiness.
+Do not activate workers that are not ready to start. Activation is queue-owner
+controlled and happens only after the gates pass — not by asking the operator
+to relay. The queue owner starts a BB worker through `bb-workers.md`; an
+explicitly registered first-class participant uses the mailbox and only the
+wake action `deliver.py` authorizes.
 
 - Activate only workers in `in_progress` state that should execute now.
 - A worker is not ready to start until its required branch/worktree already exists when isolated mode is expected.
-- For queued workers, update task ownership/status and keep instructions in the
-  task/chat, but do not start them yet.
+- For queued workers, update task ownership/status and keep instructions in task/chat, but do not ring/activate them yet.
 - When a queued BB worker becomes ready, start its frozen assignment through BB.
 - When a queued first-class participant becomes ready, use `deliver.py` and
   only the wake action its result authorizes.
@@ -621,7 +687,8 @@ Required activation-state wording:
 - queue-only instruction: `do not activate yet; waiting on <condition>`
 
 These describe the queue-owner's recorded activation intent; they are not an
-enforcement control.
+enforcement control. The worker is then activated directly through its actual
+transport, not through an operator paste/relay.
 
-Never start multiple workers without explicit activation order.
+Never ring/activate multiple workers without explicit activation order.
 If order is sequential, activate only the first and wait until the trigger condition is met before activating the next.
