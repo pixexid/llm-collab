@@ -14,7 +14,6 @@ from typing import Mapping
 
 from llm_collab.bb_client import (
     REFUSAL_AMBIGUOUS,
-    REFUSAL_LAUNCH_UNAVAILABLE,
     REFUSAL_TIMED_OUT,
     BbClient,
     BbEvent,
@@ -41,7 +40,6 @@ BB_CONTINUATION_QUEUED = "queued"
 BB_CONTINUATION_DUPLICATE = "duplicate"
 BB_CONTINUATION_AMBIGUOUS = "ambiguous"
 BB_CONTINUATION_FAILED = "failed"
-BB_CONTINUATION_UNATTEMPTED = "unattempted"
 BB_CONTINUATION_COMPLETED = "completed"
 
 _MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
@@ -391,89 +389,40 @@ def continue_bb_thread(
         )
 
     current_seq = int(row["last_event_seq"])
+    _advance(
+        store,
+        context,
+        event_seq=current_seq,
+        dispatch_state="queued",
+        now=observed_at_utc,
+        ids=(message_id, delivery_id, attempt_id),
+    )
+
     try:
-        unavailable = client.reserve_launch()
-        if unavailable is not None:
-            return BbContinuationResult(
-                BB_CONTINUATION_UNATTEMPTED,
-                unavailable.detail,
-                message_id=message_id,
-                delivery_id=delivery_id,
-                attempt_id=attempt_id,
-                last_event_seq=current_seq,
-                native_called=False,
-            )
-        _advance(
-            store,
-            context,
-            event_seq=current_seq,
-            dispatch_state="queued",
-            now=observed_at_utc,
-            ids=(message_id, delivery_id, attempt_id),
+        native = client.send(
+            thread_id=str(context["native_thread_id"]),
+            message=body,
+            mode="queue-if-active",
         )
+    except Exception as error:
         try:
-            native = client.send(
-                thread_id=str(context["native_thread_id"]),
-                message=body,
-                mode="queue-if-active",
-            )
-        except Exception as error:
-            try:
-                row = _advance(
-                    store,
-                    context,
-                    event_seq=current_seq,
-                    dispatch_state="ambiguous",
-                    now=observed_at_utc,
-                    ids=(message_id, delivery_id, attempt_id),
-                )
-            except Exception:
-                row = {"last_event_seq": current_seq}
-            return _ambiguous_without_retry(
+            row = _advance(
+                store,
+                context,
+                event_seq=current_seq,
+                dispatch_state="ambiguous",
+                now=observed_at_utc,
                 ids=(message_id, delivery_id, attempt_id),
-                detail=f"bb send raised after the send boundary: {error}",
-                row=row,
             )
-    finally:
-        client.cancel_launch_reservation()
+        except Exception:
+            row = {"last_event_seq": current_seq}
+        return _ambiguous_without_retry(
+            ids=(message_id, delivery_id, attempt_id),
+            detail=f"bb send raised after the send boundary: {error}",
+            row=row,
+        )
 
     if isinstance(native, BbRefusal):
-        if native.reason == REFUSAL_LAUNCH_UNAVAILABLE:
-            try:
-                row = _advance(
-                    store,
-                    context,
-                    event_seq=current_seq,
-                    dispatch_state="idle",
-                    now=observed_at_utc,
-                    ids=(message_id, delivery_id, attempt_id),
-                )
-            except BaseException as error:
-                try:
-                    row = _advance(
-                        store,
-                        context,
-                        event_seq=current_seq,
-                        dispatch_state="idle",
-                        now=observed_at_utc,
-                        ids=(message_id, delivery_id, attempt_id),
-                    )
-                except BaseException:
-                    row = {"last_event_seq": current_seq}
-                return _ambiguous_without_retry(
-                    ids=(message_id, delivery_id, attempt_id),
-                    detail=f"bb launch was refused but queued state could not be cleared: {error}",
-                    row=row,
-                )
-            return BbContinuationResult(
-                BB_CONTINUATION_UNATTEMPTED,
-                native.detail,
-                message_id=message_id,
-                delivery_id=delivery_id,
-                attempt_id=attempt_id,
-                last_event_seq=int(row["last_event_seq"]),
-                native_called=False,
-            )
         ambiguous = native.reason in {REFUSAL_AMBIGUOUS, REFUSAL_TIMED_OUT}
         receipt_state = "ambiguous" if ambiguous else "rejected_before_acceptance"
         quality = "best_effort" if ambiguous else "authoritative"
@@ -833,7 +782,6 @@ __all__ = [
     "BB_CONTINUATION_DUPLICATE",
     "BB_CONTINUATION_FAILED",
     "BB_CONTINUATION_QUEUED",
-    "BB_CONTINUATION_UNATTEMPTED",
     "BbContinuationRefused",
     "BbContinuationResult",
     "BbObservationResult",

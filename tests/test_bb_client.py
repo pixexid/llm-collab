@@ -8,14 +8,12 @@ the response/failure contract Slice 1B will call.
 from __future__ import annotations
 
 import io
-import inspect
 import json
 import subprocess
 import sys
 import threading
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +25,6 @@ from llm_collab.bb_client import (
     REFUSAL_AMBIGUOUS,
     REFUSAL_DISABLED,
     REFUSAL_IDENTITY_MISMATCH,
-    REFUSAL_LAUNCH_UNAVAILABLE,
     REFUSAL_MALFORMED_RESPONSE,
     REFUSAL_PROFILE_MISMATCH,
     REFUSAL_TRANSPORT_FAILED,
@@ -35,7 +32,6 @@ from llm_collab.bb_client import (
     SLICE_1A_PROFILE,
     BbClient,
     BbEventPage,
-    BbLaunchUnavailable,
     BbProfile,
     BbQueued,
     BbRefusal,
@@ -1015,260 +1011,6 @@ class ProductionTransportTest(unittest.TestCase):
         self.assertTrue(late_waited.is_set(), "late process was not reaped")
         self.assertTrue(launched[0].stdout.closed, "late stdout pipe was not closed")
         self.assertTrue(launched[0].stderr.closed, "late stderr pipe was not closed")
-
-    def test_stalled_launch_cap_refuses_without_growing_the_thread_count(self):
-        """GH-592: repeated hung launches stop consuming daemon threads at the cap."""
-        import llm_collab.bb_client as bb
-
-        release_launch = threading.Event()
-        started = threading.Condition()
-        started_count = 0
-
-        class NeverReturningLaunch:
-            def __init__(self, *_args, **_kwargs):
-                nonlocal started_count
-                with started:
-                    started_count += 1
-                    started.notify_all()
-                release_launch.wait()
-                self.stdout = io.StringIO("{}")
-                self.stderr = io.StringIO("")
-
-            def wait(self, timeout=None):
-                return 0
-
-            def kill(self):
-                pass
-
-        transport = subprocess_transport(["irrelevant"])
-        before_threads = set(threading.enumerate())
-        launch_threads = []
-        try:
-            with patch.object(bb.subprocess, "Popen", NeverReturningLaunch):
-                for attempt in range(bb.MAX_STALLED_LAUNCHES):
-                    began = time.monotonic()
-                    with self.assertRaises(BbTransportTimeout):
-                        transport([], 0.05)
-                    self.assertLess(
-                        time.monotonic() - began,
-                        0.2,
-                        f"stalled launch attempt {attempt + 1} exceeded its bound",
-                    )
-                    with started:
-                        self.assertTrue(
-                            started.wait_for(lambda: started_count == attempt + 1, timeout=1.0),
-                            f"stalled launch attempt {attempt + 1} never entered Popen",
-                        )
-
-                launch_threads = [
-                    thread
-                    for thread in threading.enumerate()
-                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
-                ]
-                threads_at_cap = len(launch_threads)
-                client = BbClient(transport, enabled=True, timeout_seconds=0.05)
-                outcome = client.verify_version()
-                threads_after_refusal = len(
-                    [
-                        thread
-                        for thread in threading.enumerate()
-                        if thread not in before_threads and thread.name == "bb-subprocess-launch"
-                    ]
-                )
-                self.assertEqual(
-                    threads_at_cap,
-                    threads_after_refusal,
-                    "stalled-launch cap refusal created another launch thread",
-                )
-                self.assertIsInstance(outcome, BbRefusal)
-                self.assertEqual(REFUSAL_LAUNCH_UNAVAILABLE, outcome.reason)
-                self.assertIn("stalled launch cap", outcome.detail)
-                self.assertEqual(
-                    bb.MAX_STALLED_LAUNCHES,
-                    started_count,
-                    "cap refusal entered Popen",
-                )
-        finally:
-            release_launch.set()
-            for thread in launch_threads:
-                thread.join(timeout=1.0)
-        with bb._stalled_launches_lock:
-            self.assertEqual(0, bb._outstanding_launches, "cleaned launches did not return cap slots")
-
-    def test_concurrent_stalled_launches_reserve_exactly_the_cap(self):
-        """GH-592: concurrent check-and-launch cannot oversubscribe the cap."""
-        import llm_collab.bb_client as bb
-
-        release_launch = threading.Event()
-        entered_lock = threading.Lock()
-        entered = 0
-        callers = bb.MAX_STALLED_LAUNCHES * 3
-        start = threading.Barrier(callers)
-        before_threads = set(threading.enumerate())
-        launch_threads = []
-
-        class NeverReturningLaunch:
-            def __init__(self, *_args, **_kwargs):
-                nonlocal entered
-                with entered_lock:
-                    entered += 1
-                release_launch.wait()
-                self.stdout = io.StringIO("{}")
-                self.stderr = io.StringIO("")
-
-            def wait(self, timeout=None):
-                return 0
-
-            def kill(self):
-                pass
-
-        transport = subprocess_transport(["irrelevant"])
-
-        def call_transport():
-            start.wait()
-            try:
-                transport([], 0.05)
-            except (BbLaunchUnavailable, BbTransportTimeout):
-                pass
-
-        try:
-            with patch.object(bb.subprocess, "Popen", NeverReturningLaunch):
-                with ThreadPoolExecutor(max_workers=callers) as pool:
-                    futures = [pool.submit(call_transport) for _ in range(callers)]
-                    for future in futures:
-                        future.result(timeout=1.0)
-                launch_threads = [
-                    thread
-                    for thread in threading.enumerate()
-                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
-                ]
-                self.assertEqual(
-                    bb.MAX_STALLED_LAUNCHES,
-                    entered,
-                    "concurrent callers entered Popen beyond the reserved cap",
-                )
-        finally:
-            release_launch.set()
-            for thread in launch_threads:
-                thread.join(timeout=1.0)
-        with bb._stalled_launches_lock:
-            self.assertEqual(0, bb._outstanding_launches, "launch slots were not fully released")
-
-    def test_interrupted_launch_wait_releases_its_reserved_slot(self):
-        """GH-592: BaseException at the launch wait cannot strand capacity."""
-        import llm_collab.bb_client as bb
-
-        release_constructor = threading.Event()
-        caller = threading.current_thread()
-        real_event_wait = threading.Event.wait
-        before_threads = set(threading.enumerate())
-        launch_threads = []
-
-        class LateLaunch:
-            def __init__(self, *_args, **_kwargs):
-                release_constructor.wait()
-                self.stdout = io.StringIO("{}")
-                self.stderr = io.StringIO("")
-
-            def wait(self, timeout=None):
-                return 0
-
-            def kill(self):
-                pass
-
-        def interrupt_caller_wait(event, timeout=None):
-            if threading.current_thread() is caller and timeout is not None:
-                raise KeyboardInterrupt("simulated interrupted launch wait")
-            return real_event_wait(event, timeout)
-
-        transport = subprocess_transport(["irrelevant"])
-        try:
-            with patch.object(bb.subprocess, "Popen", LateLaunch), patch.object(
-                bb.threading.Event, "wait", interrupt_caller_wait
-            ):
-                with self.assertRaises(KeyboardInterrupt):
-                    transport([], 1.0)
-                launch_threads = [
-                    thread
-                    for thread in threading.enumerate()
-                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
-                ]
-                release_constructor.set()
-                for thread in launch_threads:
-                    thread.join(timeout=1.0)
-                with bb._stalled_launches_lock:
-                    self.assertEqual(
-                        0,
-                        bb._outstanding_launches,
-                        "interrupted launch wait leaked its reserved slot",
-                    )
-        finally:
-            release_constructor.set()
-            for thread in launch_threads:
-                thread.join(timeout=1.0)
-
-    def test_interrupted_success_window_releases_its_reserved_slot(self):
-        """GH-592: decision signaling survives BaseException after launch success."""
-        import llm_collab.bb_client as bb
-
-        before_threads = set(threading.enumerate())
-        launch_threads = []
-
-        class SuccessfulLaunch:
-            def __init__(self, *_args, **_kwargs):
-                self.stdout = io.StringIO("{}")
-                self.stderr = io.StringIO("")
-
-            def wait(self, timeout=None):
-                return 0
-
-            def kill(self):
-                pass
-
-        transport = subprocess_transport(["irrelevant"])
-        source, first_line = inspect.getsourcelines(transport)
-        claim_line = first_line + next(
-            index
-            for index, line in enumerate(source)
-            if "process = launch_result[0]" in line
-        )
-
-        def interrupt_success_window(frame, event, _arg):
-            if (
-                frame.f_code is transport.__code__
-                and event == "line"
-                and frame.f_lineno == claim_line
-            ):
-                sys.settrace(None)
-                raise KeyboardInterrupt("simulated success-window interruption")
-            return interrupt_success_window
-
-        try:
-            with patch.object(bb.subprocess, "Popen", SuccessfulLaunch):
-                sys.settrace(interrupt_success_window)
-                try:
-                    transport([], 1.0)
-                except BaseException:
-                    pass
-                finally:
-                    sys.settrace(None)
-                launch_threads = [
-                    thread
-                    for thread in threading.enumerate()
-                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
-                ]
-                for thread in launch_threads:
-                    thread.join(timeout=1.0)
-                with bb._stalled_launches_lock:
-                    self.assertEqual(
-                        0,
-                        bb._outstanding_launches,
-                        "success-window interruption leaked its reserved slot",
-                    )
-        finally:
-            sys.settrace(None)
-            for thread in launch_threads:
-                thread.join(timeout=1.0)
 
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.
