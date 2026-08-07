@@ -372,9 +372,12 @@ Before merging a head pushed during the current session, do one of these:
 
    Preserve its JSON result with the review evidence. `review_seen` means an
    exact-head connector review arrived and must go through the normal
-   adjudication/settle gate; `no_connector_review` includes the exact head and
-   `waited_seconds` and is the bounded proof that the window was observed.
-   A head change or a window with no successful snapshot fails closed.
+   adjudication/settle gate; `no_connector_review` includes the exact head, the
+   observation `waited_seconds`, and the bounded `final_snapshot_seconds` grace
+   used to obtain its tail snapshot. The budget starts before the baseline read,
+   and the tail read has its own bounded grace so the observation deadline is
+   not silently extended by an unbounded request. A head change or a window
+   with no successful snapshot fails closed.
 
 Re-check the exact head, merge state, and reviewed artifact set immediately
 before the merge. Immediately after merging, run `bin/pr_watch.py --once` once

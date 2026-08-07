@@ -43,6 +43,9 @@ MAX_REACTION_COMMENTS = 30
 # cumulative page count, and the deadline is observed before every request.
 MAX_SNAPSHOT_PAGES = 80
 CONNECTOR_LOGINS = frozenset({"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"})
+# A tail snapshot starts after the observation window, so it gets one bounded
+# request budget of its own rather than making the observation deadline porous.
+FINAL_SNAPSHOT_GRACE = GH_CALL_TIMEOUT
 
 
 class _Budget:
@@ -262,8 +265,11 @@ def diff(old, new, raw_new):
 
 
 def settle_after_push(repo, pr, interval, timeout):
-    """Wait for a bounded post-push window without accepting a later head."""
-    base, _ = snapshot(repo, pr)
+    """Observe a pushed head, then take one bounded tail snapshot."""
+    started = time.monotonic()
+    observation_deadline = started + timeout
+    final_deadline = observation_deadline + FINAL_SNAPSHOT_GRACE
+    base, _ = snapshot(repo, pr, observation_deadline)
     head = base["head"]
     if head in base.get("connector_review_oids", []):
         print(json.dumps({
@@ -274,24 +280,18 @@ def settle_after_push(repo, pr, interval, timeout):
         }, indent=2))
         return 0
 
-    started = time.monotonic()
-    deadline = started + timeout
-    last = None
-    tail_snapshot_success = False
     while True:
-        remaining = deadline - time.monotonic()
+        remaining = observation_deadline - time.monotonic()
         if remaining < 0:
             break
         time.sleep(min(interval, remaining))
-        last = None
+        if time.monotonic() >= observation_deadline:
+            break
         try:
-            current, _ = snapshot(repo, pr, deadline)
+            current, _ = snapshot(repo, pr, observation_deadline)
         except RuntimeError as error:
             print(f"WARN: {error}", file=sys.stderr)
-            if time.monotonic() >= deadline:
-                break
             continue
-        last = current
         if current["head"] != head:
             print(
                 json.dumps({
@@ -310,23 +310,33 @@ def settle_after_push(repo, pr, interval, timeout):
                 "connector_review_oids": current["connector_review_oids"],
             }, indent=2))
             return 0
-        if time.monotonic() >= deadline:
-            tail_snapshot_success = True
-            break
-
-    if not tail_snapshot_success or last is None:
+    try:
+        tail, _ = snapshot(repo, pr, final_deadline)
+    except RuntimeError as error:
         print(
-            "ERROR: no successful tail snapshot at the end of the settle window",
+            f"ERROR: no successful tail snapshot at the end of the settle window: {error}",
             file=sys.stderr,
         )
         return 2
-    waited_seconds = min(timeout, max(0.0, time.monotonic() - started))
-    print(json.dumps({
-        "settle": "no_connector_review",
+    if tail["head"] != head:
+        print(
+            json.dumps({"settle": "head_changed", "before": head, "after": tail["head"]}),
+            file=sys.stderr,
+        )
+        return 2
+    result = {
         "head": head,
-        "waited_seconds": round(waited_seconds, 3),
-        "connector_review_oids": last.get("connector_review_oids", []),
-    }, indent=2))
+        "waited_seconds": timeout,
+        "final_snapshot_seconds": round(
+            max(0.0, time.monotonic() - observation_deadline), 3
+        ),
+        "connector_review_oids": tail.get("connector_review_oids", []),
+    }
+    if head in tail.get("connector_review_oids", []):
+        result["settle"] = "review_seen"
+        print(json.dumps(result, indent=2))
+        return 0
+    print(json.dumps({"settle": "no_connector_review", **result}, indent=2))
     return 0
 
 

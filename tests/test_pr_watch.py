@@ -243,7 +243,7 @@ class PrWatchDiffTest(unittest.TestCase):
     def test_settle_after_push_reports_no_review_after_bounded_window(self):
         base = _sig(connector_review_oids=[])
         snapshots = iter([(base, {}), (base, {})])
-        clock = iter([0.0, 0.0, 1.0, 1.0, 1.0])
+        clock = iter([0.0, 0.0, 1.0, 1.0])
         with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
                 patch.object(self.pw.time, "sleep") as sleep, \
@@ -253,11 +253,12 @@ class PrWatchDiffTest(unittest.TestCase):
         output = "".join(call.args[0] for call in stdout.write.call_args_list)
         self.assertIn('"settle": "no_connector_review"', output)
         self.assertIn('"head":', output)
+        self.assertIn('"final_snapshot_seconds":', output)
 
     def test_settle_after_push_rejects_stale_snapshot_when_tail_poll_fails(self):
         base = _sig(connector_review_oids=[])
         snapshots = iter([(base, {}), RuntimeError("transport unavailable")])
-        clock = iter([0.0, 0.0, 1.0, 1.0])
+        clock = iter([0.0, 0.0, 1.0])
         with patch.object(self.pw, "snapshot", side_effect=snapshots), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
                 patch.object(self.pw.time, "sleep"), \
@@ -266,12 +267,28 @@ class PrWatchDiffTest(unittest.TestCase):
         output = "".join(call.args[0] for call in stderr.write.call_args_list)
         self.assertIn("tail snapshot", output)
 
+    def test_settle_after_push_binds_baseline_and_tail_to_separate_deadlines(self):
+        base = _sig(connector_review_oids=[])
+        calls = []
+        clock = iter([10.0, 10.0, 11.0, 11.0])
+
+        def fake_snapshot(*args):
+            calls.append(args)
+            return base, {}
+
+        with patch.object(self.pw, "snapshot", side_effect=fake_snapshot), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"):
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        self.assertEqual(11.0, calls[0][2])
+        self.assertEqual(11.0 + self.pw.FINAL_SNAPSHOT_GRACE, calls[1][2])
+
     def test_settle_after_push_accepts_review_for_the_captured_head(self):
         head = "a" * 40
         base = _sig(head=head, connector_review_oids=[])
         current = _sig(head=head, connector_review_oids=[head])
         snapshots = iter([(base, {}), (current, {})])
-        clock = iter([0.0, 0.0, 0.5])
+        clock = iter([0.0, 0.0, 0.0, 0.5])
         with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
                 patch.object(self.pw.time, "sleep") as sleep, \
@@ -286,7 +303,7 @@ class PrWatchDiffTest(unittest.TestCase):
         base = _sig(head="a" * 40, connector_review_oids=[])
         current = _sig(head="b" * 40, connector_review_oids=[])
         snapshots = iter([(base, {}), (current, {})])
-        clock = iter([0.0, 0.0])
+        clock = iter([0.0, 0.0, 0.0])
         with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
                 patch.object(self.pw.time, "sleep"), \
