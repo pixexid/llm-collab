@@ -160,6 +160,7 @@ Before changing shared tooling or operating a project lane, read:
 - `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
   thread end to end
 - `docs/workflows/task-intake-and-delegation.md`
+- `docs/workflows/bb-workers.md` — required before spawning or driving BB workers
 - `## Requesting Code Review` in this file — it governs every repository a lane
   touches, not just this one
 
@@ -225,6 +226,28 @@ workers cannot reach or execute a safe decision without operator-only input.
 
 The test is not "is this tedious" or "did they mention it" — it is whether you could do
 it and check that it worked. If you could, it is yours.
+
+## BB worker surface
+
+BB is the current surface for orchestrator-managed worker threads. Before
+spawning, steering, or accepting work from one, read
+[`bb-workers.md`](docs/workflows/bb-workers.md); it owns the commands, isolation
+hazard, loopless delegation contract, return path, and inspection rules.
+
+A BB thread is not thereby an `agents.json` collaborator, bound llm-collab
+session, receipt-bearing participant, or canonical-bus member. The orchestrator
+reads its results through BB, authors any durable packet under its own
+registered identity, and remains the integration point. A BB worker never
+supplies another agent as `deliver.py --from`; that records the agent as the
+author, not a relay. First-class relay provenance remains prospective in
+[GH-604](https://github.com/pixexid/llm-collab/issues/604).
+
+The current worker fleet runs through BB; AX is not a routine lane or a BB
+transport. Contract v12's unchanged fallback predicate remains the authority
+for whether `deliver.py` offers a doorbell. Whether an offered doorbell can land
+is a dynamic runtime property, never a standing inference from process state.
+Use the live capability checks in
+[`bb-workers.md`](docs/workflows/bb-workers.md#communicate-in-both-directions).
 
 ## Adding A Project
 
