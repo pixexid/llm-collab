@@ -499,6 +499,44 @@ class TaskContractInvalidDbImpactTest(unittest.TestCase):
         self.assertEqual(first["db_impact"], second["db_impact"])
         self.assertNotIn("db_impact", changed)
 
+    def test_legacy_substituted_marker_rejects_transition_for_both_projects(self) -> None:
+        """GH-582: pre-sync provenance blocks an old valid-looking record."""
+        body = "Local ledger work."
+        for project in ("llm-collab", "amiga"):
+            with self.subTest(project=project):
+                original = {
+                    "project_id": project,
+                    "db_impact": "none",
+                    "db_impact_detection": "manual",
+                    "db_impact_detection_reasons": [
+                        f"{task_contract.DB_IMPACT_INVALID_REASON_PREFIX}additive_schema"
+                    ],
+                }
+
+                # The normal sync path recomputes the derived reasons and produces
+                # the clean state an author gets after explicitly repairing the
+                # impact. The lifecycle validator must still inspect the record that
+                # entered that sync, or claim_task can accept the old contradiction.
+                synced, _changed = task_contract.sync_task_contract(original, body)
+                self.assertNotIn(
+                    "additive_schema",
+                    " ".join(synced["db_impact_detection_reasons"]),
+                )
+                before_validation = dict(synced)
+
+                errors, _summary = task_contract.validate_task_contract(
+                    synced,
+                    body,
+                    stage="assignment",
+                    original_frontmatter=original,
+                )
+
+                self.assertTrue(
+                    any("additive_schema" in error for error in errors),
+                    f"failures=gh580_{project}_transition_must_be_rejected: {errors}",
+                )
+                self.assertEqual(before_validation, synced)
+
     def test_valid_explicit_db_impact_still_passes_through(self) -> None:
         """The guard must reject only non-members — every real value still works."""
         for value in sorted(task_contract.DB_IMPACT_VALUES):
