@@ -25,7 +25,7 @@ Recommended read order:
    Livecraft host, what they inherit by default (ponytail is runtime-global),
    and how the production first-start binding is gated
 7. `bb-worker-profiles.md` — Phase 2 BB model routing by measured failure mode;
-   candidate profiles remain analysis-only until authoring is evaluated
+   prospective analysis-only policy and the current hard-coded bootstrap gap
 8. `task-intake-and-delegation.md`
 9. `review-and-handoff.md`
 10. `isolated-worktrees.md`
