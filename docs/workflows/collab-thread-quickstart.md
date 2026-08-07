@@ -264,14 +264,13 @@ python bin/deliver.py \
 ```
 
 **`--repo-targets` is not optional in practice.** If the recipient's session
-declares a repo scope and your packet declares none, the packet is written to the
-mailbox and then **refused at dispatch** — the recipient never sees it.
+declares a repo scope and your packet declares none, delivery is **refused before
+durable write** — no mailbox packet or runtime dispatch is created.
 
 This is not hypothetical: on 2026-07-25 it silently dropped **27 consecutive
 packets** over eleven hours, and the lane only kept working because GitHub PR
-comments were carrying the conversation. `deliver.py` now prints a loud
-`DURABLE WRITE OK — RUNTIME DISPATCH REFUSED` banner naming both scopes when this
-happens, but the fix is to declare the scope.
+comments were carrying the conversation. `deliver.py` now prints a typed refusal
+naming both scopes when this happens, but the fix is to declare the scope.
 
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
