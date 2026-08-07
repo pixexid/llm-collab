@@ -4,6 +4,26 @@
 
 Start from a known-good environment before claiming or editing work.
 
+## Choose the worker surface first
+
+BB is the normal worker fleet. For a provider-backed worker assignment, follow
+[`bb-workers.md`](bb-workers.md) before starting any collaboration bootstrap. It
+owns worker isolation, spawn, communication, inspection, and completion proof;
+do not copy its commands here.
+
+A BB worker is not an llm-collab participant: it has no `agents.json` identity,
+exact-session binding, durable-mailbox authorship, or delivery receipt. The
+orchestrator remains the integration point and communicates with that worker
+through BB. BB changes workspace acquisition, not project preflight: after
+`bb-workers.md` provides the verified managed worktree, the worker reads the
+supplied task, project, and repository context and completes
+[`Required preflight`](#required-preflight) before editing. The orchestrator
+drains the collaboration inbox and performs any exact identity-bearing read
+that requires `--me`; the BB worker has no collaboration identity and must not
+impersonate one. The first-class bootstrap, binding, and watcher sections apply
+only when a worker is explicitly being enrolled as a durable-mailbox
+participant.
+
 ## Bootstrap first
 
 ```bash
@@ -19,8 +39,8 @@ invokes the repository-local bootstrap. Use `<runtime_root>/bin/llm-collab
 current_runtime.py --check` to report the verified heads without starting a
 session or watcher.
 
-For an interactive collab worker, startup is not complete until the exact
-native session watcher and its target/sibling probes pass. Follow
+For an explicitly enrolled interactive collab worker, startup is not complete
+until the exact native session watcher and its target/sibling probes pass. Follow
 [`collab-thread-quickstart.md` → Bootstrap](collab-thread-quickstart.md#1-bootstrap).
 Do not treat the agent-wide watcher reported by `session_bootstrap.py` as that
 proof.
@@ -93,6 +113,12 @@ as tracked files. The in-repo `projects/_example/` directory is only a template.
 
 ## Read before acting
 
+An enrolled first-class participant follows all four items below under its own
+identity. For a BB assignment, the orchestrator owns item 1 and any item 2 read
+that requires a collaboration identity, then supplies the relevant task/board
+context in the delegation. The BB worker follows that supplied context plus
+items 3-4; it never supplies another participant to an identity-bearing read.
+
 1. collaboration inbox
 2. active task board
 3. project-level instructions (`{project_state_root}/<project_id>/...` when present locally)
@@ -157,6 +183,11 @@ served.
 
 ## Claude Desktop Rule
 
+BB workers do not enter this path. The former use of the Codex app as a worker
+surface is dormant; use `bb-workers.md` for worker assignments. The mechanics
+below remain live for explicitly registered first-class mailbox participants
+and attended recovery, and do not authorize provisioning a Codex-app worker.
+
 Claude has one wake path in every registration and project shape: the durable
 `Chats/` packet, picked up by the Claude app's own background inbox watcher.
 Neither `activation.ax_app` nor `claude_desktop_bridge` changes that — `deliver.py`
@@ -203,6 +234,15 @@ Do not describe AX as primary for that packet, and **never deactivate a working
 binding to obtain an AX wake** — that removes the routine dispatch v12 requires
 in order to reach a fallback. If `deliver.py` does not print an AX command, the
 answer is to repair or diagnose dispatch, not to disable it.
+
+Contract v12's fallback predicate is unchanged:
+`wake_fallback_allowed = not autobridge_ready and not
+dispatch_scope_refused`. AX is not a routine worker lane or a BB transport.
+Whether an offered doorbell can land is a runtime property checked live for
+that attempt; never infer it from process state or record a window count as a
+standing capability. `autobridge_ready: true` proves send-time routability, not
+delivery, so require the receipt or recipient evidence named by
+`session-autobridge-runbook.md`.
 
 Safest task-grade workflow for desktop-app agents:
 
