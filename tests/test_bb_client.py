@@ -8,6 +8,7 @@ the response/failure contract Slice 1B will call.
 from __future__ import annotations
 
 import io
+import inspect
 import json
 import subprocess
 import sys
@@ -1203,6 +1204,69 @@ class ProductionTransportTest(unittest.TestCase):
                     )
         finally:
             release_constructor.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+
+    def test_interrupted_success_window_releases_its_reserved_slot(self):
+        """GH-592: decision signaling survives BaseException after launch success."""
+        import llm_collab.bb_client as bb
+
+        before_threads = set(threading.enumerate())
+        launch_threads = []
+
+        class SuccessfulLaunch:
+            def __init__(self, *_args, **_kwargs):
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+        source, first_line = inspect.getsourcelines(transport)
+        claim_line = first_line + next(
+            index
+            for index, line in enumerate(source)
+            if "process = launch_result[0]" in line
+        )
+
+        def interrupt_success_window(frame, event, _arg):
+            if (
+                frame.f_code is transport.__code__
+                and event == "line"
+                and frame.f_lineno == claim_line
+            ):
+                sys.settrace(None)
+                raise KeyboardInterrupt("simulated success-window interruption")
+            return interrupt_success_window
+
+        try:
+            with patch.object(bb.subprocess, "Popen", SuccessfulLaunch):
+                sys.settrace(interrupt_success_window)
+                try:
+                    transport([], 1.0)
+                except BaseException:
+                    pass
+                finally:
+                    sys.settrace(None)
+                launch_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                ]
+                for thread in launch_threads:
+                    thread.join(timeout=1.0)
+                with bb._stalled_launches_lock:
+                    self.assertEqual(
+                        0,
+                        bb._outstanding_launches,
+                        "success-window interruption leaked its reserved slot",
+                    )
+        finally:
+            sys.settrace(None)
             for thread in launch_threads:
                 thread.join(timeout=1.0)
 

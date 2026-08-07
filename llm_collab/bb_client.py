@@ -894,16 +894,6 @@ def subprocess_transport(
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
         global _outstanding_launches
 
-        owner = threading.get_ident()
-        with _stalled_launches_lock:
-            if owner in reserved_threads:
-                reserved_threads.remove(owner)
-            elif _outstanding_launches >= MAX_STALLED_LAUNCHES:
-                refusal = cap_refusal()
-                raise BbLaunchUnavailable(refusal.detail)
-            else:
-                _outstanding_launches += 1
-
         reservation_released = False
 
         def release_launch_slot() -> None:
@@ -980,26 +970,37 @@ def subprocess_transport(
             daemon=True,
         )
         try:
+            owner = threading.get_ident()
+            with _stalled_launches_lock:
+                if owner in reserved_threads:
+                    reserved_threads.remove(owner)
+                elif _outstanding_launches >= MAX_STALLED_LAUNCHES:
+                    refusal = cap_refusal()
+                    raise BbLaunchUnavailable(refusal.detail)
+                else:
+                    _outstanding_launches += 1
             launch_thread.start()
+        except BbLaunchUnavailable:
+            raise
         except BaseException:
+            launch_abandoned.set()
+            launch_decided.set()
             release_launch_slot()
             raise
-        launch_finished = False
         try:
-            launch_finished = launch_done.wait(timeout=remaining())
-        finally:
-            if not launch_finished:
+            if not launch_done.wait(timeout=remaining()):
                 launch_abandoned.set()
-                launch_decided.set()
-        if not launch_finished:
-            raise BbTransportTimeout(
-                f"{' '.join(argv)} exceeded {timeout_seconds}s"
-            )
-        if launch_error:
+                raise BbTransportTimeout(
+                    f"{' '.join(argv)} exceeded {timeout_seconds}s"
+                )
+            if launch_error:
+                raise launch_error[0]
+            process = launch_result[0]
+        except BaseException:
+            launch_abandoned.set()
+            raise
+        finally:
             launch_decided.set()
-            raise launch_error[0]
-        process = launch_result[0]
-        launch_decided.set()
 
         pool = ThreadPoolExecutor(max_workers=2)
         aborting = False

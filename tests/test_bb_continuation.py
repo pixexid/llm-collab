@@ -509,6 +509,98 @@ class BbContinuationTest(unittest.TestCase):
             store.close()
             tmp.cleanup()
 
+    def test_interrupted_send_time_reset_is_ambiguous_with_retryable_state(self):
+        import llm_collab.bb_continuation as continuation
+
+        class LaunchUnavailableClient(FakeBbClient):
+            def send(self, *, thread_id: str, message: str, mode: str = "queue-if-active"):
+                self.sent.append((thread_id, message, mode))
+                return BbRefusal(
+                    REFUSAL_LAUNCH_UNAVAILABLE,
+                    "stalled launch cap reached",
+                )
+
+        tmp, store, session, materialized = self.open_fixture()
+        real_advance = continuation._advance
+        interrupted = False
+
+        def interrupt_first_idle_reset(*args, **kwargs):
+            nonlocal interrupted
+            if kwargs.get("dispatch_state") == "idle" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("simulated interrupted idle reset")
+            return real_advance(*args, **kwargs)
+
+        result = None
+        try:
+            with patch.dict(
+                os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}
+            ), patch.object(continuation, "_advance", interrupt_first_idle_reset):
+                try:
+                    result = continue_bb_thread(
+                        store,
+                        client=LaunchUnavailableClient(),
+                        session=session,
+                        materialized=materialized,
+                        observed_at_utc=NOW,
+                    )
+                except BaseException:
+                    pass
+            row = store.read_bb_thread_observation(
+                workspace_id=WORKSPACE,
+                scope_kind="project",
+                scope_identity=PROJECT,
+                conversation_id=CHAT,
+                participant_id=PARTICIPANT,
+                binding_generation=1,
+            )
+            self.assertEqual(
+                (BB_CONTINUATION_AMBIGUOUS, "idle"),
+                (result.state if result is not None else None, row["dispatch_state"]),
+                "interrupted launch reset did not return ambiguity with retryable state",
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_send_baseexception_cancels_unconsumed_launch_reservation(self):
+        class InterruptingReservedClient(FakeBbClient):
+            def __init__(self):
+                super().__init__()
+                self.reserved = False
+
+            def reserve_launch(self):
+                self.reserved = True
+                return None
+
+            def cancel_launch_reservation(self):
+                self.reserved = False
+
+            def send(self, *, thread_id: str, message: str, mode: str = "queue-if-active"):
+                raise KeyboardInterrupt("simulated pre-transport interruption")
+
+        tmp, store, session, materialized = self.open_fixture()
+        client = InterruptingReservedClient()
+        try:
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                try:
+                    continue_bb_thread(
+                        store,
+                        client=client,
+                        session=session,
+                        materialized=materialized,
+                        observed_at_utc=NOW,
+                    )
+                except BaseException:
+                    pass
+            self.assertFalse(
+                client.reserved,
+                "send BaseException leaked its unconsumed launch reservation",
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
     def test_replay_advances_monotonic_cursor_and_records_completion(self):
         tmp, store, session, materialized = self.open_fixture()
         try:
