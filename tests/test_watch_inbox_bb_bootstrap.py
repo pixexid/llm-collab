@@ -147,6 +147,59 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             "failures=gh581_scoped_docs_control_must_use_docs",
         )
 
+    def test_a_bootstrap_only_delivery_is_marked_read(self) -> None:
+        """GH-584: the executed first packet must not stay unread forever.
+
+        A bootstrap-only delivery publishes a session that already lists the
+        packet in `processed_messages`, so its `dispatch_session` yields no
+        actions and takes the early `continue`. While mark_messages_read lived
+        INSIDE the per-session loop that `continue` skipped it, so the packet
+        that was just executed stayed unread and every later poll revisited and
+        refused it. Asserting the packet is returned as consumed is not enough —
+        it was already returned before the fix — so this asserts what was
+        actually MARKED.
+        """
+        outcome = SimpleNamespace(
+            state=watch_inbox.BOOTSTRAP_STARTED,
+            detail="one thread started",
+            native_thread_id="thread-1",
+        )
+        project = {"id": "project-one", "bb": {"enabled": True}}
+        marked: list[list[str]] = []
+
+        with patch.object(watch_inbox, "bb_bootstrap_enabled", return_value=True), patch.object(
+            watch_inbox, "get_project", return_value=project
+        ), patch.object(
+            watch_inbox, "_bb_existing_session_ids", return_value=[]
+        ), patch.object(
+            watch_inbox, "_bb_binding_state", return_value=None
+        ), patch.object(
+            watch_inbox, "_bb_start_inputs", return_value={"repo_id": "app"}
+        ), patch.object(
+            watch_inbox, "execute_bb_bootstrap_plan", return_value=outcome
+        ), patch.object(
+            # No sessions to enumerate: the bootstrap-only shape, where the loop
+            # body never runs to completion for any session.
+            watch_inbox, "autobridge_session_ids", return_value=[]
+        ), patch.object(
+            watch_inbox, "mark_messages_read", side_effect=lambda _a, paths: marked.append(list(paths))
+        ), patch.object(watch_inbox, "emit"):
+            consumed = watch_inbox.dispatch_autobridge(
+                "glmpi",
+                False,
+                project_id="project-one",
+                repo_targets=["app"],
+                messages={"Chats/project/first.md": self.packet()},
+            )
+
+        self.assertEqual(["Chats/project/first.md"], consumed)
+        self.assertEqual(
+            [["Chats/project/first.md"]],
+            marked,
+            "the executed bootstrap packet was never marked read, so every later "
+            "poll would revisit and refuse it",
+        )
+
     def test_disabled_gate_does_not_read_project_or_start(self) -> None:
         with patch.object(watch_inbox, "config_get", return_value=False), patch.object(
             watch_inbox, "get_project", side_effect=AssertionError("project lookup")

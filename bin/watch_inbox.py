@@ -863,8 +863,14 @@ def dispatch_autobridge(
                     },
                     json_output,
                 )
-        if consumed_paths:
-            mark_messages_read(agent_id, sorted(set(consumed_paths)))
+    # Marking belongs OUTSIDE the per-session loop. Inside it, any session that
+    # took an early `continue` -- which is exactly what a bootstrap-only delivery
+    # does, because the session it just published already lists the packet in
+    # `processed_messages` and so yields no dispatch actions -- skipped the only
+    # mark_messages_read call. The executed first packet then stayed unread
+    # forever and every later poll revisited and refused it.
+    if consumed_paths:
+        mark_messages_read(agent_id, sorted(set(consumed_paths)))
 
     return consumed_paths
 
