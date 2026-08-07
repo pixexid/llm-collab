@@ -4,6 +4,19 @@
 
 Prevent overlapping edits by isolating worker implementation in per-task worktrees.
 
+## Choose the isolation owner
+
+For an orchestrator-managed BB lane, use BB's `--new-environment worktree`
+environment and follow [`bb-workers.md`](bb-workers.md) for provisioning,
+verification, and retirement. BB otherwise uses the shared checkout by default;
+combining that default with full permissions is a live write hazard. The managed
+worktree is auto-removed with its BB environment.
+
+Use the hand-managed lifecycle below for a Claude-side lane or another lane not
+owned by BB. Its post-merge worktree removal and metadata-pruning guidance
+remains required; BB-managed lanes use the corresponding lifecycle in
+`bb-workers.md`.
+
 ## Branch model
 
 - worker branch: task implementation only
