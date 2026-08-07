@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -79,6 +79,7 @@ V10_TABLES = V9_TABLES | frozenset({"conversation_binding_transition_audit"})
 V11_TABLES = V10_TABLES | frozenset({"legacy_autobridge_provenance_imports"})
 V12_TABLES = V11_TABLES
 V13_TABLES = V12_TABLES | frozenset({"managed_start_reservations"})
+V14_TABLES = V13_TABLES | frozenset({"bb_thread_observations"})
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -3125,6 +3126,81 @@ V13_SQL = (
 )
 V13_MIGRATION_CHECKSUM = "sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf"
 V13_SCHEMA_FINGERPRINT = "sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51"
+V14_SQL = (
+    """
+    CREATE TABLE bb_thread_observations (
+        workspace_id TEXT NOT NULL
+            CHECK (instr(workspace_id, char(0)) = 0 AND length(CAST(workspace_id AS BLOB)) BETWEEN 3 AND 131),
+        scope_kind TEXT NOT NULL CHECK (scope_kind = 'project'),
+        scope_identity TEXT NOT NULL
+            CHECK (instr(scope_identity, char(0)) = 0 AND length(CAST(scope_identity AS BLOB)) BETWEEN 1 AND 200),
+        conversation_id TEXT NOT NULL
+            CHECK (instr(conversation_id, char(0)) = 0 AND length(CAST(conversation_id AS BLOB)) BETWEEN 6 AND 128),
+        participant_id TEXT NOT NULL
+            CHECK (instr(participant_id, char(0)) = 0 AND length(CAST(participant_id AS BLOB)) BETWEEN 3 AND 128),
+        binding_id TEXT NOT NULL
+            CHECK (instr(binding_id, char(0)) = 0 AND length(CAST(binding_id AS BLOB)) BETWEEN 8 AND 128),
+        binding_generation INTEGER NOT NULL
+            CHECK (typeof(binding_generation) = 'integer' AND binding_generation > 0),
+        native_thread_id TEXT NOT NULL
+            CHECK (instr(native_thread_id, char(0)) = 0 AND length(CAST(native_thread_id AS BLOB)) BETWEEN 3 AND 256),
+        session_ref_id TEXT NOT NULL
+            CHECK (instr(session_ref_id, char(0)) = 0 AND length(CAST(session_ref_id AS BLOB)) BETWEEN 3 AND 136),
+        last_event_seq INTEGER NOT NULL
+            CHECK (typeof(last_event_seq) = 'integer' AND last_event_seq >= 0),
+        dispatch_state TEXT NOT NULL CHECK (
+            dispatch_state IN ('idle', 'queued', 'completed', 'failed', 'ambiguous')
+        ),
+        last_message_id TEXT
+            CHECK (last_message_id IS NULL OR (
+                instr(last_message_id, char(0)) = 0
+                AND length(CAST(last_message_id AS BLOB)) = 68
+                AND substr(last_message_id, 1, 4) = 'msg_'
+                AND substr(last_message_id, 5) NOT GLOB '*[^0-9a-f]*'
+            )),
+        last_delivery_id TEXT
+            CHECK (last_delivery_id IS NULL OR (
+                instr(last_delivery_id, char(0)) = 0
+                AND length(CAST(last_delivery_id AS BLOB)) = 73
+                AND substr(last_delivery_id, 1, 9) = 'delivery_'
+                AND substr(last_delivery_id, 10) NOT GLOB '*[^0-9a-f]*'
+            )),
+        last_attempt_id TEXT
+            CHECK (last_attempt_id IS NULL OR (
+                instr(last_attempt_id, char(0)) = 0
+                AND length(CAST(last_attempt_id AS BLOB)) = 72
+                AND substr(last_attempt_id, 1, 8) = 'attempt_'
+                AND substr(last_attempt_id, 9) NOT GLOB '*[^0-9a-f]*'
+            )),
+        native_request_id TEXT
+            CHECK (native_request_id IS NULL OR (
+                instr(native_request_id, char(0)) = 0
+                AND length(CAST(native_request_id AS BLOB)) BETWEEN 1 AND 256
+            )),
+        native_turn_id TEXT
+            CHECK (native_turn_id IS NULL OR (
+                instr(native_turn_id, char(0)) = 0
+                AND length(CAST(native_turn_id AS BLOB)) BETWEEN 1 AND 256
+            )),
+        updated_at_utc TEXT NOT NULL
+            CHECK (instr(updated_at_utc, char(0)) = 0 AND length(CAST(updated_at_utc AS BLOB)) BETWEEN 1 AND 128),
+        PRIMARY KEY (
+            workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+            binding_generation
+        ),
+        UNIQUE (workspace_id, native_thread_id, binding_generation),
+        FOREIGN KEY (workspace_id, binding_id)
+            REFERENCES conversation_bindings (workspace_id, binding_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            REFERENCES conversation_participants
+                (workspace_id, scope_kind, scope_identity, conversation_id, participant_id)
+            ON DELETE RESTRICT
+    ) STRICT
+    """,
+)
+V14_MIGRATION_CHECKSUM = "sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117"
+V14_SCHEMA_FINGERPRINT = "sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -3139,6 +3215,7 @@ MIGRATIONS = (
     (11, V11_SQL),
     (12, V12_SQL),
     (13, V13_SQL),
+    (14, V14_SQL),
 )
 
 
@@ -3349,6 +3426,31 @@ def _v13_schema_fingerprint_from_sql() -> str:
             *V11_SQL,
             *V12_SQL,
             *V13_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+def _v14_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
+            *V13_SQL,
+            *V14_SQL,
         ):
             connection.execute(statement)
         return _schema_fingerprint(connection)
@@ -3737,6 +3839,9 @@ class LedgerStore:
         if claimed == 12:
             cls._validate_released_v12(connection, paths)
             return
+        if claimed == 13:
+            cls._validate_released_v13(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -3817,8 +3922,12 @@ class LedgerStore:
                 raise MigrationError("released v13 migration checksum is incoherent")
             if _v13_schema_fingerprint_from_sql() != V13_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v13 schema fingerprint is incoherent")
+            if _migration_checksum(V14_SQL) != V14_MIGRATION_CHECKSUM:
+                raise MigrationError("released v14 migration checksum is incoherent")
+            if _v14_schema_fingerprint_from_sql() != V14_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v14 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != list(range(1, 14)):
+            if [row[0] for row in rows] != list(range(1, 15)):
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3833,15 +3942,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[10], V11_MIGRATION_CHECKSUM, 10, paths)
             cls._validate_migration_row(rows[11], V12_MIGRATION_CHECKSUM, 11, paths)
             cls._validate_migration_row(rows[12], V13_MIGRATION_CHECKSUM, 12, paths)
+            cls._validate_migration_row(rows[13], V14_MIGRATION_CHECKSUM, 13, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V13_TABLES:
+            if actual_tables != V14_TABLES:
                 raise MigrationError(
-                    "ledger v13 table set is incoherent: "
-                    f"missing={sorted(V13_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V13_TABLES)}"
+                    "ledger v14 table set is incoherent: "
+                    f"missing={sorted(V14_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V14_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V13_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v13 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V14_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v14 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -3951,6 +4061,55 @@ class LedgerStore:
                 )
             if _schema_fingerprint(connection) != V12_SCHEMA_FINGERPRINT:
                 raise MigrationError("ledger v12 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v13(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v13 long enough for the v14 migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 13:
+                raise MigrationError("ledger is not released schema v13")
+            released = tuple(
+                (statements, checksum, fingerprint, fingerprint_from_sql)
+                for statements, checksum, fingerprint, fingerprint_from_sql in (
+                    (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                    (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                    (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                    (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+                    (V5_SQL, V5_MIGRATION_CHECKSUM, V5_SCHEMA_FINGERPRINT, _v5_schema_fingerprint_from_sql),
+                    (V6_SQL, V6_MIGRATION_CHECKSUM, V6_SCHEMA_FINGERPRINT, _v6_schema_fingerprint_from_sql),
+                    (V7_SQL, V7_MIGRATION_CHECKSUM, V7_SCHEMA_FINGERPRINT, _v7_schema_fingerprint_from_sql),
+                    (V8_SQL, V8_MIGRATION_CHECKSUM, V8_SCHEMA_FINGERPRINT, _v8_schema_fingerprint_from_sql),
+                    (V9_SQL, V9_MIGRATION_CHECKSUM, V9_SCHEMA_FINGERPRINT, _v9_schema_fingerprint_from_sql),
+                    (V10_SQL, V10_MIGRATION_CHECKSUM, V10_SCHEMA_FINGERPRINT, _v10_schema_fingerprint_from_sql),
+                    (V11_SQL, V11_MIGRATION_CHECKSUM, V11_SCHEMA_FINGERPRINT, _v11_schema_fingerprint_from_sql),
+                    (V12_SQL, V12_MIGRATION_CHECKSUM, V12_SCHEMA_FINGERPRINT, _v12_schema_fingerprint_from_sql),
+                    (V13_SQL, V13_MIGRATION_CHECKSUM, V13_SCHEMA_FINGERPRINT, _v13_schema_fingerprint_from_sql),
+                )
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != list(range(1, 14)):
+                raise MigrationError("ledger migration metadata is incoherent")
+            for index, (_statements, checksum, _fingerprint, _fingerprint_from_sql) in enumerate(released):
+                cls._validate_migration_row(rows[index], checksum, index, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V13_TABLES:
+                raise MigrationError(
+                    "ledger v13 table set is incoherent: "
+                    f"missing={sorted(V13_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V13_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V13_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v13 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -4280,6 +4439,7 @@ class LedgerStore:
                     11: V11_MIGRATION_CHECKSUM,
                     12: V12_MIGRATION_CHECKSUM,
                     13: V13_MIGRATION_CHECKSUM,
+                    14: V14_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -4311,6 +4471,7 @@ class LedgerStore:
                     11: V11_SCHEMA_FINGERPRINT,
                     12: V12_SCHEMA_FINGERPRINT,
                     13: V13_SCHEMA_FINGERPRINT,
+                    14: V14_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -4414,6 +4575,322 @@ class LedgerStore:
     def schema_version(self) -> int:
         self._ensure_thread()
         return self._connection.execute("PRAGMA user_version").fetchone()[0]
+
+    @staticmethod
+    def _bb_observation_state(value: object) -> str:
+        if not isinstance(value, str) or value not in {
+            "idle",
+            "queued",
+            "completed",
+            "failed",
+            "ambiguous",
+        }:
+            raise ValueError("bb observation dispatch_state is invalid")
+        return value
+
+    def _bb_observation_identity(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        binding_id: str,
+        binding_generation: int,
+        native_thread_id: str,
+        session_ref_id: str,
+    ) -> tuple[str, str, str, str, str, str, int, str, str]:
+        self._ensure_thread()
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        if scope_kind != "project":
+            raise ValueError("bb observations are project scoped")
+        conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        binding_id = _conversation_binding_text(binding_id, "binding_id", 128)
+        if isinstance(binding_generation, bool) or not isinstance(binding_generation, int) or binding_generation <= 0:
+            raise ValueError("binding_generation must be a positive integer")
+        native_thread_id = _conversation_binding_text(native_thread_id, "native_thread_id", 256)
+        session_ref_id = _conversation_binding_text(session_ref_id, "session_ref_id", 136)
+        return (
+            workspace_id,
+            scope_kind,
+            scope_identity,
+            conversation_id,
+            participant_id,
+            binding_id,
+            binding_generation,
+            native_thread_id,
+            session_ref_id,
+        )
+
+    @staticmethod
+    def _bb_observation_row(row: tuple[object, ...]) -> dict[str, object]:
+        keys = (
+            "workspace_id",
+            "scope_kind",
+            "scope_identity",
+            "conversation_id",
+            "participant_id",
+            "binding_id",
+            "binding_generation",
+            "native_thread_id",
+            "session_ref_id",
+            "last_event_seq",
+            "dispatch_state",
+            "last_message_id",
+            "last_delivery_id",
+            "last_attempt_id",
+            "native_request_id",
+            "native_turn_id",
+            "updated_at_utc",
+        )
+        return dict(zip(keys, row))
+
+    def read_bb_thread_observation(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        binding_generation: int,
+    ) -> dict[str, object] | None:
+        """Read the cursor cache; binding resolution remains a separate authority."""
+        self._ensure_thread()
+        workspace_id, scope_kind, scope_identity = _canonical_scope(
+            workspace_id, scope_kind, scope_identity
+        )
+        self._validate_canonical_scope(workspace_id, scope_kind, scope_identity)
+        conversation_id = _conversation_binding_text(conversation_id, "conversation_id", 128)
+        participant_id = _conversation_binding_text(participant_id, "participant_id", 128)
+        if isinstance(binding_generation, bool) or not isinstance(binding_generation, int) or binding_generation <= 0:
+            raise ValueError("binding_generation must be a positive integer")
+        row = self._connection.execute(
+            "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
+            "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
+            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "native_request_id, native_turn_id, updated_at_utc "
+            "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            (
+                workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
+                binding_generation,
+            ),
+        ).fetchone()
+        return None if row is None else self._bb_observation_row(row)
+
+    def ensure_bb_thread_observation(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        binding_id: str,
+        binding_generation: int,
+        native_thread_id: str,
+        session_ref_id: str,
+        updated_at_utc: str,
+    ) -> dict[str, object]:
+        """Create or verify one exact binding-owned cursor row."""
+        if self._read_only:
+            raise PermissionError("query-only readers cannot create bb observations")
+        if self._connection.in_transaction:
+            raise RuntimeError("bb observation writes require no open transaction")
+        identity = self._bb_observation_identity(
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            conversation_id=conversation_id,
+            participant_id=participant_id,
+            binding_id=binding_id,
+            binding_generation=binding_generation,
+            native_thread_id=native_thread_id,
+            session_ref_id=session_ref_id,
+        )
+        updated_at_utc = _utc_timestamp(updated_at_utc, "updated_at_utc")
+        key = (*identity[:5], identity[6])
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
+                "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
+                "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                "native_request_id, native_turn_id, updated_at_utc "
+                "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
+                "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+                "AND binding_generation = ?",
+                key,
+            ).fetchone()
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO bb_thread_observations "
+                    "(workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
+                    "binding_id, binding_generation, native_thread_id, session_ref_id, "
+                    "last_event_seq, dispatch_state, updated_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'idle', ?)",
+                    (*identity, updated_at_utc),
+                )
+                row = self._connection.execute(
+                    "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
+                    "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
+                    "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                    "native_request_id, native_turn_id, updated_at_utc "
+                    "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
+                    "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+                    "AND binding_generation = ?",
+                    key,
+                ).fetchone()
+            else:
+                existing = self._bb_observation_row(row)
+                if tuple(existing[key] for key in (
+                    "binding_id", "binding_generation", "native_thread_id", "session_ref_id"
+                )) != identity[5:]:
+                    raise CanonicalIntegrityError(
+                        "bb observation is bound to a different native generation"
+                    )
+            self._connection.execute("COMMIT")
+            return self._bb_observation_row(row)
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    def _advance_bb_thread_observation_locked(
+        self,
+        *,
+        workspace_id: str,
+        scope_kind: str,
+        scope_identity: str,
+        conversation_id: str,
+        participant_id: str,
+        binding_id: str,
+        binding_generation: int,
+        native_thread_id: str,
+        session_ref_id: str,
+        event_seq: int,
+        dispatch_state: str,
+        updated_at_utc: str,
+        last_message_id: str | None = None,
+        last_delivery_id: str | None = None,
+        last_attempt_id: str | None = None,
+        native_request_id: str | None = None,
+        native_turn_id: str | None = None,
+    ) -> dict[str, object]:
+        """Advance inside the caller's transaction, never below the cursor."""
+        identity = self._bb_observation_identity(
+            workspace_id=workspace_id,
+            scope_kind=scope_kind,
+            scope_identity=scope_identity,
+            conversation_id=conversation_id,
+            participant_id=participant_id,
+            binding_id=binding_id,
+            binding_generation=binding_generation,
+            native_thread_id=native_thread_id,
+            session_ref_id=session_ref_id,
+        )
+        if isinstance(event_seq, bool) or not isinstance(event_seq, int) or event_seq < 0:
+            raise ValueError("event_seq must be a non-negative integer")
+        dispatch_state = self._bb_observation_state(dispatch_state)
+        updated_at_utc = _utc_timestamp(updated_at_utc, "updated_at_utc")
+        for value, name, validator in (
+            (last_message_id, "last_message_id", _canonical_message_id),
+            (last_delivery_id, "last_delivery_id", _canonical_delivery_id),
+            (last_attempt_id, "last_attempt_id", _canonical_attempt_id),
+        ):
+            if value is not None:
+                validator(value, name)
+        native_request_id = (
+            None if native_request_id is None else _conversation_binding_text(
+                native_request_id, "native_request_id", 256
+            )
+        )
+        native_turn_id = (
+            None if native_turn_id is None else _conversation_binding_text(
+                native_turn_id, "native_turn_id", 256
+            )
+        )
+        key = (*identity[:5], identity[6])
+        row = self._connection.execute(
+            "SELECT binding_id, binding_generation, native_thread_id, last_event_seq, "
+            "last_attempt_id, native_request_id, native_turn_id "
+            "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            key,
+        ).fetchone()
+        if row is None:
+            raise CanonicalIntegrityError("bb observation cursor is missing")
+        if tuple(row[:3]) != identity[5:8]:
+            raise CanonicalIntegrityError("bb observation cursor identity changed")
+        current_seq = int(row[3])
+        if event_seq < current_seq:
+            raise ValueError("bb observation cursor cannot move backwards")
+        new_delivery = last_attempt_id is not None and last_attempt_id != row[4]
+        next_request_id = native_request_id if native_request_id is not None else (
+            None if new_delivery else row[5]
+        )
+        next_turn_id = native_turn_id if native_turn_id is not None else (
+            None if new_delivery else row[6]
+        )
+        self._connection.execute(
+            "UPDATE bb_thread_observations SET last_event_seq = ?, dispatch_state = ?, "
+            "last_message_id = COALESCE(?, last_message_id), "
+            "last_delivery_id = COALESCE(?, last_delivery_id), "
+            "last_attempt_id = COALESCE(?, last_attempt_id), native_request_id = ?, "
+            "native_turn_id = ?, updated_at_utc = ? "
+            "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
+            "AND conversation_id = ? AND participant_id = ? AND binding_generation = ?",
+            (
+                event_seq,
+                dispatch_state,
+                last_message_id,
+                last_delivery_id,
+                last_attempt_id,
+                next_request_id,
+                next_turn_id,
+                updated_at_utc,
+                *key,
+            ),
+        )
+        row = self._connection.execute(
+            "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
+            "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
+            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "native_request_id, native_turn_id, updated_at_utc "
+            "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
+            "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
+            "AND binding_generation = ?",
+            key,
+        ).fetchone()
+        return self._bb_observation_row(row)
+
+    def advance_bb_thread_observation(
+        self,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        """Atomically advance a validated cursor and its dispatch state."""
+        self._ensure_thread()
+        if self._read_only:
+            raise PermissionError("query-only readers cannot advance bb observations")
+        if self._connection.in_transaction:
+            raise RuntimeError("bb observation writes require no open transaction")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = self._advance_bb_thread_observation_locked(**kwargs)  # type: ignore[arg-type]
+            self._connection.execute("COMMIT")
+            return result
+        except BaseException:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
 
     def integrity_check(self) -> str:
         self._ensure_thread()
@@ -5778,8 +6255,12 @@ class LedgerStore:
         evidence: Mapping[str, object],
         session_ref_id: str | None = None,
         created_at_utc: str,
+        _in_transaction: bool = False,
     ) -> tuple[str, bool]:
-        self.canonical_preflight(write=True)
+        if not _in_transaction:
+            self.canonical_preflight(write=True)
+        elif not self._connection.in_transaction:
+            raise RuntimeError("_in_transaction requires an open writer transaction")
         workspace_id, scope_kind, scope_identity = _canonical_scope(
             workspace_id, scope_kind, scope_identity
         )
@@ -5867,7 +6348,8 @@ class LedgerStore:
             raise CanonicalConflictError(
                 "canonical evidence hash conflicts with different bytes"
             )
-        self._connection.execute("BEGIN IMMEDIATE")
+        if not _in_transaction:
+            self._connection.execute("BEGIN IMMEDIATE")
         try:
             if body_row is None:
                 self._connection.execute(
@@ -5897,9 +6379,10 @@ class LedgerStore:
                     created_at_utc,
                 ),
             )
-            self._connection.execute("COMMIT")
+            if not _in_transaction:
+                self._connection.execute("COMMIT")
         except BaseException:
-            if self._connection.in_transaction:
+            if not _in_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise
         return receipt_id, True

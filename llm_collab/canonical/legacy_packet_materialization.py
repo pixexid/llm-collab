@@ -30,6 +30,18 @@ ROUTE_AMBIGUOUS = "route_ambiguous"
 MAX_PACKET_BYTES = 256 * 1024
 
 
+def legacy_packet_delivery_text(packet: bytes) -> str:
+    """Return the exact legacy packet text delivered to a native runtime."""
+    _frontmatter, body = _parse_legacy_frontmatter(packet)
+    try:
+        text = body.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("legacy packet body is not UTF-8") from exc
+    if not text:
+        raise ValueError("legacy packet body is empty")
+    return text
+
+
 @dataclass(frozen=True)
 class LegacyPacketMaterializationRefused(Exception):
     reason: str
@@ -206,6 +218,7 @@ def materialize_selected_legacy_packet(
         "delivery_id": delivery_id,
         "delivery_created": delivery_created,
         "materialized": True,
+        "registry_revision": registry_revision,
         "packet_sha256": packet_sha256,
         "packet_relpath": relpath,
         "canonical_write_started": canonical_write_started,

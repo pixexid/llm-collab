@@ -41,6 +41,7 @@ from _helpers import (
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
+    project_state_root,
     resolve_project_repo_path,
 )
 from _session_autobridge import (
@@ -49,6 +50,7 @@ from _session_autobridge import (
     _repo_package_root,
     _bb_binding_state,
     active_read_budget,
+    bb_bootstrap_enabled as _bb_bootstrap_enabled,
     dispatch_session,
     execute_bb_bootstrap_plan,
     read_regular_file_bounded,
@@ -80,6 +82,7 @@ from llm_collab.bb_bootstrap import (
     plan_bootstrap,
     resolve_bootstrap_repo_id,
 )
+from llm_collab.ledger import LedgerPaths, LedgerStore
 
 
 def parse_args():
@@ -401,13 +404,7 @@ def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscrib
 
 
 def bb_bootstrap_enabled() -> bool:
-    """Global kill switch; keep the adapter unreachable unless explicitly on."""
-    try:
-        return config_get("bb_bootstrap_enabled", False) is True
-    except SystemExit:
-        # The optional adapter is default-off even in an uninitialized checkout;
-        # ordinary autobridge dispatch keeps its existing path in that case.
-        return False
+    return _bb_bootstrap_enabled(config_get)
 
 
 def _bb_first_packets(
@@ -616,6 +613,55 @@ def _bootstrap_bb_before_dispatch(
     return consumed
 
 
+def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> None:
+    """Replay one bound bb thread without writing a foreground session event."""
+    if runtime_metadata(dict(session)).get("family") != "bb" or not bb_bootstrap_enabled():
+        return
+    project_id = session.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return
+    workspace_id = config_get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        return
+    try:
+        from llm_collab.bb_continuation import client_from_project, observe_bb_thread
+
+        paths = LedgerPaths.derive(project_state_root(), workspace_id)
+        with LedgerStore.open_writer(paths) as store:
+            result = observe_bb_thread(
+                store,
+                client=client_from_project(get_project(project_id)),
+                session=session,
+                observed_at_utc=utc_now_str(),
+            )
+    except Exception as error:
+        emit(
+            {
+                "ts": utc_now_str(),
+                "event": "bb_observation_error",
+                "detail": str(error),
+                "project_id": project_id,
+                "session_id": session.get("session_id"),
+            },
+            json_output,
+        )
+        return
+    emit(
+        {
+            "ts": utc_now_str(),
+            "event": "bb_observation",
+            "detail": result.detail,
+            "project_id": project_id,
+            "session_id": session.get("session_id"),
+            "state": result.state,
+            "last_event_seq": result.last_event_seq,
+            "processed_events": result.processed_events,
+            "receipt_id": result.receipt_id,
+        },
+        json_output,
+    )
+
+
 def dispatch_autobridge(
     agent_id: str,
     json_output: bool,
@@ -713,6 +759,7 @@ def dispatch_autobridge(
                 json_output,
             )
             continue
+        _observe_bb_session(session, json_output)
         try:
             try:
                 session_scope = (load_session(session_id) or {}).get("repo_targets")
@@ -990,45 +1037,41 @@ def main():
                 # next poll. This dedups ANNOUNCEMENTS only — duplicate DISPATCH
                 # is prevented by the processed-messages ledger (a delivered turn
                 # returns returncode 0 and is marked processed), not by this set,
-                # since dispatch_autobridge runs whenever `unread` is nonempty.
+                # since dispatch_autobridge runs on every poll.
                 seen_paths = seen_paths | new_msgs
-                if not args.session and not args.no_autobridge:
-                    refusal_stats: dict = {}
-                    before = dict(refusal_progress)
-                    consumed_paths = sorted(
-                        set(
-                            dispatch_autobridge(
-                                args.me,
-                                args.json_output,
-                                project_id=args.project,
-                                repo_targets=args.repo_target,
-                                refusal_progress=refusal_progress,
-                                refusal_stats=refusal_stats,
-                                messages=messages,
-                            )
-                        )
+            if not args.session and not args.no_autobridge:
+                refusal_stats: dict = {}
+                before = dict(refusal_progress)
+                dispatch_autobridge(
+                    args.me,
+                    args.json_output,
+                    project_id=args.project,
+                    repo_targets=args.repo_target,
+                    refusal_progress=refusal_progress,
+                    refusal_stats=refusal_stats,
+                    messages=messages,
+                )
+                if refusal_progress != before:
+                    save_refusal_progress(args.me, refusal_progress)
+                suppressed = {
+                    reason: count
+                    for reason, count in refusal_stats.items()
+                    if reason != "_new"
+                }
+                if suppressed:
+                    # GH-539: one aggregate line per poll instead of one line
+                    # per already-decided message per poll.
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "autobridge_refusal_summary",
+                            "detail": f"{sum(suppressed.values())} already-refused message(s) skipped",
+                            "agent": args.me,
+                            "suppressed_by_reason": suppressed,
+                            "new_refusals": refusal_stats.get("_new", 0),
+                        },
+                        args.json_output,
                     )
-                    if refusal_progress != before:
-                        save_refusal_progress(args.me, refusal_progress)
-                    suppressed = {
-                        reason: count
-                        for reason, count in refusal_stats.items()
-                        if reason != "_new"
-                    }
-                    if suppressed:
-                        # GH-539: one aggregate line per poll instead of one line
-                        # per already-decided message per poll.
-                        emit(
-                            {
-                                "ts": utc_now_str(),
-                                "event": "autobridge_refusal_summary",
-                                "detail": f"{sum(suppressed.values())} already-refused message(s) skipped",
-                                "agent": args.me,
-                                "suppressed_by_reason": suppressed,
-                                "new_refusals": refusal_stats.get("_new", 0),
-                            },
-                            args.json_output,
-                        )
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)

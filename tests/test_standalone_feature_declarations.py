@@ -36,6 +36,9 @@ SANCTIONED_CONSUMERS = {
     # Codex delivery fixtures (#94) declare canonical_writes to exercise the
     # gated materialization path exactly like test_collabd_canonical does.
     "tests/test_codex_delivery.py",
+    # bb continuation fixtures (#566) use the same explicit canonical-write
+    # gate to prove terminal receipt persistence.
+    "tests/test_bb_continuation.py",
 }
 THREAD_EVENT_RUNNER_RFC = ROOT / "docs" / "workflows" / "thread-event-runner-rfc.md"
 
@@ -164,6 +167,7 @@ class StandaloneFeatureDeclarationTests(unittest.TestCase):
                 "tests/test_collabd_canonical.py",
                 "tests/test_collabd_gate.py",
                 "tests/test_codex_delivery.py",
+                "tests/test_bb_continuation.py",
             },
         )
         self.assertIn(
