@@ -4,6 +4,11 @@
 
 No lane is PR-ready until local validation and required metadata are complete.
 
+BB workers are not llm-collab participants. The collab/doorbell and AX references
+below are dormant for BB work; they apply only when the orchestrator separately
+routes to a registered participant and `deliver.py` selects that fallback. Use
+[`bb-workers.md`](bb-workers.md) for BB operations.
+
 ## Hard rules
 
 - never push directly to `main`; only the release-gate role merges to `main`

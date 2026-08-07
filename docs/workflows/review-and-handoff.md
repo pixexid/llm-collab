@@ -1,5 +1,10 @@
 # Review And Handoff
 
+BB workers are not llm-collab participants. The collab/doorbell and AX references
+below are dormant for BB work; they apply only when the orchestrator separately
+routes to a registered participant and `deliver.py` selects that fallback. Use
+[`bb-workers.md`](bb-workers.md) for BB operations.
+
 ## Worker completion contract
 
 Handoff replies should include:
@@ -268,6 +273,13 @@ infrastructure.
 If GitHub Codex comments on the PR, every finding is adjudicated in writing —
 which is not the same as accepted. Two paths, and which one applies depends on
 whether the code changes:
+
+Adjudicate where the gate reads the finding. For a GitHub review thread, the
+written outcome belongs on that exact thread and in the
+[reviewed artifact set](commit-push-prs.md#reviewed-artifact-set); a worker's BB
+output or mailbox packet saying `fixed` informs the orchestrator but is not an
+adjudication. Check every thread, resolved or not, because resolving a thread
+without writing its outcome must not hide it from the gate.
 
 - **Fix it.** Repair the pointed issue and rerun required local exact-head
   verification and checks. Do not request a second bot or model review.
