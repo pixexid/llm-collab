@@ -255,7 +255,9 @@ class SeenPathsCommittedBeforeDispatchTest(unittest.TestCase):
         src = (REPO_ROOT / "bin" / "watch_inbox.py").read_text()
         commit = src.index("seen_paths = seen_paths | new_msgs")
         # The dispatch happens inside this guard block in the poll loop.
-        dispatch_block = src.index("if not args.session and not args.no_autobridge:")
+        dispatch_block = src.index(
+            "if (args.autobridge or not args.session) and not args.no_autobridge:"
+        )
         self.assertLess(
             commit, dispatch_block,
             "seen_paths must be committed BEFORE the dispatch block (GH-94)",
