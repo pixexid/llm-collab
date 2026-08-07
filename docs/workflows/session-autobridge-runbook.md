@@ -1,10 +1,10 @@
 # Session Autobridge Runbook
 
-> **Current fleet status: dormant.** The current workers run through BB, whose
-> threads are not `llm-collab` participants, session bindings, watcher
-> recipients, or receipt-bearing endpoints. No AX-reachable worker surface is
-> currently available, so neither this autobridge wake lane nor its AX fallback
-> is a live BB worker path. Use
+> **Current BB routing status: dormant.** The current worker fleet routes through
+> BB. Session autobridge dispatch and its AX fallback are not BB transports and
+> are not used to reach BB workers, whose threads are not `llm-collab`
+> participants, session bindings, watcher recipients, or receipt-bearing
+> endpoints. Use
 > [`bb-workers.md`](bb-workers.md) for current BB operations; none of the AX lane
 > applies to BB. The durable-packet and receipt reasoning below still applies
 > when the orchestrator itself authors a collab packet after verifying a BB
@@ -16,13 +16,11 @@
 > reconcile what it names, restart cleanly, prove one fresh probe receipt, then
 > consider the stranded packet—remains the proven repair path; the diagnostic
 > mechanics below support it. Contract v12's fallback predicate is unchanged
-> and remains the authority for whether
-> `deliver.py` offers a doorbell. Whether an offered doorbell can land is a live
-> runtime property, never a standing process or window-count claim. In
-> particular, `pgrep -x Codex` is not a valid reachability check: it can return
-> no match while the surface is live inside `ChatGPT.app`. Follow the live
-> capability guidance in [`bb-workers.md`](bb-workers.md) before acting on an
-> offered doorbell.
+> and remains the authority for whether `deliver.py` offers a doorbell. When it
+> does, run the exact command it prints or follow the live AX capability check in
+> [`bb-workers.md`](bb-workers.md) and read its current `windows` count. Never
+> infer reachability from `pgrep -x Codex`: it can return no match while the
+> surface is live inside `ChatGPT.app`.
 
 Session autobridge lets a worker bind the current runtime thread to a
 project/chat so future messages can be routed to that parked worker session.
