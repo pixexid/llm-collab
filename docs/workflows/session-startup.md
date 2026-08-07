@@ -4,6 +4,19 @@
 
 Start from a known-good environment before claiming or editing work.
 
+## Choose the worker surface first
+
+BB is the normal worker fleet. For a provider-backed worker assignment, follow
+[`bb-workers.md`](bb-workers.md) before starting any collaboration bootstrap. It
+owns worker isolation, spawn, communication, inspection, and completion proof;
+do not copy its commands here.
+
+A BB worker is not an llm-collab participant: it has no `agents.json` identity,
+exact-session binding, durable-mailbox authorship, or delivery receipt. The
+orchestrator remains the integration point and communicates with that worker
+through BB. Continue below only for the orchestrator itself or a worker that is
+explicitly being enrolled as a first-class durable-mailbox participant.
+
 ## Bootstrap first
 
 ```bash
@@ -19,8 +32,8 @@ invokes the repository-local bootstrap. Use `<runtime_root>/bin/llm-collab
 current_runtime.py --check` to report the verified heads without starting a
 session or watcher.
 
-For an interactive collab worker, startup is not complete until the exact
-native session watcher and its target/sibling probes pass. Follow
+For an explicitly enrolled interactive collab worker, startup is not complete
+until the exact native session watcher and its target/sibling probes pass. Follow
 [`collab-thread-quickstart.md` → Bootstrap](collab-thread-quickstart.md#1-bootstrap).
 Do not treat the agent-wide watcher reported by `session_bootstrap.py` as that
 proof.
@@ -143,124 +156,23 @@ For Codex manual watcher checks, `watch_inbox.py` should behave the same as the 
 - `LLM_COLLAB_CODEX_UI_REFRESH_METHOD=cdp`
 - `LLM_COLLAB_CODEX_CDP_PORT=9223`
 
-## Collab-loop monitor ownership
+## First-class mailbox waits and wakes
 
-Claude owns ongoing collab-loop monitoring for PR/review status, bot-review
-comments, inbox replies, and doorbell handoffs. Codex should usually check live
-state once while actively gating/reviewing, then hand any continuing watch to
-Claude through the durable mailbox.
+For a registered llm-collab participant, `Chats/` remains the transport of
+record. Follow [`session-autobridge-runbook.md`](session-autobridge-runbook.md)
+for binding, watcher, dispatch, receipt, and recovery mechanics instead of
+reproducing them in this entry point.
 
-Use a Codex heartbeat only for a genuinely Codex-side wait or when Claude cannot
-own the watch. Before creating one, clear any stale monitor for the same target.
-Keep one monitor per purpose, and delete or update it as soon as the purpose is
-served.
+Contract v12's fallback predicate is unchanged:
+`wake_fallback_allowed = not autobridge_ready and not
+dispatch_scope_refused`. AX is a conditional Codex-only fallback that
+`deliver.py` may offer under that predicate; it is not a routine worker lane or
+a BB transport. Run only the exact command `deliver.py` prints. Whether the
+offered doorbell can land is a runtime property that must be checked live for
+that attempt—never infer it from process state or record a window count as a
+standing capability.
 
-## Claude Desktop Rule
-
-Claude has one wake path in every registration and project shape: the durable
-`Chats/` packet, picked up by the Claude app's own background inbox watcher.
-Neither `activation.ax_app` nor `claude_desktop_bridge` changes that — `deliver.py`
-excludes Claude from the AX doorbell selector, and the Computer Use fallback that
-`claude_desktop_bridge` used to select is removed.
-
-Important distinction:
-
-- Claude desktop app visible sidebar threads are backed by app-managed Electron state under:
-  - `~/Library/Application Support/Claude/IndexedDB/...`
-  - `~/Library/Application Support/Claude/Session Storage/...`
-- Claude CLI/project sessions are backed by:
-  - `~/.claude/projects/<project-slug>/<sessionId>.jsonl`
-  - `~/.claude/projects/<project-slug>/sessions-index.json`
-
-These stores are not interchangeable. A CLI-created project session may persist on disk without appearing in the desktop app sidebar.
-
-Operational rule:
-
-- do not claim that `llm-collab`, PM2, or Claude CLI can safely create a brand
-  new Claude desktop app thread
-- do not synthesize desktop-visible Claude threads by writing local app cache/index files
-- use `Chats/` messages as the transport of record (the durable mailbox)
-- routine exact-session dispatch is the wake for every watcher-backed worker,
-  Codex included. Only when no matching dispatchable session autobridge exists
-  and `deliver.py` reports `ax_doorbell_required: true` does Codex fall back to
-  the **bidirectional AX doorbell** (see
-  `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
-  dispatchable runtime binding
-- every worker other than a Codex on that fallback path is woken by the durable
-  packet and its own watcher alone, never by AX. Preserve the packet and let the
-  watcher own pickup. See
-  `session-autobridge-runbook.md` for the full rule
-- attended Computer Use is fallback/recovery when AX cannot safely target or
-  verify the native composer; it is never the universal first path, and it is
-  never a path to Claude — the project-configured non-CLI Claude Desktop bridge
-  is removed, and `deliver.py` no longer reports `desktop_bridge_required`
-
-Current Phase 1 routing gives a matching dispatchable session autobridge
-precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
-suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
-uses the separately documented session-autobridge path and its retry limitations.
-Do not describe AX as primary for that packet, and **never deactivate a working
-binding to obtain an AX wake** — that removes the routine dispatch v12 requires
-in order to reach a fallback. If `deliver.py` does not print an AX command, the
-answer is to repair or diagnose dispatch, not to disable it.
-
-Safest task-grade workflow for desktop-app agents:
-
-1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
-   - `autobridge_ready: true` takes precedence and means no AX doorbell was
-     requested for this packet
-   - for Codex, `ax_doorbell_required` means the sender runs exactly the command
-     printed by `deliver.py`; it is
-     not a manual operator relay request
-   - `watcher_pickup_ready` means the durable packet is ready and the
-     non-Codex recipient's watcher owns pickup
-   - `desktop_bridge_required` is always false: the Claude Computer Use fallback
-     it selected is removed, and Claude is woken by its own background watcher
-   - `activation_unavailable` means the durable packet exists but neither a
-     dispatchable runtime nor an explicit wake transport is configured
-2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
-   command. Do not prove the composer empty first: for Codex, composer content
-   and `AXValue` readability/opacity are never a hold, and a busy recipient is
-   not a hold either — the ring clears and overrides whatever is in the
-   composer and sends, and queues behind the recipient's active turn. Only a
-   genuine targeting/operation failure (no or ambiguous native composer target,
-   a non-Codex or unrecognized profile, an AX-trust failure, a
-   clear/type/submit failure, or post-submit identity loss) means hold and
-   recovery. `VERIFIED` exit 0 confirms
-   delivery. `QUEUED (UNCONFIRMED)` exit 0 does
-   not prove the pointer entered the intended thread: preserve the mailbox
-   packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
-   claim exact-thread delivery without a later `axsend confirm` or explicit
-   recipient evidence that the pointer appeared in the native thread. Inbox
-   consumption proves durable packet delivery only, not AX-thread delivery. A
-   running/processing state alone does not block the ring after composer-safety
-   proof
-3. the sender sends exactly one short sender-tagged wake prompt that points the
-   recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
-   task context, acceptance criteria, or multi-paragraph briefs into the app; the
-   durable `Chats/` packet is the source of truth. The prompt must be one line,
-   under roughly 240 characters, and never contain newline-split bridge details.
-   The recipient drains its full unread inbox after the ring.
-4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
-   sending but preserve the packet. In an attended Codex turn, use Computer Use
-   plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
-   competing field, select the correct window, and clear probes. Resume routine
-   AX only after verifying the native composer **target** identity is resolved
-   and unambiguous — composer content/`AXValue` readability is never the gate.
-   An opaque or unresolvable target remains on attended recovery; use one
-   idle-gated Computer Use send as the bounded fallback. Never turn one
-   targeting incident into a standing AX-disabled rule.
-
-A Claude packet that is not picked up is a watcher or binding defect: preserve
-the durable packet, record the observed blocker, and report it for repair or
-operator attention. Codex does not wake Claude through Computer Use, AX, or an
-app restart — coarse Claude bridge health checks and recording an
-accessibility/capture blocker are diagnosis, not a wake. Keep or create the heartbeat and record
-`observed_state`, `expected_outcome`, `why_not_done`, and
-`next_unlock_action`. Do not ask the operator to relay, paste, click, or
-manually wake Claude, and do not reach for Computer Use to do it either: repair
-the binding or the watcher, or keep monitoring and report the blocker.
-
-For programmatic runtime targeting that does not require visible desktop state,
-use a separate non-desktop adapter. For Claude desktop work, do not use
-`claude -p`, `claude --resume`, or `~/.claude/projects` as the bridge.
+`autobridge_ready: true` proves send-time routability, not delivery. Require the
+receipt or recipient evidence named by the runbook. When no AX command is
+printed, diagnose the binding, watcher, or dispatch path; do not invent a ring
+or disable a working binding to force the fallback.

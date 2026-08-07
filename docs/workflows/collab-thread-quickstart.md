@@ -8,11 +8,23 @@ really happened.
 
 `session-startup.md` covers the *environment*. This covers the *collaboration*.
 
-## 0. Cold start — the operator asks two workers to collaborate
+## Choose the worker surface
 
-Collaboration does not start by itself. A worker asked to "work with zcode on the
-checkout refactor" is, until these steps run, working alone: it has no chat to write
-to and no way for anyone to reach it.
+BB is the normal path for provider-backed worker assignments. Use
+[`bb-workers.md`](bb-workers.md) as the single authority for worker spawn,
+isolation, communication, inspection, and completion proof; do not reproduce
+its commands here. A BB worker is not registered in `agents.json`, bound to an
+llm-collab session, receipt-bearing, or a canonical-bus participant. Its
+orchestrator remains the integration point and communicates with it through BB.
+
+Stop here and use that workflow for an ordinary worker assignment. Continue
+below only when the work explicitly requires a first-class durable-mailbox
+participant with its own project/chat/agent coordinates.
+
+## 0. Cold start — first-class mailbox participants collaborate
+
+First-class mailbox collaboration does not start by itself. Until these steps
+run, the workers have no shared chat or exact-session route.
 
 The sequence below was run end to end against a scratch workspace; the commands are
 copied from that run, not composed from the help text.
@@ -63,9 +75,12 @@ misbound.
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
 watcher-backed worker — claude, gemini, and Codex alike — arms its own inbox
-watcher, and routine exact-session dispatch wakes it. AX is a fallback for Codex
-only, taken only when `deliver.py` prints it. **Do your own pickup step** (the helper prints
-yours first); a packet you never see is a packet you never answer.
+watcher, and routine exact-session dispatch wakes it. AX is not a routine lane;
+it is a conditional Codex-only fallback, taken only when `deliver.py` prints the
+exact command. Whether that command can land is a runtime property checked for
+that attempt, never a standing process or window-count fact. **Do your own
+pickup step** (the helper prints yours first); a packet you never see is a
+packet you never answer.
 
 The manual steps below are exactly what that helper automates; run them by hand
 only when you need to diverge from the defaults.
@@ -201,9 +216,10 @@ exact active binding. A session switch, fork, reload, replacement, or app
 restart invalidates the old session-owned monitor; start a fresh session rather
 than reusing it.
 
-Codex is watcher-backed like every other worker: routine exact-session dispatch
-is its wake. The attended AX wake described in `session-autobridge-runbook.md` is
-a Codex-only fallback, and only when `deliver.py` prints the command.
+Codex is watcher-backed like every other first-class mailbox participant:
+routine exact-session dispatch is its wake. The AX path described in
+`session-autobridge-runbook.md` is a conditional Codex-only fallback, never a
+routine lane, and applies only when `deliver.py` prints the command.
 
 ## 2. Know your three coordinates
 
@@ -259,8 +275,10 @@ happens, but the fix is to declare the scope.
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
-block. Run only its exact printed command, and only when it is
-printed. `watcher_pickup_ready` marks the unbound non-Codex watcher fallback
+block under contract v12's unchanged fallback predicate. Run only its exact
+printed command, and only when it is printed. Landing capability is a live
+runtime property, not a standing window-count claim. `watcher_pickup_ready`
+marks the unbound non-Codex watcher fallback
 only — a bound recipient reports `autobridge_ready: true` with
 `watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
 exit 0 means the durable packet is written and the reply is complete.

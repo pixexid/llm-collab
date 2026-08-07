@@ -62,12 +62,13 @@ bb environment status <environment-id> --merge-base-branch <base-branch> --json
 ```
 
 Before activating the writer, verify the exact path and branch from `show` and
-require every one of these `status` predicates:
+require a healthy response (`outcome == "available"`) plus every one of these
+`status` predicates:
 
 ```text
-workingTree.hasUncommittedChanges == false
-checkout.headSha == <requested-base-sha>
-mergeBase.baseRef == <requested-base-sha>
+workspace.workingTree.hasUncommittedChanges == false
+workspace.checkout.headSha == <requested-base-sha>
+workspace.mergeBase.baseRef == <requested-base-sha>
 ```
 
 Reject a dirty tree and a moved HEAD separately: cleanliness says nothing about
