@@ -71,6 +71,14 @@ MAX_DISPATCH_INBOX_BYTES = 16 * 1024 * 1024
 MAX_DISPATCH_PACKET_BYTES = 256 * 1024
 
 
+def bb_bootstrap_enabled(config_reader=None) -> bool:
+    """Global kill switch; keep the adapter unreachable unless explicitly on."""
+    try:
+        return (config_reader or config_get)("bb_bootstrap_enabled", False) is True
+    except SystemExit:
+        return False
+
+
 def parse_iso8601(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -3518,6 +3526,13 @@ def execute_runtime_trigger(
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
     livecraft_runtime_command = livecraft_runtime_wake_available(session)
     if runtime_family == "bb":
+        if not bb_bootstrap_enabled():
+            return {
+                "status": "bb_adapter_disabled",
+                "runtime_family": "bb",
+                "returncode": 1,
+                "delivery_accepted": False,
+            }
         if not isinstance(canonical_materialization, dict) or not canonical_materialization.get(
             "materialized"
         ):
@@ -3543,7 +3558,6 @@ def execute_runtime_trigger(
                         get_project(str(session["project_id"]))
                     ),
                     session=session,
-                    message=message,
                     materialized=canonical_materialization,
                     observed_at_utc=now_utc().isoformat(timespec="seconds"),
                 )

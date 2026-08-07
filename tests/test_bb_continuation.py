@@ -33,6 +33,20 @@ NATIVE_THREAD = "bb_thread_test"
 RUNTIME_INSTANCE = "runtime_bb_test"
 REVISION = "sha256:" + "a" * 64
 NOW = "2026-08-07T06:00:00+00:00"
+PACKET_BODY = "packet body"
+PACKET = (
+    b"---\n"
+    b"project_id: llm-collab\n"
+    b"chat_id: CHAT-BB-566\n"
+    b"from: codex\n"
+    b"to: glmpi\n"
+    b"title: bb continuation\n"
+    b"priority: normal\n"
+    b"sent_utc: 2026-08-07T06:00:00+00:00\n"
+    b"repo_targets: [app]\n"
+    b"---\n"
+    b"packet body\n"
+)
 
 
 class FakeBbClient:
@@ -139,7 +153,7 @@ def make_delivery(store: LedgerStore) -> dict[str, object]:
         scope_identity=PROJECT,
         sender_agent_id="agent_codex",
         dedupe_key="bb-test-message",
-        body=b"packet body",
+        body=PACKET,
         recipients=("agent_glmpi",),
         registry_revision=REVISION,
         created_at_utc=NOW,
@@ -186,7 +200,7 @@ def make_delivery(store: LedgerStore) -> dict[str, object]:
     }
 
 
-def requested(seq: int, *, body: str = "packet body") -> BbEvent:
+def requested(seq: int, *, body: str = PACKET_BODY) -> BbEvent:
     return BbEvent(
         seq,
         f"event-request-{seq}",
@@ -211,13 +225,11 @@ class BbContinuationTest(unittest.TestCase):
         tmp, store, session, materialized = self.open_fixture()
         try:
             client = FakeBbClient()
-            message = {"body": "hello bb"}
             with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
                 first = continue_bb_thread(
                     store,
                     client=client,
                     session=session,
-                    message=message,
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -225,14 +237,13 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=client,
                     session=session,
-                    message=message,
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
             self.assertEqual(BB_CONTINUATION_QUEUED, first.state)
             self.assertEqual(BB_CONTINUATION_DUPLICATE, second.state)
             self.assertEqual(first.receipt_id, second.receipt_id)
-            self.assertEqual([(NATIVE_THREAD, "hello bb", "queue-if-active")], client.sent)
+            self.assertEqual([(NATIVE_THREAD, PACKET_BODY, "queue-if-active")], client.sent)
             row = store.read_bb_thread_observation(
                 workspace_id=WORKSPACE,
                 scope_kind="project",
@@ -258,7 +269,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=client,
                     session=session,
-                    message={"body": "hello once"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -266,7 +276,6 @@ class BbContinuationTest(unittest.TestCase):
                 store,
                 client=client,
                 session=session,
-                message={"body": "hello once"},
                 materialized=materialized,
                 observed_at_utc=NOW,
             )
@@ -365,7 +374,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=FakeBbClient(),
                     session=session,
-                    message={"body": "hello once"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -399,7 +407,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=FakeBbClient(),
                     session=session,
-                    message={"body": "hello once"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -469,7 +476,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=client,
                     session=session,
-                    message={"body": "refused once"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -477,7 +483,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=client,
                     session=session,
-                    message={"body": "refused once"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -509,7 +514,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=client,
                     session={**session, "binding_generation": 2},
-                    message={"body": "must not send"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -540,7 +544,6 @@ class BbContinuationTest(unittest.TestCase):
                     store,
                     client=FakeBbClient(on_send=capture_marker),
                     session=session,
-                    message={"body": "packet body"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -605,11 +608,11 @@ class BbContinuationTest(unittest.TestCase):
                 }
             )
             with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                send_client = FakeBbClient()
                 continue_bb_thread(
                     store,
-                    client=FakeBbClient(),
+                    client=send_client,
                     session=session,
-                    message={"body": "packet body"},
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
@@ -644,6 +647,10 @@ class BbContinuationTest(unittest.TestCase):
             self.assertEqual("queued", first.state)
             self.assertEqual("queued", second.state)
             self.assertEqual(
+                [(NATIVE_THREAD, PACKET_BODY, "queue-if-active")],
+                send_client.sent,
+            )
+            self.assertEqual(
                 {"accepted"},
                 {receipt["state"] for receipt in delivery_after_existing_turn["receipts"]},
             )
@@ -663,7 +670,7 @@ class BbContinuationTest(unittest.TestCase):
             store.close()
             tmp.cleanup()
 
-    def test_successor_binding_generation_starts_with_a_fresh_cursor(self):
+    def test_successor_generation_can_retain_native_thread_with_fresh_cursor(self):
         tmp = TemporaryDirectory(dir="/tmp")
         store = LedgerStore.open_writer(LedgerPaths.derive(tmp.name, WORKSPACE))
         seed_binding(store)
@@ -697,20 +704,29 @@ class BbContinuationTest(unittest.TestCase):
             store._connection.execute(
                 "UPDATE conversation_bindings SET generation = 2, native_session_id = ? "
                 "WHERE workspace_id = ? AND binding_id = ?",
-                ("bb_thread_successor", WORKSPACE, BINDING),
+                (NATIVE_THREAD, WORKSPACE, BINDING),
             )
-            successor = store.ensure_bb_thread_observation(
-                workspace_id=WORKSPACE,
-                scope_kind="project",
-                scope_identity=PROJECT,
-                conversation_id=CHAT,
-                participant_id=PARTICIPANT,
-                binding_id=BINDING,
-                binding_generation=2,
-                native_thread_id="bb_thread_successor",
-                session_ref_id=SESSION_REF,
-                updated_at_utc=NOW,
-            )
+            try:
+                successor = store.ensure_bb_thread_observation(
+                    workspace_id=WORKSPACE,
+                    scope_kind="project",
+                    scope_identity=PROJECT,
+                    conversation_id=CHAT,
+                    participant_id=PARTICIPANT,
+                    binding_id=BINDING,
+                    binding_generation=2,
+                    native_thread_id=NATIVE_THREAD,
+                    session_ref_id=SESSION_REF,
+                    updated_at_utc=NOW,
+                )
+                recorded = (
+                    "created",
+                    successor["last_event_seq"],
+                    successor["dispatch_state"],
+                    successor["native_thread_id"],
+                )
+            except Exception as error:
+                recorded = ("refused", type(error).__name__, str(error))
             predecessor = store.read_bb_thread_observation(
                 workspace_id=WORKSPACE,
                 scope_kind="project",
@@ -721,13 +737,8 @@ class BbContinuationTest(unittest.TestCase):
             )
             self.assertEqual(0, first["last_event_seq"])
             self.assertEqual(
-                (0, "idle", "bb_thread_successor", 42),
-                (
-                    successor["last_event_seq"],
-                    successor["dispatch_state"],
-                    successor["native_thread_id"],
-                    predecessor["last_event_seq"],
-                ),
+                ("created", 0, "idle", NATIVE_THREAD, 42),
+                (*recorded, predecessor["last_event_seq"]),
             )
         finally:
             store.close()

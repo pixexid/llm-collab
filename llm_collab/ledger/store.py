@@ -3188,7 +3188,7 @@ V14_SQL = (
             workspace_id, scope_kind, scope_identity, conversation_id, participant_id,
             binding_generation
         ),
-        UNIQUE (workspace_id, native_thread_id),
+        UNIQUE (workspace_id, native_thread_id, binding_generation),
         FOREIGN KEY (workspace_id, binding_id)
             REFERENCES conversation_bindings (workspace_id, binding_id)
             ON DELETE RESTRICT,
@@ -3199,8 +3199,8 @@ V14_SQL = (
     ) STRICT
     """,
 )
-V14_MIGRATION_CHECKSUM = "sha256:78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77"
-V14_SCHEMA_FINGERPRINT = "sha256:5d80efe436abcd1993b107e00065871882fd5be251abe218deaade69fc696a44"
+V14_MIGRATION_CHECKSUM = "sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117"
+V14_SCHEMA_FINGERPRINT = "sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee"
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),

@@ -365,6 +365,131 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         get_project.assert_called_once_with("project-one")
         self.assertEqual(session, observe.call_args.kwargs["session"])
 
+    def test_each_empty_watcher_poll_still_observes_bb_sessions(self) -> None:
+        observed_projects: list[str] = []
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text('{"unread": []}')
+            for project_id in ("amiga", "nuvyr"):
+                session = {
+                    "session_id": f"bb-session-{project_id}",
+                    "project_id": project_id,
+                    "runtime": {"family": "bb", "session_id": f"thread-{project_id}"},
+                }
+                argv = [
+                    "watch_inbox.py",
+                    "--me",
+                    "glmpi",
+                    "--project",
+                    project_id,
+                    "--poll-seconds",
+                    "1",
+                    "--max-polls",
+                    "1",
+                ]
+                with patch.object(sys, "argv", argv), patch.object(
+                    watch_inbox, "require_current_runtime"
+                ), patch.object(
+                    watch_inbox, "agent_ids", return_value=["glmpi"]
+                ), patch.object(
+                    watch_inbox, "agent_inbox_path", return_value=inbox_path
+                ), patch.object(
+                    watch_inbox, "load_agent_inbox", return_value={"unread": []}
+                ), patch.object(
+                    watch_inbox, "get_unread_messages", return_value=[]
+                ), patch.object(
+                    watch_inbox, "load_refusal_progress", return_value={}
+                ), patch.object(
+                    watch_inbox, "bb_bootstrap_enabled", return_value=True
+                ), patch.object(
+                    watch_inbox,
+                    "autobridge_session_ids",
+                    return_value=[session["session_id"]],
+                ), patch.object(
+                    watch_inbox, "load_session", return_value=session
+                ), patch.object(
+                    watch_inbox, "session_has_exact_canonical_binding", return_value=True
+                ), patch.object(
+                    watch_inbox, "dispatch_session", return_value={"actions": []}
+                ), patch.object(
+                    watch_inbox,
+                    "_observe_bb_session",
+                    side_effect=lambda item, _json: observed_projects.append(
+                        str(item["project_id"])
+                    ),
+                ), patch.object(watch_inbox, "emit"):
+                    watch_inbox.main()
+
+        self.assertEqual(["amiga", "nuvyr"], observed_projects)
+
+    def test_global_bb_gate_blocks_existing_session_continuation(self) -> None:
+        native_calls: list[str] = []
+
+        class Refused(RuntimeError):
+            pass
+
+        continuation_module = SimpleNamespace(
+            BbContinuationRefused=Refused,
+            client_from_project=lambda _project: object(),
+            continue_bb_thread=lambda *_args, **_kwargs: (
+                native_calls.append("thread tell")
+                or SimpleNamespace(
+                    state="queued",
+                    detail="queued",
+                    message_id="message",
+                    delivery_id="delivery",
+                    attempt_id="attempt",
+                    receipt_id="receipt",
+                    native_called=True,
+                )
+            ),
+        )
+        ledger_module = SimpleNamespace(
+            LedgerPaths=SimpleNamespace(derive=lambda *_args: object()),
+            LedgerStore=SimpleNamespace(
+                open_writer=lambda _paths: nullcontext(object())
+            ),
+        )
+
+        def module(name: str):
+            return ledger_module if name == "llm_collab.ledger" else continuation_module
+
+        recorded = []
+        for project_id in ("amiga", "nuvyr"):
+            with patch.object(
+                session_autobridge, "bb_bootstrap_enabled", return_value=False
+            ), patch.object(
+                session_autobridge.importlib, "import_module", side_effect=module
+            ), patch.object(
+                session_autobridge, "config_get", return_value="ws_test"
+            ), patch.object(
+                session_autobridge,
+                "project_state_root",
+                return_value=Path("/tmp/state"),
+            ), patch.object(
+                session_autobridge, "get_project", return_value={"id": project_id}
+            ):
+                result = session_autobridge.execute_runtime_trigger(
+                    {
+                        "project_id": project_id,
+                        "runtime": {"family": "bb", "session_id": "thread-one"},
+                    },
+                    {"body": "must not send"},
+                    {"materialized": True},
+                )
+            recorded.append((project_id, result["status"], result["delivery_accepted"]))
+
+        self.assertEqual(
+            (
+                [
+                    ("amiga", "bb_adapter_disabled", False),
+                    ("nuvyr", "bb_adapter_disabled", False),
+                ],
+                [],
+            ),
+            (recorded, native_calls),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

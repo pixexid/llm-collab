@@ -966,7 +966,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
             "V11_SQL": "905783c2dda078ff675b51e942fb4786e0ca48612778e09289eb689b26578a2d",
             "V12_SQL": "6db7c4fd394c394fefdcd441ed8ce7e06fb06972e28bfda7cfb87b87a6d3cd44",
             "V13_SQL": "8572fffa356fa7b14a618435e052628a2df6be53cd3f7c67d05e1fa95763b70e",
-            "V14_SQL": "78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77",
+            "V14_SQL": "ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117",
         }
         self.assertEqual(store_module.SCHEMA_VERSION, 14)
         self.assertEqual(
@@ -1021,7 +1021,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe",
                 "sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e",
                 "sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf",
-                "sha256:78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77",
+                "sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117",
                 "sha256:26a856329406e45d22a8fbecdbd769d9c632acae3652d8c72438d228de7cfca2",
                 "sha256:805aa5ae43c31d85dbe9a84590050b701ddc69cfe1dd225e9c6e67afbd889a7c",
                 "sha256:88e59c9be91df366c03985f99f8b3db1c68382b4846612c0334fd15cc505e673",
@@ -1035,7 +1035,7 @@ class CompatibilityProjectionTest(unittest.TestCase):
                 "sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081",
                 "sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347",
                 "sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51",
-                "sha256:5d80efe436abcd1993b107e00065871882fd5be251abe218deaade69fc696a44",
+                "sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee",
             ),
         )
 

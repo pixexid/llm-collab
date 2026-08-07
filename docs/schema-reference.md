@@ -780,7 +780,7 @@ The exact current ledger is `PRAGMA user_version = 14`
 | v11 | GH-271 Child 7 | 1 additive table plus 2 triggers: `legacy_autobridge_provenance_imports` records hash-only provenance for the legacy autobridge `bindings` and `thread_pairs` trees. Released v1-v10 SQL remains byte-unchanged; v11 does not rebuild or widen the v3 `legacy_provenance_imports` `record_kind` constraint. Exact-project projections read both provenance tables so `session`, `activation_lease`, `binding`, and `thread_pair` rows cannot be partially surfaced. |
 | v12 | GH-294 registration repair | Adds a nullable persisted challenge `agent_id` for immutable reservation ownership, a nullable scope-independent `conversation_bindings.owner_key` for cross-project native-session uniqueness, and a coalescing owner index that preserves legacy rows while enforcing new registrations. |
 | v13 | GH-564 managed bb start | Adds `managed_start_reservations` for one bounded, idempotent first-thread reservation and native-session publication. It does not make bb default-on. |
-| v14 | GH-566 Slice 1C | Adds `bb_thread_observations`, keyed by exact project/chat/participant/binding generation, for the committed native event cursor, dispatch state, and queued request/turn correlation. Successor generations start with independent cursors; cursor movement and terminal receipt recording are atomic; WebSocket notifications are not authority. |
+| v14 | GH-566 Slice 1C | Adds `bb_thread_observations`, keyed by exact project/chat/participant/binding generation, for the committed native event cursor, dispatch state, and queued request/turn correlation. Successor generations start with independent cursors even when a rebind retains the native thread; native-thread uniqueness is generation-scoped. Cursor movement and terminal receipt recording are atomic; WebSocket notifications are not authority. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -800,7 +800,7 @@ The migration checksums and schema fingerprints are code authority in
 | v11 | `sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe` | `sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081` |
 | v12 | `sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e` | `sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347` |
 | v13 | `sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf` | `sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51` |
-| v14 | `sha256:78bcea183ede76dead70e8314e89cc802a40bce7582e1fa183dbbf7106bead77` | `sha256:5d80efe436abcd1993b107e00065871882fd5be251abe218deaade69fc696a44` |
+| v14 | `sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117` | `sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
 table exists in v1 through v12. Dead-letter and reconciliation outcomes in

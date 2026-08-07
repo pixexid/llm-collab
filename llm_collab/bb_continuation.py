@@ -29,6 +29,7 @@ from llm_collab.canonical.control import (
 from llm_collab.canonical.codex_delivery import _state_evidence
 from llm_collab.canonical.legacy_packet_materialization import (
     _latest_project_registry_revision,
+    legacy_packet_delivery_text,
 )
 from llm_collab.ledger import LedgerStore
 from llm_collab.ledger.store import CanonicalIntegrityError
@@ -166,6 +167,26 @@ def _ids(materialized: Mapping[str, object]) -> tuple[str, str, str]:
         if not isinstance(value, str) or validator.fullmatch(value) is None:
             raise BbContinuationRefused(f"canonical materialization has invalid {name}")
     return values  # type: ignore[return-value]
+
+
+def _delivery_text(
+    store: LedgerStore, context: Mapping[str, object], message_id: str
+) -> str:
+    message = store.read_canonical_message(
+        workspace_id=str(context["workspace_id"]),
+        scope_kind="project",
+        scope_identity=str(context["project_id"]),
+        message_id=message_id,
+    )
+    if message is None:
+        raise CanonicalIntegrityError("bb delivery references a missing message")
+    packet = message.get("body")
+    if not isinstance(packet, bytes):
+        raise CanonicalIntegrityError("bb delivery message body is invalid")
+    try:
+        return legacy_packet_delivery_text(packet)
+    except ValueError as error:
+        raise CanonicalIntegrityError(f"bb delivery packet is invalid: {error}") from error
 
 
 def _correlation(attempt_id: str, suffix: str) -> str:
@@ -320,7 +341,6 @@ def continue_bb_thread(
     *,
     client: BbClient,
     session: Mapping[str, object],
-    message: Mapping[str, object],
     materialized: Mapping[str, object],
     observed_at_utc: str,
 ) -> BbContinuationResult:
@@ -332,6 +352,7 @@ def continue_bb_thread(
     """
     context = _context(store, session)
     message_id, delivery_id, attempt_id = _ids(materialized)
+    body = _delivery_text(store, context, message_id)
     delivery = store.read_canonical_delivery(
         workspace_id=str(context["workspace_id"]),
         scope_kind="project",
@@ -377,9 +398,6 @@ def continue_bb_thread(
         ids=(message_id, delivery_id, attempt_id),
     )
 
-    body = message.get("body")
-    if not isinstance(body, str) or not body:
-        raise BbContinuationRefused("canonical message body is empty")
     try:
         native = client.send(
             thread_id=str(context["native_thread_id"]),
@@ -601,21 +619,7 @@ def observe_bb_thread(
     turn_id = turn_id if isinstance(turn_id, str) else None
     body: str | None = None
     if ids is not None:
-        pending = store.read_canonical_message(
-            workspace_id=str(context["workspace_id"]),
-            scope_kind="project",
-            scope_identity=str(context["project_id"]),
-            message_id=ids[0],
-        )
-        if pending is None:
-            raise CanonicalIntegrityError("bb observation references a missing message")
-        raw_body = pending.get("body")
-        if not isinstance(raw_body, bytes):
-            raise CanonicalIntegrityError("bb observation message body is invalid")
-        try:
-            body = raw_body.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise CanonicalIntegrityError("bb observation message body is not UTF-8") from error
+        body = _delivery_text(store, context, ids[0])
 
     terminal: tuple[BbEvent, str] | None = None
     for event in page.events:
