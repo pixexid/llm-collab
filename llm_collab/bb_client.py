@@ -815,6 +815,12 @@ def subprocess_transport(
     """
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
+        # Start the budget at the LAUNCH boundary, before Popen. Establishing it
+        # after the process exists left subprocess startup unbounded: an
+        # executable or interpreter on a hung mount could burn arbitrary time
+        # before the timer began, and the call could then return successfully
+        # well past timeout_seconds despite the end-to-end deadline contract.
+        deadline = time.monotonic() + timeout_seconds
         process = subprocess.Popen(
             [*bb_executable, *argv],
             stdout=subprocess.PIPE,
@@ -832,13 +838,12 @@ def subprocess_transport(
             process.wait()
 
         try:
-            # ONE end-to-end deadline. Giving each wait a fresh `timeout_seconds`
-            # made the configured bound per-wait: a child closing stdout just
-            # under the limit, then stderr just under a second limit, returned
-            # after nearly twice it, and process.wait() could add a third
-            # interval. The watcher's configured bound has to bound the CALL.
-            deadline = time.monotonic() + timeout_seconds
-
+            # ONE end-to-end deadline, established above at the launch boundary.
+            # Giving each wait a fresh `timeout_seconds` made the configured
+            # bound per-wait: a child closing stdout just under the limit, then
+            # stderr just under a second limit, returned after nearly twice it,
+            # and process.wait() could add a third interval. The watcher's
+            # configured bound has to bound the CALL.
             def remaining() -> float:
                 # Never pass a non-positive timeout: 0 is "poll once and raise",
                 # which is the correct behaviour once the budget is spent, but a

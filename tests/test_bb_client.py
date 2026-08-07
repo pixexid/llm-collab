@@ -8,9 +8,11 @@ the response/failure contract Slice 1B will call.
 from __future__ import annotations
 
 import json
+import io
 import sys
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from llm_collab.bb_client import (
@@ -895,6 +897,41 @@ class ProductionTransportTest(unittest.TestCase):
         transport = subprocess_transport(self._python("import time; time.sleep(30)"))
         with self.assertRaises(BbTransportTimeout):
             transport([], 0.5)
+
+    def test_the_budget_starts_at_the_launch_boundary(self):
+        """GH-584 follow-up: subprocess startup is inside the deadline.
+
+        Establishing the deadline after Popen() left process launch unbounded --
+        an interpreter on a hung mount could burn arbitrary time before the timer
+        began, and the call could then return well past timeout_seconds. A fake
+        Popen that stalls on construction is the only way to exercise that window;
+        a real slow child cannot separate launch cost from read cost.
+        """
+        import llm_collab.bb_client as bb
+
+        class SlowLaunch:
+            def __init__(self, *_args, **_kwargs):
+                time.sleep(0.5)  # the stall the deadline must already be counting
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["irrelevant"])
+        started = time.monotonic()
+        with patch.object(bb.subprocess, "Popen", SlowLaunch):
+            with self.assertRaises(BbTransportTimeout):
+                transport([], 0.2)
+        elapsed = time.monotonic() - started
+        self.assertLess(
+            elapsed,
+            0.9,
+            f"launch time was outside the budget: {elapsed:.2f}s for a 0.2s bound",
+        )
 
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.
