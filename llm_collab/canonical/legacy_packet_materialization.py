@@ -206,6 +206,7 @@ def materialize_selected_legacy_packet(
         "delivery_id": delivery_id,
         "delivery_created": delivery_created,
         "materialized": True,
+        "registry_revision": registry_revision,
         "packet_sha256": packet_sha256,
         "packet_relpath": relpath,
         "canonical_write_started": canonical_write_started,

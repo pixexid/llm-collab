@@ -41,6 +41,7 @@ from _helpers import (
     load_agent_inbox,
     mark_messages_read,
     parse_frontmatter,
+    project_state_root,
     resolve_project_repo_path,
 )
 from _session_autobridge import (
@@ -80,6 +81,7 @@ from llm_collab.bb_bootstrap import (
     plan_bootstrap,
     resolve_bootstrap_repo_id,
 )
+from llm_collab.ledger import LedgerPaths, LedgerStore
 
 
 def parse_args():
@@ -616,6 +618,55 @@ def _bootstrap_bb_before_dispatch(
     return consumed
 
 
+def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> None:
+    """Replay one bound bb thread without writing a foreground session event."""
+    if runtime_metadata(dict(session)).get("family") != "bb" or not bb_bootstrap_enabled():
+        return
+    project_id = session.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return
+    workspace_id = config_get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        return
+    try:
+        from llm_collab.bb_continuation import client_from_project, observe_bb_thread
+
+        paths = LedgerPaths.derive(project_state_root(), workspace_id)
+        with LedgerStore.open_writer(paths) as store:
+            result = observe_bb_thread(
+                store,
+                client=client_from_project(get_project(project_id)),
+                session=session,
+                observed_at_utc=utc_now_str(),
+            )
+    except Exception as error:
+        emit(
+            {
+                "ts": utc_now_str(),
+                "event": "bb_observation_error",
+                "detail": str(error),
+                "project_id": project_id,
+                "session_id": session.get("session_id"),
+            },
+            json_output,
+        )
+        return
+    emit(
+        {
+            "ts": utc_now_str(),
+            "event": "bb_observation",
+            "detail": result.detail,
+            "project_id": project_id,
+            "session_id": session.get("session_id"),
+            "state": result.state,
+            "last_event_seq": result.last_event_seq,
+            "processed_events": result.processed_events,
+            "receipt_id": result.receipt_id,
+        },
+        json_output,
+    )
+
+
 def dispatch_autobridge(
     agent_id: str,
     json_output: bool,
@@ -704,6 +755,7 @@ def dispatch_autobridge(
                 json_output,
             )
             continue
+        _observe_bb_session(session, json_output)
         try:
             try:
                 session_scope = (load_session(session_id) or {}).get("repo_targets")

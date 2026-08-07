@@ -42,6 +42,7 @@ from _helpers import (
     build_packet_ring_prompt,
     config_get,
     get_agent,
+    get_project,
     now_utc,
     parse_frontmatter,
     project_state_root,
@@ -3505,13 +3506,67 @@ def execute_codex_app_server_trigger(session: dict, message: dict, runtime_home:
     }
 
 
-def execute_runtime_trigger(session: dict, message: dict) -> dict[str, Any]:
+def execute_runtime_trigger(
+    session: dict,
+    message: dict,
+    canonical_materialization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     runtime = runtime_metadata(session)
     command = runtime.get("command") if isinstance(runtime, dict) else None
     derived = False
     runtime_family = str(runtime.get("family", ""))
     runtime_home = runtime.get("home") or runtime_home_from_source(runtime_family, runtime.get("session_source"))
     livecraft_runtime_command = livecraft_runtime_wake_available(session)
+    if runtime_family == "bb":
+        if not isinstance(canonical_materialization, dict) or not canonical_materialization.get(
+            "materialized"
+        ):
+            return {
+                "status": "bb_canonical_materialization_required",
+                "runtime_family": "bb",
+                "returncode": 1,
+                "delivery_accepted": False,
+            }
+        try:
+            continuation_module = importlib.import_module(
+                ".".join(("llm_collab", "bb_continuation"))
+            )
+            BbContinuationRefused = continuation_module.BbContinuationRefused
+
+            workspace_id = config_get("workspace_id")
+            ledger_module = importlib.import_module(".".join(("llm_collab", "ledger")))
+            paths = ledger_module.LedgerPaths.derive(project_state_root(), str(workspace_id))
+            with ledger_module.LedgerStore.open_writer(paths) as store:
+                result = continuation_module.continue_bb_thread(
+                    store,
+                    client=continuation_module.client_from_project(
+                        get_project(str(session["project_id"]))
+                    ),
+                    session=session,
+                    message=message,
+                    materialized=canonical_materialization,
+                    observed_at_utc=now_utc().isoformat(timespec="seconds"),
+                )
+        except BbContinuationRefused as error:
+            return {
+                "status": "bb_continuation_refused",
+                "runtime_family": "bb",
+                "returncode": 1,
+                "delivery_accepted": False,
+                "stderr": str(error),
+            }
+        return {
+            "status": result.state,
+            "detail": result.detail,
+            "runtime_family": "bb",
+            "returncode": 0 if result.state in {"queued", "duplicate", "failed"} else 1,
+            "delivery_accepted": result.state in {"queued", "duplicate", "failed"},
+            "message_id": result.message_id,
+            "delivery_id": result.delivery_id,
+            "attempt_id": result.attempt_id,
+            "receipt_id": result.receipt_id,
+            "native_called": result.native_called,
+        }
     if runtime_family == "pi":
         # Pre-wake drift guard: the current native session must still match the
         # provider/model/thinking/cwd fingerprint pinned at registration. A mismatch
@@ -4426,6 +4481,7 @@ def dispatch_session(
                 if (
                     materialization_result.get("materialized")
                     and not materialization_result.get("created")
+                    and runtime.get("family") != "bb"
                 ):
                     event["reason"] = "pull_pending"
                     append_event(session_id, event)
@@ -4479,11 +4535,18 @@ def dispatch_session(
                     prepared_candidate,
                     json.dumps(prepared_candidate, indent=2, sort_keys=True),
                 )
+            runtime_materialization = event.get("canonical_materialization_result")
+            if runtime.get("family") == "bb":
+                runtime_trigger = lambda: execute_runtime_trigger(
+                    session, message, runtime_materialization
+                )
+            else:
+                runtime_trigger = lambda: execute_runtime_trigger(session, message)
             asserted, assertion_event, runtime_result = activation_fenced_mutation(
                 session,
                 message,
                 boundary="runtime_trigger",
-                mutation=lambda: execute_runtime_trigger(session, message),
+                mutation=runtime_trigger,
             )
             if assertion_event is not None:
                 event.setdefault("activation_assertions", []).append(assertion_event)

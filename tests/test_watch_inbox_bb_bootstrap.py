@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -329,6 +330,40 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             self.assertEqual(candidate["native_thread_id"], session_payload["runtime"]["session_id"])
             self.assertEqual(["Chats/project/first.md"], session_payload["processed_messages"])
             self.assertTrue((bindings / "project-one" / "CHAT-ONE" / "glmpi.json").is_file())
+
+    def test_unscoped_watcher_observes_using_each_session_project(self) -> None:
+        session = {
+            "session_id": "bb-session-one",
+            "project_id": "project-one",
+            "runtime": {"family": "bb", "session_id": "thread-one"},
+        }
+        store = object()
+        result = SimpleNamespace(
+            detail="no events",
+            state="idle",
+            last_event_seq=0,
+            processed_events=0,
+            receipt_id=None,
+        )
+        with patch.object(watch_inbox, "bb_bootstrap_enabled", return_value=True), patch.object(
+            watch_inbox, "config_get", return_value="ws_bb_one"
+        ), patch.object(
+            watch_inbox, "project_state_root", return_value=Path("/tmp/state")
+        ), patch.object(
+            watch_inbox, "get_project", return_value={"id": "project-one", "bb": {"enabled": True}}
+        ) as get_project, patch.object(
+            watch_inbox.LedgerPaths, "derive", return_value=object()
+        ), patch.object(
+            watch_inbox.LedgerStore, "open_writer", return_value=nullcontext(store)
+        ), patch(
+            "llm_collab.bb_continuation.client_from_project", return_value=object()
+        ), patch(
+            "llm_collab.bb_continuation.observe_bb_thread", return_value=result
+        ) as observe, patch.object(watch_inbox, "emit"):
+            watch_inbox._observe_bb_session(session, False)
+
+        get_project.assert_called_once_with("project-one")
+        self.assertEqual(session, observe.call_args.kwargs["session"])
 
 
 if __name__ == "__main__":

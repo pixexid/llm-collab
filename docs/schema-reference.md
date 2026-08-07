@@ -762,8 +762,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 12`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 12`):
+The exact current ledger is `PRAGMA user_version = 14`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 14`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -779,6 +779,8 @@ The exact current ledger is `PRAGMA user_version = 12`
 | v10 | GH-271 Child 6 | 1 table plus 2 triggers: `conversation_binding_transition_audit` records explicit rebind/handoff transitions. The successor must pre-exist in a non-active state; the transition atomically supersedes the predecessor, activates the successor, records zero transferred pending work, and counts preserved predecessor freezes. Audit rows are append-only. |
 | v11 | GH-271 Child 7 | 1 additive table plus 2 triggers: `legacy_autobridge_provenance_imports` records hash-only provenance for the legacy autobridge `bindings` and `thread_pairs` trees. Released v1-v10 SQL remains byte-unchanged; v11 does not rebuild or widen the v3 `legacy_provenance_imports` `record_kind` constraint. Exact-project projections read both provenance tables so `session`, `activation_lease`, `binding`, and `thread_pair` rows cannot be partially surfaced. |
 | v12 | GH-294 registration repair | Adds a nullable persisted challenge `agent_id` for immutable reservation ownership, a nullable scope-independent `conversation_bindings.owner_key` for cross-project native-session uniqueness, and a coalescing owner index that preserves legacy rows while enforcing new registrations. |
+| v13 | GH-564 managed bb start | Adds `managed_start_reservations` for one bounded, idempotent first-thread reservation and native-session publication. It does not make bb default-on. |
+| v14 | GH-566 Slice 1C | Adds `bb_thread_observations`, keyed by the exact project/chat/participant binding, for the committed native event cursor and dispatch state. Cursor movement and terminal receipt recording are atomic; WebSocket notifications are not authority. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -796,9 +798,12 @@ The migration checksums and schema fingerprints are code authority in
 | v9 | `sha256:601eb6b5a7edfd3b409e578c9d57ea752c5af30cfd027c34512a16b1dc1c9a3b` | `sha256:867ed58b94e0dae45c21347409af0daa30ae901b6e2120111b2a26fddd8a4889` |
 | v10 | `sha256:44547c1810cacf9ba9d8edc2e7ee057446d93d1103d4c1424a868febbb525ecd` | `sha256:f32ef268eb81fced863c66f0209cc8fcfaac87a3c87bf628454d74c405124427` |
 | v11 | `sha256:4b61d82c2a2578fdd25f39ea42f73cc5545edf40460df45c0ef986eae84c57fe` | `sha256:decb92cd78ac700383cf7e1b5a7b2c5137e37978b2b06a1cc108bcb9da559081` |
+| v12 | `sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e` | `sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347` |
+| v13 | `sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf` | `sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51` |
+| v14 | `sha256:ba9fe431eee6a332a946055749a42ec7dedc6750cd04bfe97d4a7668ae98d685` | `sha256:36e8005522e6d191e5cbb48f81ddb4e7ec2314f288597280c6c9b989edb009fc` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
-table exists in v1 through v11. Dead-letter and reconciliation outcomes in
+table exists in v1 through v12. Dead-letter and reconciliation outcomes in
 Phase 2 are receipts, not a separate table.
 
 ### Implemented Phase 2 canonical surfaces
