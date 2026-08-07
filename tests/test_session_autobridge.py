@@ -1609,6 +1609,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "2026-04-22T00:00:00+00:00",
                 ),
             )
+
             store._connection.execute(
                 """
                 INSERT OR IGNORE INTO conversation_participants
@@ -1628,6 +1629,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "2026-04-22T00:00:00+00:00",
                 ),
             )
+
             store._connection.execute(
                 """
                 INSERT INTO conversation_bindings
@@ -1658,6 +1660,131 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "2026-04-22T00:00:00+00:00",
                 ),
             )
+
+    def seed_sender_provenance_state(
+        self,
+        root: Path,
+        *,
+        project_id: str = "amiga",
+        chat_id: str,
+        binding_session_id: str | None,
+        pair_session_id: str,
+        direction_session_id: str | None = None,
+    ) -> None:
+        state = root / "State" / "session_autobridge"
+        if binding_session_id is not None:
+            write_json(
+                state / "sessions" / f"{binding_session_id}.json",
+                {
+                    "session_id": binding_session_id,
+                    "agent_id": "codex",
+                    "project_id": project_id,
+                    "chat_id": chat_id,
+                    "status": "active",
+                    "wake_strategy": "notify",
+                    "runtime": {
+                        "family": "codex_app",
+                        "session_id": binding_session_id,
+                    },
+                },
+            )
+            write_json(
+                state / "bindings" / project_id / chat_id / "codex.json",
+                {
+                    "project_id": project_id,
+                    "chat_id": chat_id,
+                    "agent_id": "codex",
+                    "session_id": binding_session_id,
+                    "runtime_family": "codex_app",
+                    "runtime_session_id": binding_session_id,
+                },
+            )
+        write_json(
+            state / "thread_pairs" / project_id / chat_id / "claude__codex.json",
+            {
+                "project_id": project_id,
+                "chat_id": chat_id,
+                "agents": ["claude", "codex"],
+                "sessions": {"codex": pair_session_id},
+                "last_direction": {
+                    "from": "codex",
+                    "to": "claude",
+                    "sender_session_id": direction_session_id or pair_session_id,
+                },
+            },
+        )
+
+    def sender_provenance_workspace(
+        self,
+        *,
+        project_id: str,
+        chat_id: str,
+        binding_session_id: str | None,
+        pair_session_id: str,
+        direction_session_id: str | None = None,
+    ) -> tuple[Path, Path]:
+        root = self.make_workspace()
+        for agent in ("codex", "claude"):
+            self.add_agent(
+                root,
+                {
+                    "id": agent,
+                    "display_name": agent.title(),
+                    "activation": {"type": "cli_session", "watcher_enabled": True},
+                },
+            )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name=f"2026-08-06_sender-provenance__{chat_id}",
+            chat_id=chat_id,
+            project_id=project_id,
+        )
+        self.seed_sender_provenance_state(
+            root,
+            project_id=project_id,
+            chat_id=chat_id,
+            binding_session_id=binding_session_id,
+            pair_session_id=pair_session_id,
+            direction_session_id=direction_session_id,
+        )
+        return root, chat_dir
+
+    def run_sender_provenance_delivery(
+        self,
+        root: Path,
+        *,
+        chat_id: str,
+        project_id: str,
+        title: str,
+        body: str,
+        sender_session_id: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            sys.executable,
+            str(DELIVER_SCRIPT),
+            "--chat",
+            chat_id,
+            "--from",
+            "codex",
+            "--to",
+            "claude",
+            "--project",
+            project_id,
+            "--title",
+            title,
+        ]
+        if sender_session_id is not None:
+            argv.extend(["--sender-session-id", sender_session_id])
+        argv.extend(["--body-file", "-"])
+        return subprocess.run(
+            argv,
+            cwd=root,
+            env=self.subprocess_env(root),
+            text=True,
+            input=body,
+            capture_output=True,
+            check=False,
+        )
 
     def run_cli(self, root: Path, *args: str) -> dict:
         return self.run_cli_with_env(root, None, *args)
@@ -5706,6 +5833,220 @@ class SessionAutobridgeTest(unittest.TestCase):
         frontmatter, _ = parse_frontmatter(delivered_text)
         self.assertEqual("binding-canonical", frontmatter["target_binding_id"])
         self.assertEqual(7, frontmatter["target_binding_generation"])
+
+    def test_deliver_prefers_current_sender_binding_and_records_pair_supersession(self):
+        for project_id, chat_id in (("amiga", "CHAT-GH547"), ("nuvyr", "CHAT-GH547-NUVYR")):
+            with self.subTest(project=project_id):
+                root, chat_dir = self.sender_provenance_workspace(
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    binding_session_id="codex-live-new",
+                    pair_session_id="codex-pair-old",
+                )
+                delivered = self.run_sender_provenance_delivery(
+                    root,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    title="Sender provenance probe",
+                    body="Use the current sender binding.",
+                )
+                self.assertEqual(
+                    0,
+                    delivered.returncode,
+                    f"failures=gh547_binding_precedes_pair deliver stderr={delivered.stderr}",
+                )
+                packets = sorted(chat_dir.glob("*_to-claude_*.md"))
+                self.assertTrue(packets, "failures=gh547_packet_written")
+                frontmatter, _body = parse_frontmatter(packets[-1].read_text())
+                self.assertEqual(
+                    "codex-live-new",
+                    frontmatter["sender_session_id"],
+                    "failures=gh547_binding_precedes_pair",
+                )
+                self.assertEqual(
+                    "codex-pair-old",
+                    frontmatter["supersedes_session_id"],
+                    "failures=gh547_pair_value_recorded_as_supersession",
+                )
+
+    def test_deliver_preserves_explicit_sender_session_over_binding_and_pair(self):
+        root, chat_dir = self.sender_provenance_workspace(
+            project_id="amiga",
+            chat_id="CHAT-GH547-EXPLICIT",
+            binding_session_id="codex-live-new",
+            pair_session_id="codex-pair-old",
+        )
+        delivered = self.run_sender_provenance_delivery(
+            root,
+            chat_id="CHAT-GH547-EXPLICIT",
+            project_id="amiga",
+            title="Explicit sender probe",
+            body="Keep the explicit sender.",
+            sender_session_id="codex-explicit",
+        )
+        self.assertEqual(
+            0,
+            delivered.returncode,
+            f"failures=gh547_explicit_sender_precedence deliver stderr={delivered.stderr}",
+        )
+        packets = sorted(chat_dir.glob("*_to-claude_*.md"))
+        self.assertTrue(packets, "failures=gh547_explicit_packet_written")
+        frontmatter, _body = parse_frontmatter(packets[-1].read_text())
+        self.assertEqual(
+            "codex-explicit",
+            frontmatter["sender_session_id"],
+            "failures=gh547_explicit_sender_precedence",
+        )
+        self.assertIsNone(
+            frontmatter["supersedes_session_id"],
+            "failures=gh547_explicit_sender_has_no_inferred_supersession",
+        )
+
+    def test_deliver_refuses_conflicting_pair_without_current_sender_binding(self):
+        root, chat_dir = self.sender_provenance_workspace(
+            project_id="amiga",
+            chat_id="CHAT-GH547-CONFLICT",
+            binding_session_id=None,
+            pair_session_id="codex-pair-cache",
+            direction_session_id="codex-direction-cache",
+        )
+        delivered = self.run_sender_provenance_delivery(
+            root,
+            chat_id="CHAT-GH547-CONFLICT",
+            project_id="amiga",
+            title="Conflicting sender probe",
+            body="This must not be written.",
+        )
+        self.assertEqual(
+            2,
+            delivered.returncode,
+            f"failures=gh547_pair_conflict_refuses_without_binding stderr={delivered.stderr}",
+        )
+        self.assertIn(
+            "sender_session_provenance_refused",
+            delivered.stderr,
+            "failures=gh547_pair_conflict_typed_refusal",
+        )
+        self.assertFalse(
+            list(chat_dir.glob("*_to-claude_*.md")),
+            "failures=gh547_pair_conflict_no_packet_write",
+        )
+
+    def test_deliver_refuses_unreadable_pair_before_packet_write(self):
+        for project_id, chat_id in (
+            ("amiga", "CHAT-GH585-AMIGA-MALFORMED"),
+            ("nuvyr", "CHAT-GH585-NUVYR-MALFORMED"),
+        ):
+            with self.subTest(project=project_id):
+                root, chat_dir = self.sender_provenance_workspace(
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    binding_session_id="codex-live-new",
+                    pair_session_id="codex-pair-old",
+                )
+                pair_path = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "thread_pairs"
+                    / project_id
+                    / chat_id
+                    / "claude__codex.json"
+                )
+                pair_path.write_text("{malformed", encoding="utf-8")
+
+                delivered = self.run_sender_provenance_delivery(
+                    root,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    title="Malformed pair probe",
+                    body="This must be refused before the packet write.",
+                )
+
+                self.assertEqual(
+                    2,
+                    delivered.returncode,
+                    f"failures=gh585_unreadable_pair_refusal_status project={project_id} "
+                    f"stderr={delivered.stderr}",
+                )
+                self.assertIn(
+                    "sender_session_provenance_refused",
+                    delivered.stderr,
+                    f"failures=gh585_unreadable_pair_typed_refusal project={project_id}",
+                )
+                self.assertFalse(
+                    list(chat_dir.glob("*_to-claude_*.md")),
+                    f"failures=gh585_unreadable_pair_no_packet project={project_id}",
+                )
+
+    def test_deliver_falls_back_to_pair_when_sender_binding_is_not_authoritative(self):
+        for project_id, chat_id, invalid_kind in (
+            ("amiga", "CHAT-GH585-AMIGA-SCOPE", "scope"),
+            ("nuvyr", "CHAT-GH585-NUVYR-SCOPE", "scope"),
+            ("amiga", "CHAT-GH585-AMIGA-STOPPED", "stopped"),
+            ("nuvyr", "CHAT-GH585-NUVYR-STOPPED", "stopped"),
+        ):
+            with self.subTest(project=project_id):
+                root, chat_dir = self.sender_provenance_workspace(
+                    project_id=project_id,
+                    chat_id=chat_id,
+                    binding_session_id="codex-live-new",
+                    pair_session_id="codex-pair-old",
+                )
+                binding_path = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "bindings"
+                    / project_id
+                    / chat_id
+                    / "codex.json"
+                )
+                if invalid_kind == "scope":
+                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                    binding["chat_id"] = "CHAT-FOREIGN"
+                    write_json(binding_path, binding)
+                else:
+                    session_path = (
+                        root
+                        / "State"
+                        / "session_autobridge"
+                        / "sessions"
+                        / "codex-live-new.json"
+                    )
+                    session = json.loads(session_path.read_text(encoding="utf-8"))
+                    session["status"] = "stopped"
+                    write_json(session_path, session)
+
+                delivered = self.run_sender_provenance_delivery(
+                    root,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    title="Invalid binding fallback probe",
+                    body="The valid pair must remain authoritative.",
+                )
+
+                self.assertEqual(
+                    0,
+                    delivered.returncode,
+                    f"failures=gh585_invalid_{invalid_kind}_fallback_status project={project_id} "
+                    f"stderr={delivered.stderr}",
+                )
+                packets = sorted(chat_dir.glob("*_to-claude_*.md"))
+                self.assertTrue(
+                    packets,
+                    f"failures=gh585_invalid_{invalid_kind}_fallback_packet project={project_id}",
+                )
+                frontmatter, _body = parse_frontmatter(packets[-1].read_text())
+                self.assertEqual(
+                    "codex-pair-old",
+                    frontmatter["sender_session_id"],
+                    f"failures=gh585_invalid_{invalid_kind}_pair_wins project={project_id}",
+                )
+                self.assertIsNone(
+                    frontmatter["supersedes_session_id"],
+                    f"failures=gh585_invalid_{invalid_kind}_no_supersession project={project_id}",
+                )
 
     def test_deliver_false_readiness_engages_fallback_and_writes_packet(self):
         # The subject is relay, not claude: this lane asserts the doorbell fallback

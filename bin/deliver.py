@@ -115,10 +115,9 @@ from _session_autobridge import (
     BINDING_UNREADABLE_REASON,
     BindingUnreadable,
     EXACT_BINDING_MISMATCH_REASON,
-    load_binding,
+    load_thread_pair,
     repo_scope_matches,
     resolve_exact_dispatch_pair,
-    resolve_thread_pair_session_id,
     session_target_ids,
     update_thread_pair,
 )
@@ -225,17 +224,101 @@ def build_message(args, body: str, chat_id: str, packet_name: str | None = None)
     return dump_frontmatter(fm, body or "(no body)")
 
 
+class SenderSessionProvenanceRefusal(ValueError):
+    """The fallback pair cannot prove one sender session identity."""
+
+    reason = "sender_session_provenance_refused"
+
+
+def _pair_sender_session_id(
+    pair: dict,
+    *,
+    sender: str,
+    recipient: str,
+) -> tuple[str | None, bool]:
+    """Read the pair cache and detect disagreement within its own sender records."""
+    sessions = pair.get("sessions")
+    pair_session_id = None
+    if isinstance(sessions, dict) and sessions.get(sender):
+        pair_session_id = str(sessions[sender])
+
+    last_direction = pair.get("last_direction")
+    direction_session_id = None
+    if (
+        isinstance(last_direction, dict)
+        and last_direction.get("from") == sender
+        and last_direction.get("to") == recipient
+        and last_direction.get("sender_session_id")
+    ):
+        direction_session_id = str(last_direction["sender_session_id"])
+
+    return pair_session_id, bool(
+        pair_session_id
+        and direction_session_id
+        and pair_session_id != direction_session_id
+    )
+
+
+def resolve_sender_session(
+    project_id: str,
+    chat_id: str,
+    sender: str,
+    recipient: str,
+) -> tuple[str | None, str | None]:
+    """Resolve sender identity from the current binding, then the pair cache.
+
+    The current per-agent runtime binding is authoritative because a rebind is the
+    event that changes ownership. The paired-thread record is only a fallback and
+    its old value becomes explicit ``supersedes_session_id`` provenance when the
+    live binding replaces it. If no binding exists, an internally contradictory
+    pair cannot safely identify a sender and is refused before any write.
+    """
+    bound_session_id = resolve_bound_runtime_session_id(project_id, chat_id, sender)
+    try:
+        pair = load_thread_pair(project_id, chat_id, sender, recipient)
+    except FileNotFoundError:
+        pair = None
+    except (OSError, ValueError) as error:
+        # The pair is reread by update_thread_pair() after the durable packet is
+        # written.  Treating this read as optional would turn that later failure
+        # into a retryable error after the side effect already happened.
+        raise SenderSessionProvenanceRefusal(
+            f"thread pair could not be read before delivery: {error}"
+        ) from error
+
+    if pair is None:
+        return bound_session_id, None
+
+    pair_session_id, pair_conflicts = _pair_sender_session_id(
+        pair,
+        sender=sender,
+        recipient=recipient,
+    )
+    if bound_session_id:
+        if pair_session_id and pair_session_id != bound_session_id:
+            return bound_session_id, pair_session_id
+        return bound_session_id, None
+    if pair_conflicts:
+        raise SenderSessionProvenanceRefusal(
+            f"thread pair has conflicting sender sessions for {sender!r}"
+        )
+    return pair_session_id, None
+
+
 def resolve_bound_runtime_session_id(project_id: str, chat_id: str, agent_id: str) -> str | None:
     try:
-        binding = load_binding(project_id, chat_id, agent_id)
-    except FileNotFoundError:
-        return None
+        resolved, _reason, _inactive_pair = resolve_exact_dispatch_pair(
+            project_id, chat_id, agent_id
+        )
     except BindingUnreadable:
         # Refuse the RUNTIME target, never the durable write. Letting this propagate killed
         # deliver.py with a traceback before read_body(), so an oversized recipient binding meant
         # exit 1 and no packet at all -- and the mailbox is the one channel that must survive
         # every runtime failure. main() records the real cause; this only declines to target.
         return None
+    if resolved is None:
+        return None
+    _session, binding = resolved
     runtime_session_id = binding.get("runtime_session_id")
     if not runtime_session_id:
         return None
@@ -428,10 +511,15 @@ def main():
         args.target_session_id = None
     else:
         if args.sender_session_id is None:
-            args.sender_session_id = (
-                resolve_thread_pair_session_id(args.project, chat_id, args.sender, args.recipient)
-                or resolve_bound_runtime_session_id(args.project, chat_id, args.sender)
-            )
+            try:
+                args.sender_session_id, inferred_supersedes_session_id = resolve_sender_session(
+                    args.project, chat_id, args.sender, args.recipient
+                )
+            except SenderSessionProvenanceRefusal as error:
+                print(f"[error] {error.reason}: {error}", file=sys.stderr)
+                sys.exit(2)
+            if args.supersedes_session_id is None:
+                args.supersedes_session_id = inferred_supersedes_session_id
 
     autobridge_target = None
     autobridge_binding = None
