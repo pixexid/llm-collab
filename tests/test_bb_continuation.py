@@ -3,13 +3,20 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import threading
 import unittest
+from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "bin"))
+import _session_autobridge as session_autobridge  # noqa: E402
 
 from llm_collab.bb_client import (
     PINNED_BB_VERSION,
+    REFUSAL_LAUNCH_UNAVAILABLE,
     BbClient,
     BbEvent,
     BbEventPage,
@@ -23,6 +30,7 @@ from llm_collab.bb_continuation import (
     BB_CONTINUATION_COMPLETED,
     BB_CONTINUATION_DUPLICATE,
     BB_CONTINUATION_QUEUED,
+    BB_CONTINUATION_UNATTEMPTED,
     BbContinuationRefused,
     continue_bb_thread,
     observe_bb_thread,
@@ -319,10 +327,28 @@ class BbContinuationTest(unittest.TestCase):
         import llm_collab.bb_client as bb
 
         tmp, store, session, materialized = self.open_fixture()
+        paths = LedgerPaths.derive(tmp.name, WORKSPACE)
         release_launch = threading.Event()
         entered_lock = threading.Lock()
         entered = 0
         launch_threads = []
+        message_path = "Chats/bb/cap-retry.md"
+        message = {
+            "path": message_path,
+            "frontmatter": {
+                "from": "codex",
+                "sender_agent_id": "codex",
+                "title": "bb cap retry",
+                "target_session_id": NATIVE_THREAD,
+            },
+        }
+        session.update(
+            {
+                "mode": "auto-read",
+                "wake_strategy": "runtime_trigger",
+                "processed_messages": [],
+            }
+        )
 
         class NeverReturningLaunch:
             def __init__(self, *_args, **_kwargs):
@@ -347,29 +373,64 @@ class BbContinuationTest(unittest.TestCase):
         client = BbClient(transport, enabled=True, timeout_seconds=0.05)
         client._verified_version = PINNED_BB_VERSION
         before_threads = set(threading.enumerate())
+        store.close()
+
+        def mark_processed(target_session, path, *, prepared=None):
+            target_session.setdefault("processed_messages", []).append(path)
+
+        dispatch_patches = {
+            "load_session": Mock(return_value=session),
+            "session_is_dispatchable": Mock(return_value=(True, "ok")),
+            "matching_unread_messages": Mock(return_value=[message]),
+            "processed_messages": Mock(
+                side_effect=lambda target: set(target.get("processed_messages", []))
+            ),
+            "message_targets_session": Mock(return_value=(True, "test")),
+            "claim_message_activation": Mock(return_value=(True, None)),
+            "should_skip_for_loop_protection": Mock(return_value=(False, "ok")),
+            "resolve_effective_action": Mock(return_value=("runtime_trigger", "test")),
+            "reserve_message_result": Mock(return_value=(dict(session), "{}")),
+            "materialize_selected_runtime_packet": Mock(
+                return_value={
+                    **materialized,
+                    "resolved": True,
+                    "created": True,
+                    "canonical_write_started": True,
+                }
+            ),
+            "mark_canonical_settlement_complete": Mock(),
+            "append_event": Mock(),
+            "write_operator_turn_summary": Mock(return_value={}),
+            "refresh_runtime_ui": Mock(return_value={}),
+            "mark_message_processed": Mock(side_effect=mark_processed),
+            "save_session": Mock(),
+            "config_get": Mock(
+                side_effect=lambda key: WORKSPACE if key == "workspace_id" else None
+            ),
+            "project_state_root": Mock(return_value=tmp.name),
+            "get_project": Mock(return_value={"bb": {"enabled": True}}),
+            "bb_bootstrap_enabled": Mock(return_value=True),
+        }
         try:
             with patch.object(bb.subprocess, "Popen", NeverReturningLaunch), patch.dict(
                 os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}
+            ), patch.multiple(session_autobridge, **dispatch_patches), patch(
+                "llm_collab.bb_continuation.client_from_project", return_value=client
             ):
                 for _ in range(bb.MAX_STALLED_LAUNCHES):
                     with self.assertRaises(BbTransportTimeout):
                         transport([], 0.05)
 
-                refused = continue_bb_thread(
-                    store,
-                    client=client,
-                    session=session,
-                    materialized=materialized,
-                    observed_at_utc=NOW,
-                )
-                row = store.read_bb_thread_observation(
-                    workspace_id=WORKSPACE,
-                    scope_kind="project",
-                    scope_identity=PROJECT,
-                    conversation_id=CHAT,
-                    participant_id=PARTICIPANT,
-                    binding_generation=1,
-                )
+                refused = session_autobridge.dispatch_session(str(session["session_id"]))
+                with LedgerStore.open_reader(paths) as reader:
+                    row = reader.read_bb_thread_observation(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=PROJECT,
+                        conversation_id=CHAT,
+                        participant_id=PARTICIPANT,
+                        binding_generation=1,
+                    )
                 self.assertEqual(
                     ("idle", None, None, None),
                     (
@@ -380,7 +441,15 @@ class BbContinuationTest(unittest.TestCase):
                     ),
                     "cap refusal left durable queued delivery state",
                 )
-                self.assertFalse(refused.native_called)
+                self.assertNotIn(
+                    message_path,
+                    session["processed_messages"],
+                    "cap refusal marked the unread packet processed",
+                )
+                self.assertEqual(
+                    BB_CONTINUATION_UNATTEMPTED,
+                    refused["actions"][0]["runtime_result"]["status"],
+                )
 
                 launch_threads = [
                     thread
@@ -391,6 +460,40 @@ class BbContinuationTest(unittest.TestCase):
                 for thread in launch_threads:
                     thread.join(timeout=1.0)
 
+                retried = session_autobridge.dispatch_session(str(session["session_id"]))
+                self.assertEqual(
+                    BB_CONTINUATION_QUEUED,
+                    retried["actions"][0]["runtime_result"]["status"],
+                )
+                self.assertIn(message_path, session["processed_messages"])
+        finally:
+            release_launch.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+            tmp.cleanup()
+
+    def test_send_time_launch_cap_refusal_is_unattempted_and_retryable(self):
+        class RefuseOnceClient(FakeBbClient):
+            def send(self, *, thread_id: str, message: str, mode: str = "queue-if-active"):
+                if not self.sent:
+                    self.sent.append((thread_id, message, mode))
+                    return BbRefusal(
+                        REFUSAL_LAUNCH_UNAVAILABLE,
+                        "stalled launch cap reached",
+                    )
+                return super().send(thread_id=thread_id, message=message, mode=mode)
+
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            client = RefuseOnceClient()
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                refused = continue_bb_thread(
+                    store,
+                    client=client,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
                 retried = continue_bb_thread(
                     store,
                     client=client,
@@ -398,12 +501,11 @@ class BbContinuationTest(unittest.TestCase):
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
-                self.assertEqual(BB_CONTINUATION_QUEUED, retried.state)
-                self.assertTrue(retried.native_called)
+            self.assertEqual(BB_CONTINUATION_UNATTEMPTED, refused.state)
+            self.assertFalse(refused.native_called)
+            self.assertEqual(BB_CONTINUATION_QUEUED, retried.state)
+            self.assertTrue(retried.native_called)
         finally:
-            release_launch.set()
-            for thread in launch_threads:
-                thread.join(timeout=1.0)
             store.close()
             tmp.cleanup()
 

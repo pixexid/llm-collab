@@ -984,9 +984,14 @@ def subprocess_transport(
         except BaseException:
             release_launch_slot()
             raise
-        if not launch_done.wait(timeout=remaining()):
-            launch_abandoned.set()
-            launch_decided.set()
+        launch_finished = False
+        try:
+            launch_finished = launch_done.wait(timeout=remaining())
+        finally:
+            if not launch_finished:
+                launch_abandoned.set()
+                launch_decided.set()
+        if not launch_finished:
             raise BbTransportTimeout(
                 f"{' '.join(argv)} exceeded {timeout_seconds}s"
             )

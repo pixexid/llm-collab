@@ -1153,6 +1153,59 @@ class ProductionTransportTest(unittest.TestCase):
         with bb._stalled_launches_lock:
             self.assertEqual(0, bb._outstanding_launches, "launch slots were not fully released")
 
+    def test_interrupted_launch_wait_releases_its_reserved_slot(self):
+        """GH-592: BaseException at the launch wait cannot strand capacity."""
+        import llm_collab.bb_client as bb
+
+        release_constructor = threading.Event()
+        caller = threading.current_thread()
+        real_event_wait = threading.Event.wait
+        before_threads = set(threading.enumerate())
+        launch_threads = []
+
+        class LateLaunch:
+            def __init__(self, *_args, **_kwargs):
+                release_constructor.wait()
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        def interrupt_caller_wait(event, timeout=None):
+            if threading.current_thread() is caller and timeout is not None:
+                raise KeyboardInterrupt("simulated interrupted launch wait")
+            return real_event_wait(event, timeout)
+
+        transport = subprocess_transport(["irrelevant"])
+        try:
+            with patch.object(bb.subprocess, "Popen", LateLaunch), patch.object(
+                bb.threading.Event, "wait", interrupt_caller_wait
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    transport([], 1.0)
+                launch_threads = [
+                    thread
+                    for thread in threading.enumerate()
+                    if thread not in before_threads and thread.name == "bb-subprocess-launch"
+                ]
+                release_constructor.set()
+                for thread in launch_threads:
+                    thread.join(timeout=1.0)
+                with bb._stalled_launches_lock:
+                    self.assertEqual(
+                        0,
+                        bb._outstanding_launches,
+                        "interrupted launch wait leaked its reserved slot",
+                    )
+        finally:
+            release_constructor.set()
+            for thread in launch_threads:
+                thread.join(timeout=1.0)
+
     def test_the_deadline_bounds_the_call_not_each_wait(self):
         """GH-584: one end-to-end deadline, not one per wait.
 
