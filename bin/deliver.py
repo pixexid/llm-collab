@@ -23,9 +23,9 @@ composer content and does not require a provably-empty or readable composer); a
 supported ax_attended_only recipient (a target whose composer cannot be
 resolved/driven at all, not merely a value-opaque one) instead gets an ATTENDED
 RECOVERY REQUIRED instruction routing control to Codex. Codex-to-Codex delivery is a
-deliberate exception:
-the durable packet is preserved, but app activation is suppressed in favor of
-Thread Coordination. Every non-Codex watcher-backed recipient is also excluded:
+deliberate exception: the durable packet is preserved, but app activation is
+suppressed; managed Codex workers are inspected and steered through BB. Every
+non-Codex watcher-backed recipient is also excluded:
 its durable packet and background watcher are its target-side wake path. If the recipient
 has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator. Other unresolved
@@ -904,9 +904,9 @@ def main():
             "was intentionally suppressed."
         )
         print()
-        print("For a managed Codex worker, inspect it with read_thread and send focused")
-        print("unblocks with send_message_to_thread. Use native subagent coordination")
-        print("for bounded local support. Do not use AX or Computer Use to route this")
+        print("For a managed Codex worker, use its BB thread for inspection and steering;")
+        print("follow docs/workflows/bb-workers.md. This durable packet is coordination")
+        print("history, not a BB transport. Do not use AX or Computer Use to route this")
         print("packet to a Codex task.")
         print(border)
     # GH-1547 (#110 P2 3609336511): the relay print must mirror the computed
