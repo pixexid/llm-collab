@@ -72,6 +72,10 @@ explicitly disjoint.
 For a BB worker, step 8 uses `bb-workers.md` to obtain and verify the managed
 worktree. Step 10 freezes the delegation without starting the worker; step 12
 starts it through BB only after the `in_progress` gate passes.
+For a Claude-side manual lane or another lane not owned by BB, step 8 uses
+[`isolated-worktrees.md` → Choose the isolation owner](isolated-worktrees.md#choose-the-isolation-owner).
+That section routes BB-managed lanes back to `bb-workers.md`; the hand-managed
+local-worktree and mailbox activation sequence does not apply to a BB thread.
 
 Dormant Codex Thread Coordination mechanics are retained below for audit only.
 They must not be executed:

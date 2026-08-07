@@ -14,12 +14,15 @@ do not copy its commands here.
 A BB worker is not an llm-collab participant: it has no `agents.json` identity,
 exact-session binding, durable-mailbox authorship, or delivery receipt. The
 orchestrator remains the integration point and communicates with that worker
-through BB. Only workspace acquisition differs: after `bb-workers.md` provides
-the verified managed worktree, every BB worker must still complete
-[`Read before acting`](#read-before-acting) and
-[`Required preflight`](#required-preflight) before editing. The first-class
-bootstrap, binding, and watcher sections apply only when a worker is explicitly
-being enrolled as a durable-mailbox participant.
+through BB. BB changes workspace acquisition, not project preflight: after
+`bb-workers.md` provides the verified managed worktree, the worker reads the
+supplied task, project, and repository context and completes
+[`Required preflight`](#required-preflight) before editing. The orchestrator
+drains the collaboration inbox and performs any exact identity-bearing read
+that requires `--me`; the BB worker has no collaboration identity and must not
+impersonate one. The first-class bootstrap, binding, and watcher sections apply
+only when a worker is explicitly being enrolled as a durable-mailbox
+participant.
 
 ## Bootstrap first
 
@@ -109,6 +112,12 @@ Do not copy real `projects/{project_id}` directories back into the public repo
 as tracked files. The in-repo `projects/_example/` directory is only a template.
 
 ## Read before acting
+
+An enrolled first-class participant follows all four items below under its own
+identity. For a BB assignment, the orchestrator owns item 1 and any item 2 read
+that requires a collaboration identity, then supplies the relevant task/board
+context in the delegation. The BB worker follows that supplied context plus
+items 3-4; it never supplies another participant to an identity-bearing read.
 
 1. collaboration inbox
 2. active task board
