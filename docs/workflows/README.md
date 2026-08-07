@@ -12,8 +12,8 @@ Recommended read order:
 2. `claude-code-desktop-computer-use-bridge.md` — the canonical agent-to-agent
    comms reference (Codex-only Computer-Use doorbell + bidirectional `llm-collab`
    mailbox); read whenever desktop-app agents need to notify each other
-3. `session-autobridge-runbook.md` — routine exact-session dispatch, the primary
-   wake for every watcher-backed recipient (contract v12); bounded
+3. `session-autobridge-runbook.md` — exact-session dispatch for verified
+   bindings (contract v13); bounded
    polling/heartbeat observation remains a safety-fuse only
 4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a
    planned durable event runner; no runner or exact-thread dispatcher is

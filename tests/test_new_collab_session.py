@@ -43,9 +43,9 @@ class PlainNewChatTest(unittest.TestCase):
 
 class WakeChannelTest(unittest.TestCase):
     def test_codex_is_watcher_backed_despite_carrying_an_ax_app(self):
-        # Contract v12 reverses the earlier ordering. Codex carries an ax_app
+        # Contract v13 preserves the exact-session ordering. Codex carries an ax_app
         # AND watcher_enabled=True; the watcher wins, because routine
-        # exact-session dispatch is its wake and AX is only the fallback
+        # exact-session dispatch is its wake and AX is only available for a verified route
         # deliver.py selects. Classifying it as ax_doorbell taught every new
         # Codex session to poll and await a ring instead of arming pickup.
         codex = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
@@ -131,7 +131,7 @@ class CoworkerPromptTest(unittest.TestCase):
 
 class PickupBlockTest(unittest.TestCase):
     def test_codex_pickup_arms_a_watcher(self):
-        # Contract v12: Codex is watcher-backed like every other worker, so its
+        # Contract v13: Codex is watcher-backed like every other worker, so its
         # activation resolves to the watcher channel and the printed pickup arms
         # a real watcher. This reverses the earlier ruling that Codex had no
         # native session watcher; it has one, and that watcher delivered the
@@ -240,7 +240,7 @@ class MainPathTest(unittest.TestCase):
             return out.getvalue(), sub
 
     def test_codex_initiator_gets_a_watcher(self):
-        # Contract v12: a Codex initiator arms the routine watcher like anyone
+        # Contract v13: a Codex initiator arms the routine watcher like anyone
         # else. The old expectation (poll, await AX) taught every new Codex
         # collaboration session the routing model v12 retired.
         out, _ = self._main([

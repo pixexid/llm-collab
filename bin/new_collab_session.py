@@ -26,9 +26,9 @@ It:
      (every watcher-backed initiator arms an inbox watcher, Codex included) — do
      it, a packet you never see is a packet you never answer.
   6. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
-     plus the pickup command for that worker's real wake channel. Contract v12:
-     routine exact-session dispatch is the wake for every watcher-backed worker,
-     and AX is only the fallback deliver.py selects.
+     plus the pickup command for that worker's real wake channel. Contract v13:
+     exact binding is required before worker delivery; the explicit unbound
+     watcher is notification-only and AX never repairs a missing binding.
 
 Usage:
   python bin/new_collab_session.py \
@@ -153,12 +153,10 @@ def agent_activation(agents: dict, agent_id: str) -> dict:
 def wake_channel(activation: dict) -> str:
     """How this worker actually receives a packet.
 
-    Contract v12: routine exact-session dispatch is the wake for every
-    watcher-backed worker, Codex included, so `watcher_enabled` wins over
-    `ax_app`. This ordering was inverted until 2026-08-06, on a premise about
-    Codex pickup that the app-server delivery proof disproved. An `ax_app` now
-    means only that AX is available as the fallback `deliver.py` selects, never
-    that the worker lacks pickup."""
+    Contract v13: a verified exact binding is required before worker delivery.
+    Watcher-backed workers use their exact-session watcher; an `ax_app` means
+    only that the exact Codex doorbell may be available for a verified route.
+    An unbound diagnostic watcher is notification-only."""
     if activation.get("type") == "cli_session" and activation.get("watcher_enabled"):
         return "watcher"
     if activation.get("ax_attended_only"):
@@ -233,27 +231,23 @@ def watch_cmd(agent, project, chat, session, repo_target, rsid, family) -> str:
 
 def needs_dispatch_wake(activation: dict) -> bool:
     """True when this worker's turn is STARTED by autobridge dispatch rather
-    than by reading an announcement — today, a worker carrying an `ax_app`
-    (Codex). Such a worker must run the agent-wide dispatching watcher, because
-    an exact-session watcher never calls dispatch_autobridge."""
+    rather than by reading an announcement. The generated agent-wide watcher is
+    notification-only; exact-session dispatch belongs to the verified binding."""
     return bool((activation or {}).get("ax_app"))
 
 
 def pickup_block(channel, agent, project, chat, session, repo_target, rsid, family,
                  needs_dispatch: bool = False) -> list[str]:
-    """How THIS agent picks up packets, keyed to its real wake channel. Every
-    watcher-backed worker arms a persistent native watcher — Codex included,
-    per contract v12; the polling block below is for a worker that genuinely has
-    no watcher to arm.
+    """How THIS agent picks up packets, keyed to its real wake channel. A
+    watcher-backed worker arms a persistent native watcher; the polling block
+    below is for a worker that genuinely has no watcher to arm.
 
     Two watcher shapes, and the difference is not cosmetic. An exact-session
     watcher (`--session`) OBSERVES: watch_inbox.py runs dispatch_autobridge only
     when `--session` is absent, so it announces `new_message` and stops. That is
     right for a worker that reads its own inbox on the announcement. A worker
-    whose turn is STARTED by autobridge dispatch — one carrying an `ax_app`,
-    i.e. Codex — needs the agent-wide dispatching watcher instead; give it the
-    exact-session command and a bound packet would suppress AX while nothing
-    ever wakes it."""
+    whose turn is STARTED by autobridge dispatch uses the verified binding;
+    the agent-wide PM2 watcher is notification-only."""
     if channel == "watcher" and needs_dispatch:
         return [
             "# 1) Ensure the TRANSPORT first. A binding that dispatches while",

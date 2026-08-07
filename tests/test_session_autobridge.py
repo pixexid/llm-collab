@@ -5168,7 +5168,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
 
     def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga",
-                           recipient="claude", expect_refusal=False):
+                           recipient="claude", target_session_id=None, expect_refusal=False):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [
             sys.executable, str(DELIVER_SCRIPT),
@@ -5178,6 +5178,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         ]
         if repo_targets is not None:
             argv += ["--repo-targets", repo_targets]
+        if target_session_id is not None:
+            argv += ["--target-session-id", target_session_id]
         # check=False plus an explicit assertion: check=True raises CalledProcessError with the
         # stderr hidden inside it, so a failing delivery reported only "exit status 1" and I had to
         # go digging. The command's own error message is the diagnostic.
@@ -5714,7 +5716,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
-    def test_an_oversized_recipient_binding_still_writes_the_durable_packet(self):
+    def test_an_oversized_recipient_binding_refuses_before_durable_write(self):
         root, chat_dir = self.scoped_subscriber_workspace(
             subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
         self.oversize_recipient_binding(root)
@@ -5728,6 +5730,40 @@ class SessionAutobridgeTest(unittest.TestCase):
                          "an unreadable binding EXISTS; it must not be reported as absent")
         self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
         self.assertNotIn("Traceback", stderr)
+
+    def test_explicit_target_refusal_preserves_absent_binding_reason(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], register_session=False)
+        payload, _stderr = self.deliver_with_scope(
+            root, "CHAT-SCOPE1", repo_targets="llm-collab",
+            target_session_id="missing-runtime", expect_refusal=True)
+        self.assertEqual(session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+                         payload["routing_refusal_reason"])
+        self.assertFalse(payload["binding_unreadable_blocker"])
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
+
+    def test_explicit_target_refusal_preserves_unreadable_binding_reason(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
+        self.oversize_recipient_binding(root)
+        payload, _stderr = self.deliver_with_scope(
+            root, "CHAT-SCOPE1", repo_targets="llm-collab",
+            target_session_id="missing-runtime", expect_refusal=True)
+        self.assertIn("binding_unreadable", payload["routing_refusal_reason"])
+        self.assertTrue(payload["binding_unreadable_blocker"])
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
+
+    def test_explicit_target_refusal_preserves_inactive_binding_reason(self):
+        root, chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"])
+        self.expire_session_lease(root)
+        payload, _stderr = self.deliver_with_scope(
+            root, "CHAT-SCOPE1", repo_targets="llm-collab",
+            target_session_id="missing-runtime", expect_refusal=True)
+        self.assertEqual(session_autobridge_lib.EXACT_BINDING_NOT_DISPATCHABLE_REASON,
+                         payload["routing_refusal_reason"])
+        self.assertFalse(payload["binding_unreadable_blocker"])
+        self.assertEqual([], sorted(chat_dir.glob("*_to-claude_*.md")))
 
     def test_an_oversized_recipient_binding_wakes_nobody(self):
         root, chat_dir = self.scoped_subscriber_workspace(

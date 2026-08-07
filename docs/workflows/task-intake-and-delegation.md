@@ -142,17 +142,17 @@ AX command printed by `deliver.py`; a supported `ax_attended_only` target report
 recovery, never a routine ring. A terminal-only
 CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
 included, is woken by its durable packet and its own watcher **whenever its
-binding dispatches** (`autobridge_ready: true`); only when `deliver.py` reports
-`ax_doorbell_required: true` instead does a Codex packet take the AX fallback.
+binding dispatches** (`autobridge_ready: true`). `ax_doorbell_required: true`
+can request the exact Codex doorbell command, but it never repairs an unresolved
+worker binding; an addressed worker packet is refused before durable write until
+its exact target is verified.
 
-Do not read `watcher_pickup_ready` as the signal for that. It requires
-`wake_fallback_allowed` **and** `is_watcher_only_target`, so a dispatchable
-binding turns it off for every recipient, and it excludes Codex besides. A
-healthy bound delivery reports `autobridge_ready: true` with
-`watcher_pickup_ready: false` — that pair is the routine success case, not a
-missing-pickup diagnosis. `watcher_pickup_ready` marks the *unbound* non-Codex
-watcher fallback. Treat `activation_unavailable` as a configuration blocker, record it
-precisely, and do not misreport it as routine operator relay.
+Do not read `watcher_pickup_ready` as proof of a worker route. A healthy bound
+delivery reports `autobridge_ready: true`; an unresolved worker target is
+refused before durable write. The explicit `--include-unbound` watcher is a
+bounded, notification-only diagnostic scope for legacy null-target packets.
+Treat `activation_unavailable` as a configuration blocker, record it precisely,
+and do not misreport it as routine operator relay.
 
 There should be one active queue-runner heartbeat for a project loop. A
 task-specific heartbeat may exist only as a child wait for Claude, a worker

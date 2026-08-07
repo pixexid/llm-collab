@@ -25,8 +25,10 @@ resolved/driven at all, not merely a value-opaque one) instead gets an ATTENDED
 RECOVERY REQUIRED instruction routing control to Codex. Codex-to-Codex delivery is a
 deliberate exception:
 the durable packet is preserved, but app activation is suppressed in favor of
-Thread Coordination. Every non-Codex watcher-backed recipient is also excluded:
-its durable packet and background watcher are its target-side wake path. If the recipient
+Thread Coordination. Every non-Codex recipient with a verified exact binding is
+also excluded from AX: its durable packet and exact binding are its target-side
+wake path. If the recipient has no verified exact binding, delivery is refused
+before any packet or inbox write. If the recipient
 has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator. Other unresolved
 activation types report an explicit unavailable state.
@@ -537,6 +539,7 @@ def main():
     durable_session = None
     binding_unreadable = False
     dispatch_scope_refused = False
+    explicit_target_refusal_reason = None
     if not thread_coordination_required:
         try:
             pair, autobridge_refusal_reason, inactive_pair = resolve_exact_dispatch_pair(
@@ -570,6 +573,9 @@ def main():
             # The sender named a specific target thread the recipient's binding contradicts.
             # Do not re-address the packet to the binding's target; that would silently redirect
             # an explicit intent. Refuse so the sender sees the mismatch.
+            explicit_target_refusal_reason = (
+                autobridge_refusal_reason or EXACT_BINDING_MISMATCH_REASON
+            )
             autobridge_target = None
             autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
             args.target_session_id = None
@@ -627,14 +633,19 @@ def main():
     elif args.target_session_id:
         args.routing_mode = "targeted"
     elif explicit_target_session_id is not None:
+        refusal_reason = (
+            explicit_target_refusal_reason
+            or autobridge_refusal_reason
+            or EXACT_BINDING_MISMATCH_REASON
+        )
         print(
             json.dumps(
                 {
                     "delivery_refused": True,
                     "durable_write": False,
                     "routing_mode": "refused",
-                    "routing_refusal_reason": EXACT_BINDING_MISMATCH_REASON,
-                    "autobridge_refusal_reason": EXACT_BINDING_MISMATCH_REASON,
+                    "routing_refusal_reason": refusal_reason,
+                    "autobridge_refusal_reason": refusal_reason,
                     "autobridge_ready": False,
                     "thread_coordination_required": False,
                     "watcher_pickup_ready": False,
@@ -652,6 +663,7 @@ def main():
                     "project_id": args.project,
                     "chat_id": chat_id,
                     "resolved_target_session_id": None,
+                    "binding_unreadable_blocker": binding_unreadable,
                 },
                 indent=2,
             )
@@ -659,7 +671,8 @@ def main():
         print(
             f"[deliver] REFUSED before durable write: recipient {args.recipient!r} "
             "has no verified exact binding for the explicitly requested target "
-            f"{explicit_target_session_id!r}; repair the binding and retry.",
+            f"{explicit_target_session_id!r} ({refusal_reason}); repair the binding "
+            "and retry.",
             file=sys.stderr,
         )
         sys.exit(2)

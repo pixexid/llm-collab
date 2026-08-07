@@ -182,8 +182,11 @@ bin/llm-collab deliver.py \
   --body-file brief.md
 ```
 
-`deliver.py` writes the packet before reporting how the recipient can be
-activated. The mailbox packet is the source of truth; a doorbell is only a wake
+`deliver.py` writes a worker packet only after verifying and stamping an exact
+recipient binding. An unresolved worker target returns typed
+`delivery_refused` before any packet or inbox write. An explicit watcherless
+human/operator broadcast is marked `routing_mode: broadcast` and has no runtime
+wake. The mailbox packet is the source of truth; a doorbell is only a wake
 signal.
 
 ## Project boundaries

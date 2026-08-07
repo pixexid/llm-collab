@@ -163,14 +163,14 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
-AX applies only to the Codex recipient, and only as a fallback. Every
-watcher-backed worker — Codex included — uses its durable packet and background
-watcher as the routine wake.
+AX applies only to the Codex recipient, through the exact command `deliver.py`
+prints. A verified binding uses its durable packet and exact-session watcher;
+an unresolved worker binding is refused before durable write.
 
 - never deactivate a dispatchable session autobridge in order to obtain an AX
   wake; `deliver.py` gives `autobridge_ready` precedence and suppresses
   `ax_doorbell_required` by design, and removing routine dispatch to reach a
-  fallback inverts contract v12
+  fallback bypasses the contract v13 exact-binding gate
 - write the durable `llm-collab` packet and inspect the delivery result; when it
   reports `autobridge_ready: true`, the current Phase 1 route is session
   autobridge, not AX
@@ -202,11 +202,12 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`. AX may target only Codex, and only as the
-fallback `deliver.py` selects; every watcher-backed worker, Codex included, owns
-its own pickup through routine exact-session dispatch.
+`session-autobridge-runbook.md`. AX may target only Codex, and only through the
+exact command `deliver.py` prints for a verified route. Every worker owns its
+pickup through an exact binding; an unresolved worker delivery is refused before
+write.
 
-- fallback for a Codex recipient only, and only when `deliver.py` prints it: run
+- For a verified Codex recipient, and only when `deliver.py` prints it: run
   the exact command it prints
   once, even while it is busy, with one short pointer to
   the durable packet. Do not prove the composer empty first: composer content
@@ -397,7 +398,7 @@ python bin/session_autobridge.py register --session <id> --agent codex \
 `--mode auto-read` is **required**, not cosmetic. `--mode` defaults to `manual`,
 and `resolve_effective_action()` selects `manual_noop` *before* it considers
 `wake_strategy=runtime_trigger`. A session registered without it still looks
-dispatchable to `deliver.py` — which suppresses the AX fallback — while the
+dispatchable to `deliver.py` — which suppresses the AX doorbell — while the
 watcher marks each packet processed without ever calling the App Server. The
 result is silently dropped messages.
 

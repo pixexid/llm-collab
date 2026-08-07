@@ -1366,7 +1366,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 12 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 13 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
@@ -1391,6 +1391,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v13",
+            "exact recipient identity",
+            "delivery_refused",
             "Contract v11",
             "frozen, bounded work order",
             "must never share a packet",
@@ -1915,7 +1918,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
 
 class AxIsNeverPrimaryDocTest(unittest.TestCase):
-    """v12 says routine exact-session dispatch is the wake for every
+    """v13 says routine exact-session dispatch is the wake for every
     watcher-backed recipient, Codex included, and AX is the fallback
     `deliver.py` selects.
 
@@ -1932,7 +1935,7 @@ class AxIsNeverPrimaryDocTest(unittest.TestCase):
         "no native session watcher",
         "no native session event watcher",
         "no native watcher",
-        "non-Codex watcher-backed",
+        "unbound watcher fallback",
         "primary for a Codex recipient",
         "avoid registering the matching dispatchable autobridge",
         "ax remains the routine doorbell",
@@ -1974,7 +1977,7 @@ class AxIsNeverPrimaryDocTest(unittest.TestCase):
             [],
             offenders,
             "these phrasings tell a worker that Codex lacks routine pickup, or that "
-            "AX is its primary wake, both of which contract v12 retired:\n"
+            "AX is its primary wake, which the exact-binding contract forbids:\n"
             + "\n".join(offenders),
         )
 

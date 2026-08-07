@@ -76,13 +76,57 @@ class ChatScopedWatcherTest(unittest.TestCase):
                 },
             },
         ]
-        with patch.object(watch_inbox, "get_unread_messages", return_value=messages):
+        with patch.object(watch_inbox, "bounded_unread_messages", return_value=messages):
             scoped = watch_inbox.chat_scope_messages(args)
         self.assertEqual(
             {"Chats/one/null.md", "Chats/one/bound.md"},
             set(scoped),
             "failures=gh554_chat_scope_surfaces_bound_and_unbound",
         )
+
+    def test_chat_scope_propagates_bounded_reader_refusal(self) -> None:
+        args = SimpleNamespace(me="claude", project="amiga", chat="CHAT-ONE")
+        with patch.object(
+            watch_inbox,
+            "bounded_unread_messages",
+            side_effect=ValueError("dispatch inbox exceeds limit"),
+        ):
+            with self.assertRaisesRegex(ValueError, "dispatch inbox exceeds limit"):
+                watch_inbox.chat_scope_messages(args)
+
+    def test_include_unbound_main_fails_closed_on_bounded_reader_refusal(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inbox = Path(tmp) / "inbox.json"
+            inbox.write_text('{"unread": []}', encoding="utf-8")
+            with (
+                patch.object(watch_inbox, "require_current_runtime"),
+                patch.object(watch_inbox, "agent_ids", return_value=["claude"]),
+                patch.object(watch_inbox, "agent_inbox_path", return_value=inbox),
+                patch.object(watch_inbox, "config_get", return_value=0),
+                patch.object(
+                    watch_inbox,
+                    "bounded_unread_messages",
+                    side_effect=ValueError("non-regular dispatch inbox"),
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "watch_inbox.py",
+                        "--me", "claude",
+                        "--project", "amiga",
+                        "--chat", "CHAT-ONE",
+                        "--include-unbound",
+                        "--max-polls", "1",
+                        "--json",
+                    ],
+                ),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    watch_inbox.main()
+        self.assertEqual(75, raised.exception.code)
 
 
 class RefusalFingerprintTest(unittest.TestCase):

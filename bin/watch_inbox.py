@@ -49,6 +49,7 @@ from _session_autobridge import (
     _repo_package_root,
     _bb_binding_state,
     active_read_budget,
+    bounded_unread_messages,
     dispatch_session,
     execute_bb_bootstrap_plan,
     read_regular_file_bounded,
@@ -215,7 +216,7 @@ def chat_scope_messages(args) -> dict[str, dict]:
     """Read one agent/chat mailbox scope without widening exact-session reads."""
     return {
         message["path"]: message
-        for message in get_unread_messages(args.me)
+        for message in bounded_unread_messages(args.me)
         if message.get("path")
         and message.get("frontmatter", {}).get("to") == args.me
         and message.get("frontmatter", {}).get("project_id") == args.project
@@ -932,7 +933,18 @@ def main():
                     time.sleep(poll_interval)
         elif inbox_path.exists():
             if args.include_unbound:
-                seen_paths = set(chat_scope_messages(args))
+                try:
+                    seen_paths = set(chat_scope_messages(args))
+                except Exception as error:
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "error",
+                            "detail": str(error),
+                        },
+                        args.json_output,
+                    )
+                    sys.exit(75)
             else:
                 data = load_agent_inbox(args.me)
                 seen_paths = set(data.get("unread", []))
@@ -1042,7 +1054,7 @@ def main():
         except Exception as e:
             ts_str = utc_now_str()
             emit({"ts": ts_str, "event": "error", "detail": str(e)}, args.json_output)
-            if args.session and isinstance(e, ExactWatcherAuthorityError):
+            if (args.session and isinstance(e, ExactWatcherAuthorityError)) or args.include_unbound:
                 sys.exit(75)
 
         polls += 1

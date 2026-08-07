@@ -6,19 +6,17 @@ project/chat so future messages can be routed to that parked worker session.
 Use it to reduce short manual relays. Do not use it to make workers fully
 autonomous.
 
-## Status: the primary wake (contract v12)
+## Status: exact binding and explicit broadcast (contract v13)
 
-Routine exact-session dispatch through session autobridge is **the** routine wake
-for every watcher-backed recipient. Bounded polling and heartbeat observation are
-a separate thing and remain a safety-fuse; do not read the limits on those as
-limits on dispatch.
+Routine exact-session dispatch through session autobridge is the wake for a
+verified binding. Bounded reads and heartbeat observation are separate safety
+fuses. An addressed worker packet is refused before durable write when its exact
+binding is missing, unreadable, inactive, ambiguous, or out of scope.
 
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
 and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
-the busy-safe **bidirectional AX doorbell**, and only through the exact command
-printed by `deliver.py`. Every watcher-backed worker, Codex included, is woken
-by its durable packet and its own watcher; AX is reached only when that dispatch
-is unavailable. See
+the **bidirectional AX doorbell**, and only through the exact command printed by
+`deliver.py`. No AX path is produced for an unresolved worker binding. See
 `claude-code-desktop-computer-use-bridge.md`. **GH-470: composer content and
 `AXValue` readability are never a sender-side hold, and neither is a busy/running
 recipient.** The recipient never types into its own composer, so any value there
@@ -347,16 +345,11 @@ Manual one-shot watcher:
 <runtime_root>/bin/llm-collab watch_inbox.py --me codex --max-polls 1 --json
 ```
 
-An unbound chat watcher is explicit and notification-only:
-
-```bash
-<runtime_root>/bin/llm-collab watch_inbox.py \
-  --me <agent_id> --project <project_id> --chat <CHAT-ID> \
-  --include-unbound --no-autobridge --notify --max-polls 1 --json
-```
-
-It is the only non-exact watcher scope allowed to see a null-target packet.
-Exact `--session` reads remain binding-scoped and never see those packets.
+For the bounded chat-level diagnostic watcher, use the canonical
+`--include-unbound` invocation in
+[`collab-thread-quickstart.md`](collab-thread-quickstart.md). It is
+notification-only and the only non-exact scope allowed to see a null-target
+packet. Exact `--session` reads remain binding-scoped.
 
 For Codex, manual and PM2 watcher runs default to:
 

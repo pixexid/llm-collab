@@ -63,9 +63,10 @@ misbound.
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
 watcher-backed worker — claude, gemini, and Codex alike — arms its own inbox
-watcher, and routine exact-session dispatch wakes it. AX is a fallback for Codex
-only, taken only when `deliver.py` prints it. **Do your own pickup step** (the helper prints
-yours first); a packet you never see is a packet you never answer.
+watcher, and routine exact-session dispatch wakes it. AX is Codex-only and is
+available only for a verified route when `deliver.py` prints it. **Do your own
+pickup step** (the helper prints yours first); a packet you never see is a packet
+you never answer.
 
 The manual steps below are exactly what that helper automates; run them by hand
 only when you need to diverge from the defaults.
@@ -218,7 +219,8 @@ than reusing it.
 
 Codex is watcher-backed like every other worker: routine exact-session dispatch
 is its wake. The attended AX wake described in `session-autobridge-runbook.md` is
-a Codex-only fallback, and only when `deliver.py` prints the command.
+Codex-only and is available only for a verified route when `deliver.py` prints
+the command.
 
 ## 2. Know your three coordinates
 
@@ -275,11 +277,12 @@ Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
 block. Run only its exact printed command, and only when it is
-printed. `watcher_pickup_ready` marks the unbound non-Codex watcher fallback
-only — a bound recipient reports `autobridge_ready: true` with
-`watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
-exit 0 means the durable packet is written and the reply is complete. A typed
-`delivery_refused: true` result exits 2 and means no packet or inbox pointer exists.
+printed. A bound recipient reports `autobridge_ready: true`; an unresolved
+worker target is refused before durable write. The explicit `--include-unbound`
+watcher above is the bounded, notification-only diagnostic for legacy null-target
+packets. `deliver.py` exit 0 means the durable packet is written and the reply is
+complete. A typed `delivery_refused: true` result exits 2 and means no packet or
+inbox pointer exists.
 
 ## 5. Verify it actually dispatched
 

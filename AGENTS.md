@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 12 -->
+<!-- CONTRACT_VERSION: 13 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -45,42 +45,21 @@ workflows below.
 
 ### Recent contract changes
 
-Contract v12 (2026-08-06) makes the **durable packet plus session-autobridge
-dispatch the routine wake for every watcher/monitor-backed recipient, Codex
-included**, and demotes AX to the fallback. This supersedes only the routing half
-of v10: AX is still Codex-only, and still only ever the exact command
-`deliver.py` prints — what changes is *when* it is used, never *who* may receive
-it.
+Contract v13 (2026-08-06) makes exact recipient identity a durable-delivery
+gate. For a worker or agent recipient, `deliver.py` must verify and stamp the
+current exact binding before reading the body or writing a packet. Missing,
+unreadable, inactive, ambiguous, or scope-refused bindings return
+`delivery_refused: true`, a typed reason, and exit 2 before any packet or inbox
+mutation. An explicit watcherless human/operator broadcast is the only unbound
+exception and is marked `routing_mode: broadcast` without a runtime wake.
 
-`deliver.py` has behaved this way for some time; the contract text was the part
-out of date. A dispatchable autobridge target takes precedence and suppresses the
-doorbell (`wake_fallback_allowed = not autobridge_ready and not
-dispatch_scope_refused`). Read that predicate literally rather than enumerating
-cases from it: AX is available whenever **no dispatchable target resolved and the
-refusal was not terminal**. Missing and inactive bindings are the common shapes,
-but they are not the whole set — an explicit target that contradicts the
-recipient's binding refuses with `exact_binding_mismatch` and leaves the fallback
-allowed too.
-
-Exactly two states are **terminal** and suppress every wake lane: an
-**unreadable** binding and a **scope refusal**. Both set
-`dispatch_scope_refused`, which makes `wake_fallback_allowed` false, because no
-lane may wake a recipient whose authoritative record could not be read or whose
-scope forbids the packet. Those are repairs; do not try to ring through them.
-
-**An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
-with `autobridge_refusal_reason: exact_binding_required` is not an error and
-prints no warning, so the absence of a doorbell is *not* evidence that dispatch
-happened — read the `deliver.py` result rather than inferring from quiet. Every
-delivery to Codex on 2026-08-05 took the AX fallback for this reason and nobody
-noticed, because the contract said AX was the Codex path anyway.
-
-Why it is worth the change: while AX was the only route to Codex, no Pi worker
-could reach it — Pi workers cannot ring AX — so every reply had to be relayed by
-a Claude thread. On 2026-08-05 that cost 35 minutes with two GH-549 packets
-unread behind a single relay. With the recipient bound, any worker's `deliver.py`
-reaches Codex directly and the relay hop disappears. Mechanics in
-`docs/workflows/session-autobridge-runbook.md`.
+Exact-session readers remain binding-scoped. The explicit `--include-unbound`
+diagnostic reader requires an exact project and chat, uses bounded reads, and is
+notification-only (`--no-autobridge`); it is not a guessed-session dispatcher.
+The agent-wide PM2 watcher has the same notification-only contract. AX remains a
+Codex-only doorbell, but it cannot repair a missing or unreadable worker binding:
+when delivery is refused, no durable packet and no wake command are produced.
+Mechanics in `docs/workflows/session-autobridge-runbook.md`.
 
 Contract v11 (2026-08-03) ends idle standoffs at their real cause: bad
 delegation. A question and a task delegation are different acts — a question gets
@@ -287,19 +266,12 @@ on **every poll for roughly twenty hours** — a deleted-packet pointer made
 sidecar token was absent so no external WS endpoint existed at all. The sender
 saw success throughout. Two independent faults, zero sender-visible signal.
 
-AX is the **fallback**, not the routine path, and it is still Codex-only: no
-other worker is ever an AX ring target, and it is only ever the exact command
-`deliver.py` prints — never an invented `axsend`, and never a way around a
-recipient's watcher. Ring only when `deliver.py` asks for it — which is whenever
-no dispatchable target resolved and the refusal was not terminal, not a fixed
-list of causes you can recite. The two terminal ones, an unreadable binding and a
-scope refusal, suppress the doorbell and are repairs rather than rings.
-
-Treat a missing doorbell as information, not permission: an unbound recipient
-refuses dispatch **silently** (`autobridge_refusal_reason:
-exact_binding_required`), so quiet means "unrouted", not "delivered". If a
-recipient you expect to be bound is not, that is the defect to fix — the
-recipient registers its own session, since only it knows its exact runtime id.
+AX is still Codex-only and only ever the exact command `deliver.py` prints —
+never an invented `axsend`, and never a way around a recipient's watcher. A
+worker with no verified exact binding is refused before durable write, with the
+resolver's reason preserved for repair. If a recipient is expected to be bound,
+the recipient registers its own session because only it knows its exact runtime
+id.
 
 ## Shared Checkout Safety
 

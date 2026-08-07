@@ -94,7 +94,7 @@ a Codex session from it. The watcher also excludes older `from: codex` /
 `to: codex` packets created before the persistent flag existed. External
 Claude/ZCode-to-Codex packets do not receive the guard and keep their ordinary
 activation behavior: routine exact-session dispatch when the binding dispatches,
-and the AX doorbell only as the fallback `deliver.py` selects.
+and the AX doorbell only for a verified route when `deliver.py` selects it.
 
 Native subagents use native subagent coordination for bounded local support.
 Do not route them through AX or Computer Use. Attended Computer Use is reserved
