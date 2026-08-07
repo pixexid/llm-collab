@@ -36,6 +36,8 @@ remains the integration point.
 For Amiga work, use at most one Codex-managed internal subagent for a task. Do
 not stack several Codex-managed subagents on the same implementation lane.
 External collaborators do not count against that internal subagent limit.
+For Amiga work, do not stack several BB workers on the same implementation
+lane.
 
 The former Codex Thread Coordination implementation route is dormant. Its
 superseded instruction is retained for audit only: "Codex-owned implementation
