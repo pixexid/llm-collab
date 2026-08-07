@@ -221,6 +221,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "Do not merge an open PR before that pass completes",
             "do not request a second bot pass",
             "No elapsed time, tier, or release-gate disposition substitutes",
+            "The one-pass rule governs what the worker may **request**",
+            "--settle-after-push 60 --interval 15",
+            "Immediately after merging, run `bin/pr_watch.py --once` once more",
+            "does not authorize a second review request",
         ):
             self.assertIn(phrase, review_policy)
         for phrase in (

@@ -180,7 +180,7 @@ class BbTransportResult:
 
 
 # A transport takes argv (without the `bb` prefix) plus a deadline and returns a
-# BbTransportResult, or raises BbTransportTimeout/BbResponseTooLarge. Injecting it is what lets
+# BbTransportResult, or raises BbTransportTimeout/BbResponseReadError. Injecting it is what lets
 # the Slice 1A tests run entirely on recorded fixtures with no live bb server.
 #
 # A transport OWNS its own read bound: by the time it returns, both streams are
@@ -698,10 +698,10 @@ class BbClient:
     def _call(self, argv: Sequence[str]) -> BbTransportResult | BbRefusal:
         try:
             result = self._transport(argv, self._timeout_seconds)
-        except BbResponseTooLarge as exc:
+        except BbResponseReadError as exc:
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE,
-                str(exc) or "response exceeded the transport bound",
+                str(exc) or "response could not be read",
             )
         except BbTransportTimeout as exc:
             return BbRefusal(REFUSAL_TIMED_OUT, str(exc) or " ".join(argv))
@@ -754,7 +754,11 @@ class BbClient:
             )
 
 
-class BbResponseTooLarge(Exception):
+class BbResponseReadError(Exception):
+    """A response stream could not be read completely at the transport boundary."""
+
+
+class BbResponseTooLarge(BbResponseReadError):
     """A native stream exceeded MAX_RESPONSE_CHARS while it was being read.
 
     Distinct from the client's own size refusal: this is raised by the transport
@@ -762,6 +766,10 @@ class BbResponseTooLarge(Exception):
     client's check remains as a second layer for injected transports that do not
     bound themselves.
     """
+
+
+class BbResponseDecodeError(BbResponseReadError):
+    """A response stream contained bytes that could not be decoded as text."""
 
 
 def _read_bounded(stream, limit: int) -> str:
@@ -775,12 +783,15 @@ def _read_bounded(stream, limit: int) -> str:
     """
     chunks: list[str] = []
     remaining = limit + 1
-    while remaining > 0:
-        chunk = stream.read(min(65536, remaining))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
+    try:
+        while remaining > 0:
+            chunk = stream.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except UnicodeError as exc:
+        raise BbResponseDecodeError("native response stream could not be decoded") from exc
     text = "".join(chunks)
     if len(text) > limit:
         raise BbResponseTooLarge(f"native stream exceeded {limit} chars while reading")
@@ -833,7 +844,7 @@ def subprocess_transport(
             aborting = True
             kill_child()
             raise BbTransportTimeout(f"{' '.join(argv)} exceeded {timeout_seconds}s") from exc
-        except BbResponseTooLarge:
+        except BbResponseReadError:
             # Kill before re-raising: the child is still writing, and leaving it
             # running would keep producing output nobody will read.
             aborting = True

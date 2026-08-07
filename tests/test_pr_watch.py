@@ -59,6 +59,16 @@ class PrWatchDiffTest(unittest.TestCase):
         changes = self.pw.diff(old, new, raw)
         self.assertTrue(any("timeline" in c for c in changes))
 
+    def test_connector_review_oids_bind_reviews_to_their_commits(self):
+        timeline = [
+            {"event": "reviewed", "user": {"login": "chatgpt-codex-connector[bot]"},
+             "commit_id": "head-1"},
+            {"event": "reviewed", "user": {"login": "pixexid"}, "commit_id": "human-1"},
+            {"event": "reviewed", "actor": {"login": "chatgpt-codex-connector"},
+             "commit_id": "head-2"},
+        ]
+        self.assertEqual(["head-1", "head-2"], self.pw.connector_review_oids(timeline))
+
     def test_merge_detected(self):
         old = _sig()
         new = _sig(state="closed", merged=True)
@@ -222,6 +232,48 @@ class PrWatchDiffTest(unittest.TestCase):
         with patch.object(sys, "argv", ["pr_watch.py", "--pr", "1"]):
             with self.assertRaises(SystemExit):
                 self.pw.main()
+
+    def test_settle_after_push_reports_no_review_after_bounded_window(self):
+        base = _sig(connector_review_oids=[])
+        snapshots = iter([(base, {}), (base, {})])
+        clock = iter([0.0, 0.0, 1.0, 1.0])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep") as sleep, \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        sleep.assert_called_once()
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "no_connector_review"', output)
+        self.assertIn('"head":', output)
+
+    def test_settle_after_push_accepts_review_for_the_captured_head(self):
+        head = "a" * 40
+        base = _sig(head=head, connector_review_oids=[])
+        current = _sig(head=head, connector_review_oids=[head])
+        snapshots = iter([(base, {}), (current, {})])
+        clock = iter([0.0, 0.0, 0.5])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep") as sleep, \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        sleep.assert_called_once()
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "review_seen"', output)
+        self.assertIn(head, output)
+
+    def test_settle_after_push_refuses_a_changed_head(self):
+        base = _sig(head="a" * 40, connector_review_oids=[])
+        current = _sig(head="b" * 40, connector_review_oids=[])
+        snapshots = iter([(base, {}), (current, {})])
+        clock = iter([0.0, 0.0])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(self.pw.sys, "stderr") as stderr:
+            self.assertEqual(2, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        self.assertTrue(stderr.write.called)
 
 
 if __name__ == "__main__":

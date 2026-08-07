@@ -66,13 +66,13 @@ import sys
 
 path = sys.argv[1]
 source = open(path, encoding="utf-8").read()
-old = """        except BbResponseTooLarge as exc:
+old = """        except BbResponseReadError as exc:
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE,
-                str(exc) or \"response exceeded the transport bound\",
+                str(exc) or \"response could not be read\",
             )
 """
-new = """        except BbResponseTooLarge:
+new = """        except BbResponseReadError:
             raise
 """
 assert source.count(old) == 1, "native-overflow mutation anchor is not unique"
@@ -86,6 +86,8 @@ else
   echo "M2 survived or infrastructure failed (rc=$rc)"
   exit 1
 fi
+cp "$BACKUP" "$F"
+purge_pycache
 
 # M3: replace the packet-selected repository with the legacy app default. The
 # unscoped docs packet must then fail its named target assertion.
@@ -120,6 +122,49 @@ else
   exit 1
 fi
 rm -f /tmp/gh581-m3.out
+
+# M4: map all reader failures as malformed at the transport boundary. Removing
+# the exhaustive mapping must fail both the task and read classification tests.
+DECODE_TASK_TEST=tests.test_bb_client.BoundedDecodingTest.test_reader_decode_failure_is_ambiguous_for_tasks
+DECODE_READ_TEST=tests.test_bb_client.BoundedDecodingTest.test_reader_decode_failure_is_malformed_for_reads
+purge_pycache
+if ! PYTHONDONTWRITEBYTECODE=1 $PY -m unittest "$DECODE_TASK_TEST" "$DECODE_READ_TEST" >/dev/null 2>&1; then
+  echo "DECODE BASELINE NOT GREEN — aborting"
+  exit 2
+fi
+$PY - "$F" <<'PY'
+import sys
+
+path = sys.argv[1]
+source = open(path, encoding="utf-8").read()
+old = """        except BbResponseReadError as exc:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                str(exc) or \"response could not be read\",
+            )
+"""
+new = """        except BbResponseReadError as exc:
+            return BbRefusal(REFUSAL_TRANSPORT_FAILED, str(exc) or \"response could not be read\")
+"""
+assert source.count(old) == 1, "reader-error mutation anchor is not unique"
+open(path, "w", encoding="utf-8").write(source.replace(old, new, 1))
+PY
+purge_pycache
+if PYTHONDONTWRITEBYTECODE=1 $PY -m unittest "$DECODE_TASK_TEST" "$DECODE_READ_TEST" >/tmp/gh586-m4.out 2>&1; then
+  rc=0
+else
+  rc=$?
+fi
+if [ "$rc" = 1 ] \
+  && grep -q 'failures=gh586_task_decode_must_be_ambiguous' /tmp/gh586-m4.out \
+  && grep -q 'failures=gh586_read_decode_must_be_malformed' /tmp/gh586-m4.out; then
+  echo "killed: M4 exhaustive-reader-error-mapping"
+else
+  echo "M4 survived or infrastructure failed (rc=$rc)"
+  cat /tmp/gh586-m4.out
+  exit 1
+fi
+rm -f /tmp/gh586-m4.out
 
 echo "ALL MUTATIONS KILLED"
 exit 0

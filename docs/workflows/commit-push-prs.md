@@ -352,6 +352,38 @@ exists only as the one Tier A fallback when that automatic trigger is absent;
 it permits exactly one full-audit request for the PR. The connector review is
 a final gate, never a design-discovery loop.
 
+### Merge race: settle a pushed head and re-check after merge
+
+The one-pass rule governs what the worker may **request**; it does not mean that
+no later connector artifact can arrive. A review can start after a push and land
+between the final inspection and the merge, so a fresh head must pass a bounded
+settle gate rather than a point-in-time diligence check.
+
+Before merging a head pushed during the current session, do one of these:
+
+1. Confirm that the reviewed artifact set contains a connector review whose
+   initiating `commit_id` equals the exact head to merge; or
+2. Run the existing watcher in bounded settle mode:
+
+   ```bash
+   python3 bin/pr_watch.py --repo <owner/name> --pr <N> \
+     --settle-after-push 60 --interval 15
+   ```
+
+   Preserve its JSON result with the review evidence. `review_seen` means an
+   exact-head connector review arrived and must go through the normal
+   adjudication/settle gate; `no_connector_review` includes the exact head and
+   `waited_seconds` and is the bounded proof that the window was observed.
+   A head change or a window with no successful snapshot fails closed.
+
+Re-check the exact head, merge state, and reviewed artifact set immediately
+before the merge. Immediately after merging, run `bin/pr_watch.py --once` once
+more against the PR. If a connector review now names the merged head, record a
+thread-linked adjudication and file the follow-up issue required by the finding;
+do not treat the late arrival as if it had not happened. This post-merge check
+does not authorize a second review request or retroactively make a raced merge
+clean.
+
 Use the mandatory one-pass GitHub Codex gate:
 
 - the orchestrator's local review and required project gates are mandatory

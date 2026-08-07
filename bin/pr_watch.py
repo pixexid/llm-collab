@@ -42,6 +42,7 @@ MAX_REACTION_COMMENTS = 30
 # deadline by hours. A single shared budget across the whole snapshot bounds the
 # cumulative page count, and the deadline is observed before every request.
 MAX_SNAPSHOT_PAGES = 80
+CONNECTOR_LOGINS = frozenset({"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"})
 
 
 class _Budget:
@@ -148,6 +149,21 @@ def _timeline_sig(timeline):
     ]
 
 
+def connector_review_oids(timeline):
+    """Return exact commit OIDs reviewed by the Codex connector."""
+    return sorted(
+        {
+            event["commit_id"]
+            for event in timeline
+            if event.get("event") == "reviewed"
+            and (event.get("user") or event.get("actor") or {}).get("login")
+            in CONNECTOR_LOGINS
+            and isinstance(event.get("commit_id"), str)
+            and event["commit_id"]
+        }
+    )
+
+
 def snapshot(repo, pr, deadline=None):
     """Return (signature_dict, raw) — one poll's worth of state. All gh calls
     share one page+deadline budget so the whole snapshot is bounded, not just
@@ -195,7 +211,8 @@ def snapshot(repo, pr, deadline=None):
 
     sig = {
         "state": state, "merged": merged, "head": sha,
-        "timeline": tl, "reactions": rx, "checks": checks,
+        "timeline": tl, "connector_review_oids": connector_review_oids(timeline),
+        "reactions": rx, "checks": checks,
     }
     return sig, {"timeline": timeline, "reactions": reactions}
 
@@ -214,6 +231,11 @@ def diff(old, new, raw_new):
     if old["checks"] != new["checks"]:
         changed = {k: v for k, v in new["checks"].items() if old["checks"].get(k) != v}
         out.append(f"checks: {changed}")
+    if old.get("connector_review_oids") != new.get("connector_review_oids"):
+        out.append(
+            "connector review OIDs: "
+            f"{new.get('connector_review_oids', [])}"
+        )
     if old["timeline"] != new["timeline"]:
         old_ids = {t[1] for t in old["timeline"]}
         fresh = [e for e in raw_new["timeline"] if (e.get("id") or e.get("sha")
@@ -229,6 +251,64 @@ def diff(old, new, raw_new):
     return out
 
 
+def settle_after_push(repo, pr, interval, timeout):
+    """Wait for a bounded post-push window without accepting a later head."""
+    base, _ = snapshot(repo, pr)
+    head = base["head"]
+    if head in base.get("connector_review_oids", []):
+        print(json.dumps({
+            "settle": "review_seen",
+            "head": head,
+            "waited_seconds": 0,
+            "connector_review_oids": base["connector_review_oids"],
+        }, indent=2))
+        return 0
+
+    started = time.monotonic()
+    deadline = started + timeout
+    last = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+        try:
+            current, _ = snapshot(repo, pr, deadline)
+        except RuntimeError as error:
+            print(f"WARN: {error}", file=sys.stderr)
+            continue
+        last = current
+        if current["head"] != head:
+            print(
+                json.dumps({
+                    "settle": "head_changed",
+                    "before": head,
+                    "after": current["head"],
+                }),
+                file=sys.stderr,
+            )
+            return 2
+        if head in current.get("connector_review_oids", []):
+            print(json.dumps({
+                "settle": "review_seen",
+                "head": head,
+                "waited_seconds": round(time.monotonic() - started, 3),
+                "connector_review_oids": current["connector_review_oids"],
+            }, indent=2))
+            return 0
+
+    if last is None:
+        print("ERROR: no successful post-push snapshot during settle window", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "settle": "no_connector_review",
+        "head": head,
+        "waited_seconds": round(time.monotonic() - started, 3),
+        "connector_review_oids": last.get("connector_review_oids", []),
+    }, indent=2))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pr", required=True)
@@ -238,7 +318,22 @@ def main():
     ap.add_argument("--timeout", type=float, default=1800.0)
     ap.add_argument("--once", action="store_true",
                     help="print the current signature and exit (no watching)")
+    ap.add_argument("--settle-after-push", type=float, metavar="SECONDS",
+                    help="wait a bounded post-push window for a connector review")
     args = ap.parse_args()
+
+    if args.once and args.settle_after_push is not None:
+        ap.error("--once and --settle-after-push are mutually exclusive")
+    if args.settle_after_push is not None:
+        if args.settle_after_push <= 0 or args.interval <= 0:
+            ap.error("--interval and --settle-after-push must both be > 0")
+        try:
+            return settle_after_push(
+                args.repo, args.pr, args.interval, args.settle_after_push
+            )
+        except RuntimeError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
 
     try:
         base, raw = snapshot(args.repo, args.pr)

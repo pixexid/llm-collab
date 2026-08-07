@@ -34,6 +34,7 @@ from llm_collab.bb_client import (
     BbThread,
     BbTransportResult,
     BbTransportTimeout,
+    BbResponseDecodeError,
     BbResponseTooLarge,
     _read_bounded,
     subprocess_transport,
@@ -499,6 +500,30 @@ class BoundedDecodingTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
+    def test_reader_decode_failure_is_ambiguous_for_tasks(self):
+        client, _ = spawning_client(
+            **{"thread spawn": BbResponseDecodeError("invalid native text")}
+        )
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal, "failures=gh586_task_decode_is_typed")
+        self.assertEqual(
+            REFUSAL_AMBIGUOUS,
+            outcome.reason,
+            "failures=gh586_task_decode_must_be_ambiguous",
+        )
+
+    def test_reader_decode_failure_is_malformed_for_reads(self):
+        client, _ = enabled_client(
+            {"thread show": BbResponseDecodeError("invalid native text")}
+        )
+        outcome = client.thread_state(SHOWN_THREAD)
+        self.assertIsInstance(outcome, BbRefusal, "failures=gh586_read_decode_is_typed")
+        self.assertEqual(
+            REFUSAL_MALFORMED_RESPONSE,
+            outcome.reason,
+            "failures=gh586_read_decode_must_be_malformed",
+        )
+
     def test_an_oversized_task_response_is_ambiguous_on_either_stream(self):
         """The size bound is checked before the exit code, so exit-0 reaches it.
 
@@ -888,3 +913,9 @@ class ProductionTransportTest(unittest.TestCase):
             1.0,
             "timeout returned only after the child released its reader pipes",
         )
+
+    def test_undecodable_reader_failure_is_typed_at_the_transport_boundary(self):
+        script = "import sys; sys.stdout.buffer.write(b'\\xff'); sys.stdout.flush()"
+        transport = subprocess_transport(self._python(script))
+        with self.assertRaises(BbResponseDecodeError):
+            transport([], 30.0)
