@@ -51,10 +51,22 @@ from _session_autobridge import (
 )
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Bootstrap an agent session.")
     p.add_argument("--agent", required=True, help="Your agent ID")
-    p.add_argument("--limit", type=int, default=5, help="Inbox items to show (default: 5)")
+    p.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=5,
+        help="Inbox items to show (default: 5)",
+    )
     p.add_argument("--no-watcher", action="store_true", help="Skip starting the inbox watcher")
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON summary")
     p.add_argument(

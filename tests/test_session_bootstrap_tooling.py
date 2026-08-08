@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +32,36 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import session_bootstrap
 import _session_autobridge as session_autobridge_lib
+
+
+class SessionBootstrapArgumentTest(unittest.TestCase):
+    def parse_limit(self, value: str):
+        with patch.object(
+            sys,
+            "argv",
+            ["session_bootstrap.py", "--agent", "claude", "--limit", value],
+        ):
+            return session_bootstrap.parse_args()
+
+    def test_negative_limit_is_rejected_during_argument_parsing(self) -> None:
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            self.parse_limit("-1")
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("argument --limit: must be a positive integer", stderr.getvalue())
+        self.assertNotIn("No unread messages", stderr.getvalue())
+
+    def test_positive_limit_is_accepted(self) -> None:
+        self.assertEqual(5, self.parse_limit("5").limit)
+
+    def test_zero_limit_is_rejected_during_argument_parsing(self) -> None:
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            self.parse_limit("0")
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("argument --limit: must be a positive integer", stderr.getvalue())
 
 
 def completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
