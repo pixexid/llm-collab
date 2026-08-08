@@ -19,6 +19,14 @@ sys.path.insert(0, str(ROOT / "bin"))
 import watch_inbox  # noqa: E402
 import _session_autobridge as session_autobridge  # noqa: E402
 import llm_collab.bb_managed_start as bb_managed_start  # noqa: E402
+from llm_collab.bb_client import (  # noqa: E402
+    PINNED_BB_VERSION,
+    BbClient,
+    BbRefusal,
+    BbTransportResult,
+    BbTransportTimeout,
+    subprocess_transport,
+)
 
 
 class BbWatcherBootstrapTest(unittest.TestCase):
@@ -461,7 +469,10 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             watch_inbox.LedgerStore, "open_writer", return_value=nullcontext(store)
         ), patch(
             "llm_collab.bb_continuation.client_from_project",
-            return_value=SimpleNamespace(_transport=lambda *_args: None),
+            return_value=SimpleNamespace(
+                _transport=lambda *_args: None,
+                events_after=lambda *_args, **_kwargs: None,
+            ),
         ), patch(
             "llm_collab.bb_continuation.observe_bb_thread", return_value=result
         ) as observe, patch.object(watch_inbox, "emit"):
@@ -621,6 +632,19 @@ class BbWatcherBreakerTest(unittest.TestCase):
             receipt_id=None,
         )
 
+    @classmethod
+    def observe_real_events_after(cls, _store, *, client, **_kwargs):
+        page = client.events_after("thread-one", 0)
+        return cls.observation("ambiguous" if isinstance(page, BbRefusal) else "idle")
+
+    @staticmethod
+    def version_ok() -> BbTransportResult:
+        return BbTransportResult(
+            0,
+            json.dumps({"currentVersion": PINNED_BB_VERSION}),
+            "",
+        )
+
     def observation_patches(self, clients, emitted, observe):
         return (
             patch.object(watch_inbox, "bb_bootstrap_enabled", return_value=True),
@@ -646,7 +670,6 @@ class BbWatcherBreakerTest(unittest.TestCase):
         )
 
     def test_tripped_breaker_blocks_concurrent_popen_entries(self) -> None:
-        from llm_collab.bb_client import BbTransportTimeout, subprocess_transport
         import llm_collab.bb_client as bb_client
 
         entries: list[int] = []
@@ -666,17 +689,11 @@ class BbWatcherBreakerTest(unittest.TestCase):
                 return 0
 
         transport = subprocess_transport(["fake-bb"])
-        clients = [SimpleNamespace(_transport=transport) for _ in range(10)]
+        clients = [BbClient(transport, enabled=True, timeout_seconds=0.02) for _ in range(10)]
         emitted: list[dict] = []
-
-        def observe(_store, *, client, **_kwargs):
-            try:
-                client._transport(["thread", "log"], 0.02)
-            except BbTransportTimeout:
-                return self.observation("ambiguous")
-            return self.observation("idle")
-
-        patches = self.observation_patches(clients, emitted, observe)
+        patches = self.observation_patches(
+            clients, emitted, self.observe_real_events_after
+        )
         before_threads = set(threading.enumerate())
         try:
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patch.object(
@@ -722,37 +739,71 @@ class BbWatcherBreakerTest(unittest.TestCase):
                 if thread not in before_threads and thread.name == "bb-subprocess-launch":
                     thread.join(timeout=1)
 
-    def test_inflight_success_after_trip_resets_and_isolated_timeout_does_not_trip(self) -> None:
-        from llm_collab.bb_client import BbTransportResult, BbTransportTimeout
+    def test_real_events_after_trips_on_second_log_timeout(self) -> None:
+        calls: list[tuple[str, str]] = []
+        emitted: list[dict] = []
 
+        def version_then_log_timeout(argv, _timeout):
+            calls.append(tuple(argv[:2]))
+            if argv[:2] == ["settings", "version"]:
+                return self.version_ok()
+            raise BbTransportTimeout("thread log stalled")
+
+        clients = [
+            BbClient(version_then_log_timeout, enabled=True),
+            BbClient(version_then_log_timeout, enabled=True),
+        ]
+        patches = self.observation_patches(
+            clients, emitted, self.observe_real_events_after
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+            self.assertFalse(watch_inbox._observe_bb_session(self.session(), False))
+            self.assertEqual(1, watch_inbox._bb_timeout_streaks["bb-session-one"])
+            self.assertTrue(
+                watch_inbox._observe_bb_session(self.session(), False),
+                "failures=gh597_real_events_after_never_opened_breaker",
+            )
+
+        self.assertEqual(
+            [
+                ("settings", "version"),
+                ("thread", "log"),
+                ("settings", "version"),
+                ("thread", "log"),
+            ],
+            calls,
+        )
+        self.assertEqual(2, watch_inbox._bb_timeout_streaks["bb-session-one"])
+        self.assertEqual(
+            1,
+            sum(event.get("event") == "bb_breaker_open" for event in emitted),
+        )
+
+    def test_inflight_success_after_trip_resets_and_isolated_timeout_does_not_trip(self) -> None:
         success_started = threading.Event()
         release_success = threading.Event()
         emitted: list[dict] = []
 
-        def late_success(_argv, _timeout):
+        def late_success(argv, _timeout):
+            if argv[:2] == ["settings", "version"]:
+                return self.version_ok()
             success_started.set()
             release_success.wait()
-            return BbTransportResult(0, "", "")
+            return BbTransportResult(0, "[]", "")
 
         def timeout(_argv, _timeout):
             raise BbTransportTimeout("stalled")
 
         clients = [
-            SimpleNamespace(_transport=late_success),
-            SimpleNamespace(_transport=timeout),
-            SimpleNamespace(_transport=timeout),
-            SimpleNamespace(_transport=timeout),
-            SimpleNamespace(_transport=timeout),
+            BbClient(late_success, enabled=True),
+            BbClient(timeout, enabled=True),
+            BbClient(timeout, enabled=True),
+            BbClient(timeout, enabled=True),
+            BbClient(timeout, enabled=True),
         ]
-
-        def observe(_store, *, client, **_kwargs):
-            try:
-                client._transport(["thread", "log"], 1)
-            except BbTransportTimeout:
-                return self.observation("ambiguous")
-            return self.observation("idle")
-
-        patches = self.observation_patches(clients, emitted, observe)
+        patches = self.observation_patches(
+            clients, emitted, self.observe_real_events_after
+        )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
             success_result: list[bool] = []
             success_thread = threading.Thread(
@@ -781,7 +832,6 @@ class BbWatcherBreakerTest(unittest.TestCase):
             )
 
     def test_keyboard_interrupt_passes_through_unchanged(self) -> None:
-        from llm_collab.bb_client import subprocess_transport
         import llm_collab.bb_client as bb_client
 
         interrupt = KeyboardInterrupt("operator interrupt")
@@ -794,13 +844,10 @@ class BbWatcherBreakerTest(unittest.TestCase):
 
         transport = subprocess_transport(["fake-bb"])
         emitted: list[dict] = []
-
-        def observe(_store, *, client, **_kwargs):
-            client._transport(["thread", "log"], 1)
-            return self.observation("idle")
-
         patches = self.observation_patches(
-            [SimpleNamespace(_transport=transport)], emitted, observe
+            [BbClient(transport, enabled=True)],
+            emitted,
+            self.observe_real_events_after,
         )
         try:
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patch.object(

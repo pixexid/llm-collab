@@ -84,7 +84,7 @@ from llm_collab.bb_bootstrap import (
     plan_bootstrap,
     resolve_bootstrap_repo_id,
 )
-from llm_collab.bb_client import BbTransportTimeout
+from llm_collab.bb_client import BbEventPage, BbTransportTimeout
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 
@@ -731,6 +731,7 @@ def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> bool:
         and _bb_timeout_streaks.get(session_id, 0) >= _BB_BREAKER_TIMEOUTS
     ):
         return True
+    observation_succeeded = False
     try:
         from llm_collab.bb_continuation import client_from_project, observe_bb_thread
 
@@ -756,10 +757,18 @@ def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> bool:
                             json_output,
                         )
                     raise
-                _bb_timeout_streaks.pop(session_id, None)
                 return result
 
             client._transport = breaker_transport
+            events_after = client.events_after
+
+            def breaker_events_after(*args, **kwargs):
+                nonlocal observation_succeeded
+                page = events_after(*args, **kwargs)
+                observation_succeeded = isinstance(page, BbEventPage)
+                return page
+
+            client.events_after = breaker_events_after
         paths = LedgerPaths.derive(project_state_root(), workspace_id)
         with LedgerStore.open_writer(paths) as store:
             result = observe_bb_thread(
@@ -768,6 +777,8 @@ def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> bool:
                 session=session,
                 observed_at_utc=utc_now_str(),
             )
+        if observation_succeeded:
+            _bb_timeout_streaks.pop(session_id, None)
     except Exception as error:
         emit(
             {
