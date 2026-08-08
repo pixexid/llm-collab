@@ -663,3 +663,116 @@ class RewriteBetweenReadAndRecordTest(unittest.TestCase):
             set(),
             watch_inbox.terminal_refusal_paths(progress, ["app"], "llm-collab", None, None),
         )
+
+
+class PerActionRecheckIdentityTest(unittest.TestCase):
+    PACKET = b"---\nproject_id: llm-collab\nrepo_targets: [other]\n---\nbody\n"
+
+    def _recorded_refusal(
+        self,
+        read_mtime: float | None,
+        later_mtime: float,
+        *,
+        packet: bytes | None = None,
+        read_error: Exception | None = None,
+    ):
+        import tempfile
+        from unittest.mock import patch
+
+        packet = self.PACKET if packet is None else packet
+
+        def read_packet(*_args):
+            if read_error is not None:
+                raise read_error
+            return packet, read_mtime
+
+        relative_path = "Chats/x/p.md"
+        session = {"session_id": "SESSION-A", "repo_targets": ["app"]}
+        action = {
+            "effective_action": "runtime_trigger",
+            "message_path": relative_path,
+            "runtime_result": {"returncode": 0},
+        }
+        progress: dict = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packet_path = root / relative_path
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet)
+            with patch.object(
+                watch_inbox, "ROOT", root
+            ), patch.object(
+                watch_inbox, "_bootstrap_bb_before_dispatch", return_value=[]
+            ), patch.object(
+                watch_inbox, "autobridge_session_ids", return_value=["SESSION-A"]
+            ), patch.object(
+                watch_inbox, "load_session", return_value=session
+            ), patch.object(
+                watch_inbox, "session_has_exact_canonical_binding", return_value=True
+            ), patch.object(
+                watch_inbox, "_observe_bb_session"
+            ), patch.object(
+                watch_inbox,
+                "dispatch_session",
+                return_value={"actions": [action], "repo_scope_refused": []},
+            ), patch.object(
+                watch_inbox, "runtime_delivery_accepted", return_value=True
+            ), patch.object(
+                watch_inbox,
+                "read_regular_file_bounded_with_identity",
+                side_effect=read_packet,
+            ), patch.object(
+                watch_inbox, "_packet_mtime", return_value=later_mtime
+            ), patch.object(
+                watch_inbox, "emit"
+            ), patch.object(
+                watch_inbox, "mark_messages_read"
+            ) as mark_read:
+                consumed = watch_inbox.dispatch_autobridge(
+                    "claude",
+                    False,
+                    project_id="llm-collab",
+                    repo_targets=["app"],
+                    refusal_progress=progress,
+                )
+                terminal = watch_inbox.terminal_refusal_paths(
+                    progress,
+                    ["app"],
+                    "llm-collab",
+                    "SESSION-A",
+                    ["app"],
+                )
+
+        self.assertEqual([], consumed)
+        mark_read.assert_not_called()
+        entry = progress[watch_inbox.progress_key("SESSION-A", relative_path)]
+        self.assertEqual("route_ambiguous", entry["reason"])
+        return entry, terminal, relative_path
+
+    def test_stable_post_read_rewrite_does_not_record_the_later_identity(self) -> None:
+        entry, terminal, _ = self._recorded_refusal(100.0, 200.0)
+
+        self.assertEqual(100.0, entry["mtime"])
+        self.assertEqual(set(), terminal)
+
+    def test_ordinary_read_records_the_identity_matching_the_parsed_bytes(self) -> None:
+        entry, terminal, path = self._recorded_refusal(100.0, 100.0)
+
+        self.assertEqual(100.0, entry["mtime"])
+        self.assertEqual({path}, terminal)
+
+    def test_read_failure_does_not_fallback_to_a_fresh_path_identity(self) -> None:
+        entry, terminal, _ = self._recorded_refusal(
+            None,
+            200.0,
+            read_error=watch_inbox.UnreadableFile("read failed"),
+        )
+
+        self.assertIsNone(entry["mtime"])
+        self.assertEqual(set(), terminal)
+
+    def test_parse_failure_keeps_the_read_descriptor_identity(self) -> None:
+        entry, terminal, _ = self._recorded_refusal(100.0, 200.0, packet=b"\xff")
+
+        self.assertEqual(100.0, entry["mtime"])
+        self.assertEqual(set(), terminal)

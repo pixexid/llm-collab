@@ -45,6 +45,7 @@ from _helpers import (
     resolve_project_repo_path,
 )
 from _session_autobridge import (
+    MAX_DISPATCH_PACKET_BYTES,
     CanonicalBindingNativeMismatch,
     UnreadableFile,
     _repo_package_root,
@@ -54,6 +55,7 @@ from _session_autobridge import (
     dispatch_session,
     execute_bb_bootstrap_plan,
     read_regular_file_bounded,
+    read_regular_file_bounded_with_identity,
     iter_sessions,
     load_session,
     repo_scope_matches,
@@ -752,7 +754,15 @@ def dispatch_autobridge(
     progress = refusal_progress if refusal_progress is not None else {}
     stats = refusal_stats if refusal_stats is not None else {}
 
-    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None, packet_mtime=None) -> bool:
+    def record_refusal(
+        path: str,
+        reason: str,
+        packet_repo_targets=None,
+        packet_project=None,
+        session_scope=None,
+        packet_mtime=None,
+        track_packet_mtime=True,
+    ) -> bool:
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
         return record_refusal_progress(
@@ -767,6 +777,7 @@ def dispatch_autobridge(
             packet_project=packet_project,
             session_scope=session_scope,
             packet_mtime=packet_mtime,
+            track_packet_mtime=track_packet_mtime,
         )
 
     bootstrap_consumed = _bootstrap_bb_before_dispatch(
@@ -902,12 +913,15 @@ def dispatch_autobridge(
                 effective_repo_targets = repo_targets
                 message_path = ROOT / action["message_path"]
                 frontmatter: dict = {}
-                observed_mtime = _packet_mtime(action["message_path"])
+                observed_mtime = None
                 if effective_repo_targets is None:
                     repo_match, repo_reason = True, "unscoped"
                 else:
                     try:
-                        frontmatter, _ = parse_frontmatter(message_path.read_text())
+                        message_raw, observed_mtime = read_regular_file_bounded_with_identity(
+                            message_path, MAX_DISPATCH_PACKET_BYTES
+                        )
+                        frontmatter, _ = parse_frontmatter(message_raw.decode("utf-8"))
                         repo_match, repo_reason = repo_scope_matches(
                             effective_repo_targets,
                             frontmatter.get("repo_targets"),
@@ -926,6 +940,7 @@ def dispatch_autobridge(
                         packet_project=frontmatter.get("project_id"),
                         session_scope=session_scope,
                         packet_mtime=observed_mtime,
+                        track_packet_mtime=observed_mtime is not None,
                     ):
                         emit(
                             {
