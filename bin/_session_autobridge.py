@@ -4820,7 +4820,16 @@ def dispatch_session(
                     message["path"],
                     prepared=prepared_result,
                 )
-        append_event(session_id, event)
+        try:
+            append_event(session_id, event)
+        except Exception as error:
+            if not should_mark_processed:
+                raise
+            event["diagnostic_error"] = {
+                "operation": "append_event",
+                "error_type": type(error).__name__,
+                "detail": str(error),
+            }
         actions.append(event)
 
     for refusal in repo_scope_refusals:

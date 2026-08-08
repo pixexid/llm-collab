@@ -1375,7 +1375,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             prepared=prepared,
         )
 
-    def test_dispatch_event_failure_after_success_does_not_redispatch(self):
+    def test_watch_inbox_event_failure_after_success_returns_receipt_without_redispatch(self):
         session = {
             "session_id": "SESSION-EVENT-FAILURE",
             "agent_id": "gemini",
@@ -1384,11 +1384,20 @@ class SessionAutobridgeTest(unittest.TestCase):
             "runtime": {"family": "gemini_cli", "session_id": "runtime-event-failure"},
         }
         message = {"path": "Chats/event-failure/packet.md", "frontmatter": {}}
-        runtime_trigger = Mock(return_value={"returncode": 0})
+        runtime_trigger = Mock(
+            return_value={"returncode": 0, "delivery_accepted": True}
+        )
+        returned_actions = []
+        watcher_events = []
 
         def settle(payload, _path, *, prepared=None):
             payload.clear()
             payload.update(prepared[0])
+
+        def dispatch(*args, **kwargs):
+            result = session_autobridge_lib.dispatch_session(*args, **kwargs)
+            returned_actions.extend(result["actions"])
+            return result
 
         with self._dispatch_patch_context(session, [message]), patch.object(
             session_autobridge_lib,
@@ -1401,14 +1410,55 @@ class SessionAutobridgeTest(unittest.TestCase):
         ), patch.object(
             session_autobridge_lib,
             "append_event",
-            side_effect=[OSError("event fsync failed"), None],
-        ):
-            with self.assertRaisesRegex(OSError, "event fsync failed"):
-                session_autobridge_lib.dispatch_session("SESSION-EVENT-FAILURE")
-            second = session_autobridge_lib.dispatch_session("SESSION-EVENT-FAILURE")
+            side_effect=OSError("event fsync failed"),
+        ), patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=["SESSION-EVENT-FAILURE"],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            side_effect=dispatch,
+        ), patch.object(
+            watch_inbox_lib,
+            "emit",
+            side_effect=lambda event, _json: watcher_events.append(event),
+        ), patch.object(
+            watch_inbox_lib,
+            "mark_messages_read",
+        ) as mark_read:
+            first = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+            second = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
 
         self.assertIn(message["path"], session["processed_messages"])
-        self.assertEqual([], second["actions"])
+        self.assertEqual([message["path"]], first)
+        self.assertEqual([], second)
+        self.assertEqual(1, len(returned_actions))
+        self.assertEqual(
+            {
+                "operation": "append_event",
+                "error_type": "OSError",
+                "detail": "event fsync failed",
+            },
+            returned_actions[0]["diagnostic_error"],
+        )
+        consumed = [
+            event for event in watcher_events if event["event"] == "autobridge_consumed"
+        ]
+        self.assertEqual(1, len(consumed))
+        self.assertEqual(
+            returned_actions[0]["diagnostic_error"],
+            consumed[0]["diagnostic_error"],
+        )
+        mark_read.assert_called_once_with("gemini", [message["path"]])
         runtime_trigger.assert_called_once_with(session, message)
 
     def test_leased_dispatch_still_settles_before_event_failure(self):
@@ -1450,16 +1500,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         ), patch.object(
             session_autobridge_lib,
             "append_event",
-            side_effect=[OSError("event fsync failed"), None],
+            side_effect=OSError("event fsync failed"),
         ):
-            with self.assertRaisesRegex(OSError, "event fsync failed"):
-                session_autobridge_lib.dispatch_session("SESSION-LEASED-EVENT-FAILURE")
+            first = session_autobridge_lib.dispatch_session(
+                "SESSION-LEASED-EVENT-FAILURE"
+            )
             second = session_autobridge_lib.dispatch_session(
                 "SESSION-LEASED-EVENT-FAILURE"
             )
 
         self.assertIn("mark_message_processed", fenced_boundaries)
         self.assertIn(message["path"], session["processed_messages"])
+        self.assertEqual("OSError", first["actions"][0]["diagnostic_error"]["error_type"])
         self.assertEqual([], second["actions"])
         runtime_trigger.assert_called_once_with(session, message)
 
