@@ -25,7 +25,7 @@ from llm_collab.spawn_gate import (  # noqa: E402
     Attached,
     GateRefusal,
     NewWorktree,
-    _post_spawn_refusal,
+    _classify_spawn_failure,
     persist_assignment,
     plan_spawn,
 )
@@ -132,7 +132,10 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     except BaseException as error:
-        refusal = _post_spawn_refusal(error, outcome)
+        refusal, retryable = _classify_spawn_failure(error, outcome)
+        if retryable:
+            _emit(f"REFUSED: {refusal.reason}: {refusal.detail}")
+            return 1
         identity = (
             f" native_thread_id={refusal.native_thread_id}"
             if refusal.native_thread_id is not None

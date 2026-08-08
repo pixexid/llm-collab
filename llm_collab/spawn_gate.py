@@ -69,7 +69,7 @@ class SpawnPlan:
             raise TypeError("SpawnPlan values must be produced by plan_spawn")
 
 
-class _PostSpawnFailure(RuntimeError):
+class _ReturnedSpawnRefusal(RuntimeError):
     def __init__(self, refusal: BbRefusal) -> None:
         super().__init__(refusal.detail)
         self.refusal = refusal
@@ -227,7 +227,7 @@ def plan_spawn(
 
 def _post_spawn_refusal(error: BaseException, outcome: object) -> BbRefusal:
     """The one surface for every failure after the spawn phase begins."""
-    if isinstance(error, _PostSpawnFailure):
+    if isinstance(error, _ReturnedSpawnRefusal):
         return error.refusal
     native_id = (
         outcome.thread_id
@@ -242,11 +242,24 @@ def _post_spawn_refusal(error: BaseException, outcome: object) -> BbRefusal:
             REFUSAL_ORPHANED_THREAD,
             f"bb thread {native_id} exists but assignment completion failed: {detail}",
             native_thread_id=native_id,
+            task_attempted=True,
         )
     return BbRefusal(
         REFUSAL_AMBIGUOUS,
         f"assignment completion failed: {detail}; a bb thread may exist",
     )
+
+
+def _classify_spawn_failure(
+    error: BaseException, outcome: object
+) -> tuple[BbRefusal, bool]:
+    """Return the refusal and whether no task call is proven (safe to retry)."""
+    refusal = _post_spawn_refusal(error, outcome)
+    retryable = (
+        isinstance(error, _ReturnedSpawnRefusal)
+        and refusal.task_attempted is False
+    )
+    return refusal, retryable
 
 
 def persist_assignment(
@@ -256,13 +269,13 @@ def persist_assignment(
     *,
     write_durably: Callable[[Path, str], None],
 ) -> Path:
-    """Persist the one attested assignment record, or raise a post-spawn failure."""
+    """Persist an attested assignment, or surface the client's classified refusal."""
     if isinstance(outcome, BbRefusal):
-        raise _PostSpawnFailure(outcome)
+        raise _ReturnedSpawnRefusal(outcome)
     thread_id = outcome.thread_id
     if not thread_id or "/" in thread_id or "\0" in thread_id or thread_id in {".", ".."}:
         error = ValueError(f"native thread id {thread_id!r} is not a safe filename segment")
-        raise _PostSpawnFailure(_post_spawn_refusal(error, outcome))
+        raise _ReturnedSpawnRefusal(_post_spawn_refusal(error, outcome))
 
     requested_profile = {
         "provider": plan.profile.provider,

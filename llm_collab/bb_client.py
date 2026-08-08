@@ -90,11 +90,17 @@ class BbRefusal:
     ``native_thread_id`` is set only when a real bb thread was created and then
     refused. That case is not retryable and not a clean failure: the id is the
     evidence a caller needs to reconcile the orphan.
+
+    ``task_attempted`` is set by task-bearing operations when their return path
+    knows which side of the native call it is on. False proves no task call was
+    made; true means the task call was attempted and retry must be suppressed.
+    None means this refusal does not carry that operation-specific proof.
     """
 
     reason: str
     detail: str
     native_thread_id: str | None = None
+    task_attempted: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -358,14 +364,25 @@ class BbClient:
         a thread exists, any later refusal is an ORPHAN carrying its native id,
         never a clean failure a caller might retry.
         """
+        def classified(refusal: BbRefusal, *, task_attempted: bool) -> BbRefusal:
+            return BbRefusal(
+                refusal.reason,
+                refusal.detail,
+                native_thread_id=refusal.native_thread_id,
+                task_attempted=task_attempted,
+            )
+
+        if environment is not None and base_sha is not None:
+            return classified(
+                BbRefusal(
+                    REFUSAL_MALFORMED_RESPONSE,
+                    "spawn cannot attach an environment and create a worktree together",
+                ),
+                task_attempted=False,
+            )
         refusal = self._gate()
         if refusal is not None:
-            return refusal
-        if environment is not None and base_sha is not None:
-            return BbRefusal(
-                REFUSAL_MALFORMED_RESPONSE,
-                "spawn cannot attach an environment and create a worktree together",
-            )
+            return classified(refusal, task_attempted=False)
         argv = [
             "thread",
             "spawn",
@@ -389,7 +406,7 @@ class BbClient:
         argv += ["--prompt", prompt, "--json"]
         payload = self._task_json(argv)
         if isinstance(payload, BbRefusal):
-            return payload
+            return classified(payload, task_attempted=True)
         # Read the native id BEFORE full validation. bb has already created the
         # thread by the time this envelope exists, so a refusal on any other
         # field must still carry the id — otherwise a real thread is reported as
@@ -404,11 +421,17 @@ class BbClient:
             # caller can reconcile; without one there is nothing to reconcile
             # against and the only honest answer is that we cannot tell.
             if spawned_id is None:
-                return BbRefusal(
-                    REFUSAL_AMBIGUOUS,
-                    f"{detail}; no native id was recoverable, so the thread may exist",
+                return classified(
+                    BbRefusal(
+                        REFUSAL_AMBIGUOUS,
+                        f"{detail}; no native id was recoverable, so the thread may exist",
+                    ),
+                    task_attempted=True,
                 )
-            return BbRefusal(reason, detail, native_thread_id=spawned_id)
+            return classified(
+                BbRefusal(reason, detail, native_thread_id=spawned_id),
+                task_attempted=True,
+            )
 
         thread = self.validate_spawn_envelope(payload)
         if isinstance(thread, BbRefusal):

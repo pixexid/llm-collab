@@ -17,6 +17,7 @@ import bb_spawn  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     REFUSAL_IDENTITY_MISMATCH,
     REFUSAL_ORPHANED_THREAD,
+    REFUSAL_VERSION_MISMATCH,
     BbClient,
     BbProfile,
     BbRefusal,
@@ -257,6 +258,33 @@ def bb_transport(*, environment_id: str = "env_expected"):
 
 
 class BbClientSpawnOptionsTest(unittest.TestCase):
+    def test_pre_task_refusals_prove_no_spawn_call_was_attempted(self) -> None:
+        calls = []
+
+        def wrong_version(argv, _timeout):  # noqa: ANN001 - transport protocol
+            calls.append(list(argv))
+            return BbTransportResult(0, '{"currentVersion":"0.36.0"}', "")
+
+        version = BbClient(wrong_version, enabled=True).spawn(
+            project_id="proj_llm_collab", prompt="audit", profile=PROFILE
+        )
+        self.assertIsInstance(version, BbRefusal)
+        self.assertEqual(REFUSAL_VERSION_MISMATCH, version.reason)
+        self.assertIs(version.task_attempted, False)
+        self.assertEqual([["settings", "version", "--json"]], calls)
+
+        no_calls = mock.Mock()
+        conflict = BbClient(no_calls, enabled=True).spawn(
+            project_id="proj_llm_collab",
+            prompt="audit",
+            profile=PROFILE,
+            environment="env_one",
+            base_sha=SHA,
+        )
+        self.assertIsInstance(conflict, BbRefusal)
+        self.assertIs(conflict.task_attempted, False)
+        no_calls.assert_not_called()
+
     def test_attached_environment_mismatch_is_orphaned(self) -> None:
         transport, _ = bb_transport(environment_id="env_wrong")
         outcome = BbClient(transport, enabled=True).spawn(
@@ -268,6 +296,7 @@ class BbClientSpawnOptionsTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
         self.assertEqual("thr_worker1", outcome.native_thread_id)
+        self.assertIs(outcome.task_attempted, True)
 
     def test_new_worktree_options_are_additive_to_the_existing_spawn_call(self) -> None:
         transport, calls = bb_transport()
@@ -308,6 +337,49 @@ class CliPhaseTest(unittest.TestCase):
             self.assertEqual(1, bb_spawn.main(CLI_ARGS))
         client.assert_not_called()
         emit.assert_called_once_with("REFUSED: invalid_base_sha: branch name")
+
+    def test_client_pre_execution_refusal_is_retryable_exit_one(self) -> None:
+        plan = planned()
+        self.assertIsInstance(plan, SpawnPlan)
+        client = mock.Mock()
+        client.spawn.return_value = BbRefusal(
+            REFUSAL_VERSION_MISMATCH,
+            "upgrade bb",
+            task_attempted=False,
+        )
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path("/state")
+        ), mock.patch.object(bb_spawn, "BbClient", return_value=client), mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            self.assertEqual(1, bb_spawn.main(CLI_ARGS))
+        rendered = emit.call_args.args[0]
+        self.assertEqual("REFUSED: bb_version_mismatch: upgrade bb", rendered)
+        self.assertNotIn("thread may exist", rendered)
+
+    def test_client_post_execution_refusal_is_exit_two_with_identity(self) -> None:
+        plan = planned()
+        self.assertIsInstance(plan, SpawnPlan)
+        client = mock.Mock()
+        client.spawn.return_value = BbRefusal(
+            REFUSAL_IDENTITY_MISMATCH,
+            "wrong environment",
+            native_thread_id="thr_worker1",
+            task_attempted=True,
+        )
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path("/state")
+        ), mock.patch.object(bb_spawn, "BbClient", return_value=client), mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            self.assertEqual(2, bb_spawn.main(CLI_ARGS))
+        rendered = emit.call_args.args[0]
+        self.assertIn("DO NOT RETRY", rendered)
+        self.assertIn("native_thread_id=thr_worker1", rendered)
 
     def test_success_output_failure_is_retry_suppressed_exit_two(self) -> None:
         plan = planned()
