@@ -916,6 +916,13 @@ def dispatch_autobridge(
         )
 
         for action in result["actions"]:
+            action_event = {
+                "ts": utc_now_str(),
+                "detail": action["message_path"],
+                "agent": agent_id,
+                "session_id": session_id,
+                "message_path": action["message_path"],
+            }
             runtime_result = action.get("runtime_result") or {}
             runtime_ok = runtime_result.get("returncode") == 0
             if (
@@ -970,46 +977,28 @@ def dispatch_autobridge(
                         )
                     continue
                 consumed_paths.append(action["message_path"])
-                consumed_event = {
-                    "ts": utc_now_str(),
-                    "event": "autobridge_consumed",
-                    "detail": action["message_path"],
-                    "agent": agent_id,
-                    "session_id": session_id,
-                    "message_path": action["message_path"],
-                }
-                if action.get("diagnostic_errors"):
-                    consumed_event["diagnostic_errors"] = action["diagnostic_errors"]
-                emit(consumed_event, json_output)
+                action_event["event"] = "autobridge_consumed"
             elif (
                 action.get("effective_action") == "runtime_trigger"
                 and runtime_ok
                 and not runtime_result.get("skipped")
             ):
-                emit(
-                    {
-                        "ts": utc_now_str(),
-                        "event": "autobridge_wake_signaled",
-                        "detail": action["message_path"],
-                        "agent": agent_id,
-                        "session_id": session_id,
-                        "message_path": action["message_path"],
-                    },
-                    json_output,
-                )
+                action_event["event"] = "autobridge_wake_signaled"
             elif action.get("effective_action") == "runtime_trigger":
-                emit(
-                    {
-                        "ts": utc_now_str(),
-                        "event": "autobridge_failed",
-                        "detail": action["message_path"],
-                        "agent": agent_id,
-                        "session_id": session_id,
-                        "message_path": action["message_path"],
-                        "returncode": runtime_result.get("returncode"),
-                    },
-                    json_output,
+                action_event.update(
+                    event="autobridge_failed",
+                    returncode=runtime_result.get("returncode"),
                 )
+            elif action.get("diagnostic_errors"):
+                action_event.update(
+                    event="autobridge_diagnostic_error",
+                    effective_action=action.get("effective_action"),
+                )
+            else:
+                continue
+            if action.get("diagnostic_errors"):
+                action_event["diagnostic_errors"] = action["diagnostic_errors"]
+            emit(action_event, json_output)
     # Marking belongs OUTSIDE the per-session loop. Inside it, any session that
     # took an early `continue` -- which is exactly what a bootstrap-only delivery
     # does, because the session it just published already lists the packet in

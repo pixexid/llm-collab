@@ -1464,6 +1464,127 @@ class SessionAutobridgeTest(unittest.TestCase):
         mark_read.assert_called_once_with("gemini", [message["path"]])
         runtime_trigger.assert_called_once_with(session, message)
 
+    def _settled_action_diagnostic_report(
+        self, effective_action, *, runtime_result=None
+    ):
+        session = {
+            "session_id": f"SESSION-{effective_action.upper()}",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": (
+                "runtime_trigger" if effective_action == "runtime_trigger" else "notify"
+            ),
+            "runtime": {
+                "family": "gemini_cli",
+                "session_id": f"runtime-{effective_action}",
+            },
+        }
+        message = {
+            "path": f"Chats/{effective_action}/packet.md",
+            "frontmatter": {},
+        }
+        watcher_events = []
+
+        def settle(payload, _path, *, prepared=None):
+            payload.clear()
+            payload.update(prepared[0])
+
+        def fenced(_session, _message, *, boundary, mutation):
+            return True, None, mutation()
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "resolve_effective_action",
+            return_value=(effective_action, "test"),
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            return_value=runtime_result or {"returncode": 0},
+        ), patch.object(
+            session_autobridge_lib,
+            "activation_fenced_mutation",
+            side_effect=fenced,
+        ), patch.object(
+            session_autobridge_lib,
+            "create_relay_prompt",
+            return_value={"prompt_path": "relay.md"},
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            side_effect=settle,
+        ), patch.object(
+            session_autobridge_lib,
+            "append_event",
+            side_effect=OSError(f"{effective_action} event fsync failed"),
+        ):
+            result = session_autobridge_lib.dispatch_session(session["session_id"])
+
+        with patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=[session["session_id"]],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            return_value=result,
+        ), patch.object(
+            watch_inbox_lib,
+            "emit",
+            side_effect=lambda event, _json: watcher_events.append(event),
+        ), patch.object(watch_inbox_lib, "mark_messages_read") as mark_read:
+            consumed = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+
+        return session, message, result, watcher_events, consumed, mark_read
+
+    def test_settled_wake_reports_diagnostic_failure(self):
+        session, message, result, watcher_events, consumed, mark_read = (
+            self._settled_action_diagnostic_report(
+                "runtime_trigger",
+                runtime_result={"returncode": 0, "delivery_accepted": False},
+            )
+        )
+        self.assertEqual([], consumed)
+        self.assertIn(message["path"], session["processed_messages"])
+        wake = next(
+            event
+            for event in watcher_events
+            if event["event"] == "autobridge_wake_signaled"
+        )
+        self.assertEqual(
+            result["actions"][0]["diagnostic_errors"], wake["diagnostic_errors"]
+        )
+        mark_read.assert_not_called()
+
+    def test_settled_nonruntime_actions_report_diagnostic_failure(self):
+        reported = {}
+        expected = {}
+        for effective_action in ("relay_prompt", "notify_only", "manual_noop"):
+            with self.subTest(effective_action=effective_action):
+                session, message, result, watcher_events, consumed, mark_read = (
+                    self._settled_action_diagnostic_report(effective_action)
+                )
+
+                self.assertEqual([], consumed)
+                self.assertIn(message["path"], session["processed_messages"])
+                diagnostic = next(
+                    event
+                    for event in watcher_events
+                    if event["event"] == "autobridge_diagnostic_error"
+                )
+                self.assertEqual(effective_action, diagnostic["effective_action"])
+                expected[effective_action] = result["actions"][0]["diagnostic_errors"]
+                reported[effective_action] = diagnostic.get("diagnostic_errors")
+                mark_read.assert_not_called()
+        self.assertEqual(expected, reported)
+
     def test_leased_dispatch_still_settles_before_event_failure(self):
         session = {
             "session_id": "SESSION-LEASED-EVENT-FAILURE",
