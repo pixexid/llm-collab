@@ -36,11 +36,13 @@ post-turn checks below provide the proof. Resolve and record the requested base
 SHA before spawning:
 
 ```bash
-git rev-parse <base-branch>
+base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
+git fetch origin "$base_branch"
+base_sha=$(git rev-parse "origin/$base_branch")
 bb thread spawn \
   --project <bb-project-id> \
   --new-environment worktree \
-  --base-branch <base-branch> \
+  --base-branch "$base_sha" \
   --provider codex \
   --model gpt-5.6-luna \
   --reasoning-level medium \
@@ -50,6 +52,14 @@ bb thread spawn \
   --json
 ```
 
+Never pass a branch name as the base: BB resolves the local ref, while
+`bin/local_main_sync.py` deliberately advances only the detached HEAD in a
+parked checkout, so local `main` drifts. On 2026-08-07, `--base-branch main`
+created a worktree at `03431b9a`, 44 commits behind `origin/main` at
+`5afba296`, while `outcome == "available"` and
+`headSha == mergeBase.baseRef` both passed; only comparison with the
+independently resolved SHA caught the stale base.
+
 BB 0.35.1 has no standalone environment-create command, and `bb thread spawn`
 requires `--prompt`; it cannot create a chosen-base worktree without starting a
 turn. Do not put a writing delegation in that first turn. Wait for the probe to
@@ -58,7 +68,7 @@ become idle, then inspect the provisioned environment:
 ```bash
 bb thread wait <probe-thread-id> --status idle
 bb thread show <probe-thread-id> --json
-bb environment status <environment-id> --merge-base-branch <base-branch> --json
+bb environment status <environment-id> --merge-base-branch "$base_sha" --json
 ```
 
 Before activating the writer, verify the exact path and branch from `show` and
@@ -103,8 +113,12 @@ thread can be re-driven against the writer's worktree. Archive is a reversible
 lane-ownership marker, not a capability barrier, so never unarchive or message
 that probe. This handoff leaves one live thread with the writing assignment.
 
-A writing lane always names an exact provider, model, and reasoning level;
-never replace those fields with generic placeholders or an inferred default.
+Every BB assignment, read-only included, always names an exact provider, model,
+and reasoning level; never replace those fields with generic placeholders or an
+inferred default. Read-only assignments produce the evidence that gates
+decisions, and the measured glm-5.2 coordinate drift and muse-spark degeneration
+corrupt an audit as readily as a patch—worse, because no diff review catches a
+bad citation; see [`bb-worker-profiles.md`](bb-worker-profiles.md).
 The example records current practice, not an authoring qualification: no BB
 profile is authoring-qualified yet, and
 [GH-596](https://github.com/pixexid/llm-collab/issues/596) tracks that missing
