@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import watch_inbox  # noqa: E402
 import _session_autobridge as session_autobridge  # noqa: E402
+from _helpers import InboxScanLimitExceeded  # noqa: E402
 import llm_collab.bb_managed_start as bb_managed_start  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
@@ -50,6 +51,68 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         packet = self.packet()
         packet["frontmatter"] = {**packet["frontmatter"], "repo_targets": repo_targets}
         return packet
+
+    def test_bb_bootstrap_aborts_before_launch_when_unread_scan_exceeds_cap(self) -> None:
+        error = InboxScanLimitExceeded("over cap")
+        with patch.object(
+            watch_inbox, "bb_bootstrap_enabled", return_value=True
+        ), patch.object(
+            watch_inbox, "get_unread_messages", side_effect=error
+        ), patch.object(watch_inbox, "execute_bb_bootstrap_plan") as execute:
+            with self.assertRaises(InboxScanLimitExceeded):
+                watch_inbox._bootstrap_bb_before_dispatch(
+                    "glmpi",
+                    False,
+                    project_id="project-one",
+                    repo_targets=["app"],
+                    messages=None,
+                )
+
+        execute.assert_not_called()
+
+    def test_default_watcher_reports_over_cap_poll_and_keeps_running(self) -> None:
+        error = InboxScanLimitExceeded("over cap")
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-cap-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text('{"unread": ["Chats/packet.md"]}')
+            argv = [
+                "watch_inbox.py",
+                "--me",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--poll-seconds",
+                "1",
+                "--max-polls",
+                "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                watch_inbox, "require_current_runtime"
+            ), patch.object(
+                watch_inbox, "agent_ids", return_value=["glmpi"]
+            ), patch.object(
+                watch_inbox, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                watch_inbox,
+                "load_agent_inbox",
+                return_value={"unread": ["Chats/packet.md"]},
+            ), patch.object(
+                watch_inbox, "get_unread_messages", side_effect=error
+            ), patch.object(
+                watch_inbox, "load_refusal_progress", return_value={}
+            ), patch.object(
+                watch_inbox, "dispatch_autobridge"
+            ) as dispatch, patch.object(watch_inbox, "emit") as emit:
+                watch_inbox.main()
+
+        dispatch.assert_not_called()
+        self.assertTrue(
+            any(
+                call.args[0].get("event") == "error"
+                and call.args[0].get("detail") == "over cap"
+                for call in emit.call_args_list
+            )
+        )
 
     def test_a_foreign_repo_packet_is_not_a_bootstrap_candidate(self) -> None:
         """Bootstrap runs BEFORE dispatch_session's repo gate.

@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 import inbox as inbox_lib
+import _helpers as helpers_lib
 from _activation_lease import RUNTIME_ID_ENV_VARS
 
 
@@ -1100,6 +1101,191 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "inbox_scan_limit_exceeded", json.loads(result.stdout)["error"]
         )
         self.assertEqual(before, self.load_inbox())
+
+    def test_default_unread_scan_refuses_over_cap_without_mutating(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        before = {"agent": "codex", "unread": paths, "read": []}
+        write_json(self.root / "agents" / "codex" / "inbox.json", before)
+
+        result = self.run_inbox("--project", "amiga", "--peek", "--json")
+
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(
+            "inbox_scan_limit_exceeded", json.loads(result.stdout)["error"]
+        )
+        self.assertEqual(before, self.load_inbox())
+
+    def test_default_unread_scan_checks_the_index_before_packet_reads(self) -> None:
+        paths = [
+            f"Chats/{'amiga' if index % 2 == 0 else 'nuvyr'}/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": paths, "read": []},
+        ), patch.object(Path, "exists", autospec=True, return_value=True) as exists, patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=lambda path: path.parent.name,
+        ), patch.object(
+            helpers_lib,
+            "parse_frontmatter",
+            side_effect=lambda project: ({"project_id": project}, "body"),
+        ):
+            try:
+                messages = helpers_lib.get_unread_messages("codex")
+            except inbox_lib.InboxScanLimitExceeded:
+                pass
+            else:
+                self.fail(
+                    f"over-cap default read silently returned {len(messages)} messages"
+                )
+
+        exists.assert_not_called()
+
+    def test_bootstrap_limit_counts_live_messages_not_pointers(self) -> None:
+        dead_paths = [f"Chats/dead/{index}.md" for index in range(5)]
+        live_paths = [f"Chats/live/{index}.md" for index in range(5)]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={
+                "agent": "codex",
+                "unread": [*dead_paths, *live_paths],
+                "read": [],
+            },
+        ), patch.object(
+            Path,
+            "exists",
+            autospec=True,
+            side_effect=lambda path: path.parent.name == "live",
+        ), patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=lambda path: path.name,
+        ), patch.object(
+            helpers_lib,
+            "parse_frontmatter",
+            side_effect=lambda title: ({"title": title}, "body"),
+        ):
+            messages = helpers_lib.get_unread_messages("codex", limit=5)
+
+        self.assertEqual(
+            live_paths,
+            [message["path"] for message in messages],
+            "bootstrap would report no unread messages while live packets wait",
+        )
+
+    def test_limited_unread_scan_refuses_oversized_index(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": paths, "read": []},
+        ), patch.object(Path, "exists", autospec=True) as exists:
+            with self.assertRaises(inbox_lib.InboxScanLimitExceeded):
+                helpers_lib.get_unread_messages("codex", limit=5)
+
+        exists.assert_not_called()
+
+    def test_unread_scan_refuses_requested_limit_above_cap(self) -> None:
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": [], "read": []},
+        ):
+            with self.assertRaisesRegex(
+                inbox_lib.InboxScanLimitExceeded,
+                rf"requested inbox limit {inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1} "
+                rf"exceeds {inbox_lib.MAX_MESSAGE_SCAN_ENTRIES} entries",
+            ):
+                helpers_lib.get_unread_messages(
+                    "codex", limit=inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1
+                )
+
+    def test_default_unread_scan_returns_the_complete_at_cap_index(self) -> None:
+        paths = [
+            f"Chats/{'amiga' if index % 2 == 0 else 'nuvyr'}/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES)
+        ]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": paths, "read": []},
+        ), patch.object(Path, "exists", autospec=True, return_value=True), patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=lambda path: path.parent.name,
+        ), patch.object(
+            helpers_lib,
+            "parse_frontmatter",
+            side_effect=lambda project: ({"project_id": project}, "body"),
+        ):
+            messages = helpers_lib.get_unread_messages("codex")
+
+        self.assertEqual(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES, len(messages))
+        self.assertEqual(
+            {"amiga", "nuvyr"},
+            {message["frontmatter"]["project_id"] for message in messages},
+        )
+
+    def test_publish_scan_limit_refuses_before_registration(self) -> None:
+        args = SimpleNamespace(
+            session=None,
+            publish_session=True,
+            mark_all_read=False,
+            peek=True,
+            show_all=False,
+            me="codex",
+            json_output=True,
+        )
+        error = inbox_lib.InboxScanLimitExceeded("over cap")
+        stdout = StringIO()
+        with patch.object(inbox_lib, "parse_args", return_value=args), patch.object(
+            inbox_lib, "agent_ids", return_value=["codex"]
+        ), patch.object(
+            inbox_lib, "publish_runtime_identity", side_effect=error
+        ), patch.object(inbox_lib, "register_session") as register, redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                inbox_lib.main()
+
+        self.assertEqual(75, raised.exception.code)
+        self.assertEqual("inbox_scan_limit_exceeded", json.loads(stdout.getvalue())["error"])
+        register.assert_not_called()
+
+    def test_mark_all_read_scan_limit_refuses_without_mutation(self) -> None:
+        args = SimpleNamespace(
+            session=None,
+            publish_session=False,
+            mark_all_read=True,
+            peek=False,
+            show_all=False,
+            me="codex",
+            json_output=True,
+        )
+        error = inbox_lib.InboxScanLimitExceeded("over cap")
+        stdout = StringIO()
+        with patch.object(inbox_lib, "parse_args", return_value=args), patch.object(
+            inbox_lib, "require_current_runtime"
+        ), patch.object(inbox_lib, "agent_ids", return_value=["codex"]), patch.object(
+            inbox_lib, "mark_all_read", side_effect=error
+        ), patch.object(inbox_lib, "mark_messages_read") as mark_read, redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as raised:
+                inbox_lib.main()
+
+        self.assertEqual(75, raised.exception.code)
+        self.assertEqual("inbox_scan_limit_exceeded", json.loads(stdout.getvalue())["error"])
+        mark_read.assert_not_called()
 
     def test_bounded_all_scan_accepts_exact_cap(self) -> None:
         paths = [

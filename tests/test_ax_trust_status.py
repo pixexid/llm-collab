@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import _ax_trust
+import _helpers as helpers_lib
 import pm2_watchers
 import session_bootstrap
 
@@ -434,6 +435,40 @@ class AxTrustCallerTest(unittest.TestCase):
         self.assertLess(text.index("IDENTITY"), text.index("[ax] unavailable"))
         self.assertLess(text.index("[ax] unavailable"), text.index("[watcher] error"))
         self.assertEqual(text.count("[ax] unavailable"), 1)
+
+    def test_bootstrap_reports_requested_limit_above_cap_as_refusal(self) -> None:
+        args = self.bootstrap_args(json_output=True)
+        args.limit = helpers_lib.MAX_MESSAGE_SCAN_ENTRIES + 1
+        output = io.StringIO()
+        with self.patched_bootstrap(
+            status=_ax_trust.AxTrustStatus("trusted"),
+            json_output=True,
+        ), mock.patch.object(
+            session_bootstrap, "parse_args", return_value=args
+        ), mock.patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": [], "read": []},
+        ), mock.patch.object(
+            session_bootstrap,
+            "get_unread_messages",
+            wraps=helpers_lib.get_unread_messages,
+        ):
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                session_bootstrap.main()
+
+        self.assertEqual(75, raised.exception.code)
+        self.assertEqual(
+            {
+                "bootstrap": "refused",
+                "detail": (
+                    f"requested inbox limit {helpers_lib.MAX_MESSAGE_SCAN_ENTRIES + 1} "
+                    f"exceeds {helpers_lib.MAX_MESSAGE_SCAN_ENTRIES} entries"
+                ),
+                "error": "inbox_scan_limit_exceeded",
+            },
+            json.loads(output.getvalue()),
+        )
 
     def test_human_bootstrap_prints_exactly_one_ax_line_when_watcher_skips(self) -> None:
         output = io.StringIO()

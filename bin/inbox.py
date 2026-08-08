@@ -44,6 +44,8 @@ from _activation_lease import (
 )
 from _helpers import (
     AGENTS_FILE,
+    InboxScanLimitExceeded,
+    MAX_MESSAGE_SCAN_ENTRIES,
     PROJECTS_FILE,
     ROOT,
     agent_inbox_path,
@@ -85,13 +87,8 @@ from session_autobridge import (
     resolve_native_family,
 )
 
-MAX_EXACT_SESSION_ENTRIES = 5_000
+MAX_EXACT_SESSION_ENTRIES = MAX_MESSAGE_SCAN_ENTRIES
 MAX_EXACT_SESSION_BYTES = 16 * 1024 * 1024
-MAX_MESSAGE_SCAN_ENTRIES = MAX_EXACT_SESSION_ENTRIES
-
-
-class InboxScanLimitExceeded(ValueError):
-    """The complete listing cannot be proved within the scan bound."""
 
 
 def exact_registry_contains(
@@ -935,6 +932,19 @@ def _print_refused_gates(refused_gates: list[dict]) -> None:
             print(f"  owner: {json.dumps(owner, sort_keys=True)}", file=sys.stderr)
 
 
+def refuse_inbox_scan(args, error: InboxScanLimitExceeded) -> None:
+    payload = {
+        "error": "inbox_scan_limit_exceeded",
+        "detail": str(error),
+        "messages": [],
+    }
+    if args.json_output:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(f"[inbox] {error}", file=sys.stderr)
+    sys.exit(75)
+
+
 def main():
     args = parse_args()
 
@@ -957,11 +967,14 @@ def main():
             print(f"       Known agents: {', '.join(known)}", file=sys.stderr)
             sys.exit(1)
 
-    if args.mark_all_read:
-        print(json.dumps(mark_all_read(args), sort_keys=True))
-        return
+    try:
+        if args.mark_all_read:
+            print(json.dumps(mark_all_read(args), sort_keys=True))
+            return
 
-    published_runtime = publish_runtime_identity(args)
+        published_runtime = publish_runtime_identity(args)
+    except InboxScanLimitExceeded as error:
+        refuse_inbox_scan(args, error)
 
     exact_session = None
     repo_scope_refused: list[dict] = []
@@ -1049,16 +1062,7 @@ def main():
             else:
                 messages = get_unread_messages(args.me)
         except InboxScanLimitExceeded as error:
-            payload = {
-                "error": "inbox_scan_limit_exceeded",
-                "detail": str(error),
-                "messages": [],
-            }
-            if args.json_output:
-                print(json.dumps(payload, sort_keys=True))
-            else:
-                print(f"[inbox] {error}", file=sys.stderr)
-            sys.exit(75)
+            refuse_inbox_scan(args, error)
     messages = filter_messages(
         messages,
         None if exact_requested else args.project,

@@ -30,6 +30,7 @@ import project_issue_queue as issue_queue
 from _ax_trust import format_ax_status, probe_ax_trust
 from _activation_lease import runtime_id_from_env
 from _helpers import (
+    InboxScanLimitExceeded,
     ROOT,
     agent_ids,
     agent_identity_path,
@@ -50,10 +51,22 @@ from _session_autobridge import (
 )
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Bootstrap an agent session.")
     p.add_argument("--agent", required=True, help="Your agent ID")
-    p.add_argument("--limit", type=int, default=5, help="Inbox items to show (default: 5)")
+    p.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=5,
+        help="Inbox items to show (default: 5)",
+    )
     p.add_argument("--no-watcher", action="store_true", help="Skip starting the inbox watcher")
     p.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON summary")
     p.add_argument(
@@ -681,7 +694,23 @@ def main():
     ax_result = probe_ax_trust(agent)
 
     # ── 2. Inbox ──
-    messages = get_unread_messages(args.agent)[: args.limit]
+    try:
+        messages = get_unread_messages(args.agent, limit=args.limit)
+    except InboxScanLimitExceeded as error:
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "bootstrap": "refused",
+                        "error": "inbox_scan_limit_exceeded",
+                        "detail": str(error),
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"[inbox] {error}", file=sys.stderr)
+        sys.exit(75)
     inbox_summary = {
         "unread_count": len(messages),
         "messages": [

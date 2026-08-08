@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +32,36 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import session_bootstrap
 import _session_autobridge as session_autobridge_lib
+
+
+class SessionBootstrapArgumentTest(unittest.TestCase):
+    def parse_limit(self, value: str):
+        with patch.object(
+            sys,
+            "argv",
+            ["session_bootstrap.py", "--agent", "claude", "--limit", value],
+        ):
+            return session_bootstrap.parse_args()
+
+    def test_negative_limit_is_rejected_during_argument_parsing(self) -> None:
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            self.parse_limit("-1")
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("argument --limit: must be a positive integer", stderr.getvalue())
+        self.assertNotIn("No unread messages", stderr.getvalue())
+
+    def test_positive_limit_is_accepted(self) -> None:
+        self.assertEqual(5, self.parse_limit("5").limit)
+
+    def test_zero_limit_is_rejected_during_argument_parsing(self) -> None:
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            self.parse_limit("0")
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("argument --limit: must be a positive integer", stderr.getvalue())
 
 
 def completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
@@ -303,7 +333,9 @@ class BindingDriftBannerTest(unittest.TestCase):
             ),
             patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
             patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
-            patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
+            patch.object(
+                session_bootstrap, "get_unread_messages", return_value=[]
+            ) as get_unread,
             patch.object(session_bootstrap, "queue_summaries", return_value=[]),
             patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
             patch.object(
@@ -320,6 +352,7 @@ class BindingDriftBannerTest(unittest.TestCase):
         self.assertIn("No self-service repair exists yet", text)
         self.assertNotIn("session_autobridge.py register", text)
         self.assertNotIn("--supersedes-session", text)
+        get_unread.assert_called_once_with("claude", limit=5)
 
     def test_matching_runtime_is_silent(self) -> None:
         with (
