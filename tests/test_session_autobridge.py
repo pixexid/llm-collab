@@ -1563,6 +1563,38 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         mark_read.assert_not_called()
 
+        text_output = StringIO()
+        with patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=[session["session_id"]],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            return_value=result,
+        ), patch.object(watch_inbox_lib, "mark_messages_read"), redirect_stdout(
+            text_output
+        ):
+            watch_inbox_lib.dispatch_autobridge("gemini", json_output=False)
+
+        wake_line = next(
+            line
+            for line in text_output.getvalue().splitlines()
+            if "autobridge_wake_signaled" in line
+        )
+        self.assertIn(
+            "Chats/runtime_trigger/packet.md diagnostic_errors=", wake_line
+        )
+        self.assertIn('"detail":"runtime_trigger event fsync failed"', wake_line)
+
     def test_settled_nonruntime_actions_report_diagnostic_failure(self):
         reported = {}
         expected = {}

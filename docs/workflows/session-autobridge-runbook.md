@@ -385,6 +385,21 @@ The implemented behavior is narrower:
 - activation packets add a lease gate and mutation-time fence assertions, but
   they do not create a general busy queue
 
+### Settled diagnostic failures
+
+An `append_event` failure after packet settlement does not change the action
+outcome. Existing per-action events such as `autobridge_consumed` and
+`autobridge_wake_signaled` carry a `diagnostic_errors` list; the default text
+log appends that list as compact JSON. A settled relay, notify, or manual no-op
+has no ordinary per-action event, so it emits `autobridge_diagnostic_error`
+with `effective_action` and `diagnostic_errors` instead.
+
+Treat either form as a diagnostic-log repair, not a dispatch retry: inspect each
+entry's `operation`, `error_type`, and `detail`, repair the session event-log
+writer, then follow the watcher recovery sequence linked at the top of this
+runbook. The action is already settled, so do not resend the packet merely
+because its diagnostic write failed.
+
 Because a transport failure may occur after runtime acceptance, an automatic
 retry is not a proven exactly-once contract. Use disposable sessions for tests
 and do not target an active operator thread. Transactional busy deferral,

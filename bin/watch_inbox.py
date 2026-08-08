@@ -143,6 +143,11 @@ def emit(msg: dict, json_output: bool) -> None:
         ts = msg.get("ts", "")
         event = msg.get("event", "")
         detail = msg.get("detail", "")
+        if msg.get("diagnostic_errors"):
+            detail = (
+                f"{detail} diagnostic_errors="
+                f"{json.dumps(msg['diagnostic_errors'], separators=(',', ':'))}"
+            )
         print(f"[{ts}] {event}: {detail}", flush=True)
 
 
