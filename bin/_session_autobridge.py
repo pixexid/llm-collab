@@ -563,7 +563,12 @@ def reserve_message_result(
 
 
 def resolve_active_canonical_binding(
-    project_id: str, chat_id: str, agent_id: str, runtime_session_id: str
+    project_id: str,
+    chat_id: str,
+    agent_id: str,
+    runtime_session_id: str,
+    *,
+    strict: bool = False,
 ) -> dict[str, Any] | None:
     """The current canonical binding fields for a participant's EXACT native session.
 
@@ -579,7 +584,8 @@ def resolve_active_canonical_binding(
     waking the wrong native session. So None when there is no resolvable active
     binding, and CanonicalBindingNativeMismatch when one exists but is bound to a
     native session other than `runtime_session_id`; only an exact native match
-    returns the canonical fields.
+    returns the canonical fields. With ``strict=True``, authority read failures
+    propagate while a completed read with no active row still returns None.
     """
     workspace_id = config_get("workspace_id")
     if not workspace_id:
@@ -597,6 +603,8 @@ def resolve_active_canonical_binding(
                 participant_id="participant_" + str(agent_id),
             )
     except Exception:
+        if strict:
+            raise
         return None
     if not resolved.get("resolved"):
         return None

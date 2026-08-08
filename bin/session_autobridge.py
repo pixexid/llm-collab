@@ -25,7 +25,14 @@ import json
 import os
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
+from _helpers import (
+    canonical_path,
+    ensure_project,
+    get_agent,
+    now_utc,
+    resolve_project_repo_path,
+    utc_iso,
+)
 from _session_autobridge import (
     BindingUnreadable,
     CanonicalBindingNativeMismatch,
@@ -34,6 +41,10 @@ from _session_autobridge import (
     SESSION_MODES,
     SESSION_STATUSES,
     WAKE_STRATEGIES,
+    MAX_CLAUDE_RECORD_PREFIX_BYTES,
+    _claude_session_evidence,
+    claude_home,
+    claude_project_slug,
     discover_runtime_session,
     dispatch_session,
     iter_sessions,
@@ -646,7 +657,10 @@ def register_session(args) -> dict:
         runtime["session_id"] = args.runtime_session_id
     if args.runtime_session_source is not None:
         runtime["session_source"] = args.runtime_session_source
-    runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
+    explicit_runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
+    runtime_home = explicit_runtime_home or canonical_runtime_home(runtime.get("home"))
+    if runtime_home is None and runtime.get("family") == "claude_app":
+        runtime_home = canonical_runtime_home(str(claude_home()))
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
         # The derived fallback must pass through the SAME invariant as an explicit
         # --runtime-home. Stored raw, a relative or non-normalized source produced a home
@@ -673,6 +687,43 @@ def register_session(args) -> dict:
     # registrations). Capture the native id before runtime may be set to None.
     gh468_native_session_id = runtime.get("session_id") if runtime else None
     gh468_native_family = runtime.get("family") if runtime else None
+
+    # Any Claude identity this registration will persist -- newly supplied or
+    # carried from the existing lease -- is registrable only when its own artifact
+    # proves membership in the target checkout. The project slug is only a lookup
+    # hint (it can collide), so the existing evidence reader validates cwd + native
+    # identity together before any binding/session write.
+    if gh468_native_session_id and gh468_native_family == "claude_app":
+        project_path = resolve_project_repo_path(str(args.project), "app")
+        evidence = "unprovable"
+        if project_path is not None:
+            artifact_home = (
+                Path(str(runtime["home"]))
+                if runtime.get("home")
+                else claude_home()
+            )
+            artifact = (
+                artifact_home
+                / "projects"
+                / str(claude_project_slug(str(project_path)))
+                / f"{gh468_native_session_id}.jsonl"
+            )
+            evidence = _claude_session_evidence(
+                artifact,
+                MAX_CLAUDE_RECORD_PREFIX_BYTES,
+                os.path.realpath(project_path),
+                str(gh468_native_session_id),
+            )
+        if evidence != "match":
+            detail = (
+                "belongs to another project"
+                if evidence == "other_project"
+                else "project membership could not be proven"
+            )
+            raise SystemExit(
+                f"[error] Claude session artifact {detail}; refusing registration "
+                "and no session was written."
+            )
 
     if not runtime:
         runtime = None

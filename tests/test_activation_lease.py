@@ -82,12 +82,13 @@ class ActivationLeaseTest(unittest.TestCase):
         return {**base, "LLM_COLLAB_UI_REFRESH": "0", **(extra or {})}
 
     def run_cli(self, root: Path, *args: str, env: dict[str, str] | None = None) -> tuple[dict, int]:
+        effective_env = {"CLAUDE_HOME": str(root / ".claude"), **(env or {})}
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), *args, "--json"],
             cwd=root,
             text=True,
             capture_output=True,
-            env=self.env(env),
+            env=self.env(effective_env),
             check=False,
         )
         self.assertTrue(result.stdout.strip(), result.stderr)
@@ -135,6 +136,13 @@ class ActivationLeaseTest(unittest.TestCase):
         if chat is not None:
             args += ["--chat", chat]
         if runtime_id:
+            project_path = root.resolve()
+            artifact = (
+                root / ".claude" / "projects"
+                / session_autobridge_lib.claude_project_slug(str(project_path))
+                / f"{runtime_id}.jsonl"
+            )
+            write(artifact, json.dumps({"sessionId": runtime_id, "cwd": str(project_path)}) + "\n")
             args += [
                 "--runtime-family", "claude_app",
                 "--runtime-session-id", runtime_id,

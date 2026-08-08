@@ -15,11 +15,15 @@ import sys as _grsys; from pathlib import Path as _grPath
 _grsys.path.insert(0, str(_grPath(__file__).resolve().parent)); import _runtime_gate_testkit  # noqa: E402,F401  GH-503: deterministic gate-bypass install (any run form)
 
 import json
+import os
 import subprocess
 import tempfile
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -27,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import session_bootstrap
+import _session_autobridge as session_autobridge_lib
 
 
 def completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
@@ -247,6 +252,220 @@ class WatcherReloadTest(unittest.TestCase):
                 self.assertEqual({"status": "ok"}, session_bootstrap.start_watcher("claude"))
 
         self.assertEqual("restart", run.call_args.args[0][2])
+
+
+class BindingDriftBannerTest(unittest.TestCase):
+    SESSION = {
+        "session_id": "SESSION-CLAUDE-OLD",
+        "agent_id": "claude",
+        "project_id": "llm-collab",
+        "chat_id": "CHAT-DRIFT",
+        "mode": "notify",
+        "status": "active",
+        "wake_strategy": "runtime_trigger",
+        "repo_targets": ["app"],
+        "runtime": {
+            "family": "claude_app",
+            "session_id": "runtime-old",
+            "home": "/tmp/claude-home",
+        },
+    }
+
+    def test_bootstrap_diagnoses_mismatch_without_unsafe_repair_command(self) -> None:
+        mismatch = session_bootstrap.CanonicalBindingNativeMismatch(
+            canonical_native_session_id="runtime-old",
+            requested_runtime_session_id="runtime-new",
+        )
+        output = StringIO()
+        ax = SimpleNamespace(as_dict=lambda: {})
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(sys, "argv", ["session_bootstrap.py", "--agent", "claude", "--no-watcher"]),
+            patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
+            patch.object(
+                session_bootstrap,
+                "get_agent",
+                return_value={"id": "claude", "activation": {"watcher_enabled": False}},
+            ),
+            patch.object(
+                session_bootstrap,
+                "tooling_currency",
+                return_value={"state": "current", "head": "abc", "fetched": True},
+            ),
+            patch.object(session_bootstrap, "announce_tooling"),
+            patch.object(session_bootstrap, "dependency_report", return_value={}),
+            patch.object(session_bootstrap, "announce_dependencies"),
+            patch.object(session_bootstrap, "announce_contract"),
+            patch.object(
+                session_bootstrap,
+                "agent_identity_path",
+                return_value=Path("/definitely/missing/identity.md"),
+            ),
+            patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
+            patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
+            patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
+            patch.object(session_bootstrap, "queue_summaries", return_value=[]),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                side_effect=mismatch,
+            ),
+            redirect_stdout(output),
+        ):
+            session_bootstrap.main()
+
+        text = output.getvalue()
+        self.assertIn("BINDING DRIFT", text)
+        self.assertIn("No self-service repair exists yet", text)
+        self.assertNotIn("session_autobridge.py register", text)
+        self.assertNotIn("--supersedes-session", text)
+
+    def test_matching_runtime_is_silent(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-current"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                return_value={"binding_id": "binding-current"},
+            ),
+        ):
+            drifts = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("clear", drifts["status"])
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(drifts)
+        self.assertEqual("", output.getvalue())
+
+    def test_multiple_peer_bindings_ask_for_scope_without_targeting_peers(self) -> None:
+        peer = {
+            **self.SESSION,
+            "session_id": "SESSION-CLAUDE-PEER",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PEER",
+            "runtime": {**self.SESSION["runtime"], "session_id": "runtime-peer"},
+        }
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION, peer]),
+            patch.object(session_bootstrap, "resolve_active_canonical_binding") as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("ambiguous", report["status"])
+        resolve.assert_not_called()
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        text = output.getvalue()
+        self.assertIn("Which project/chat owns this restarting session?", text)
+        self.assertNotIn("--supersedes-session", text)
+        self.assertNotIn("SESSION-CLAUDE-OLD", text)
+        self.assertNotIn("SESSION-CLAUDE-PEER", text)
+
+    def test_logical_session_correlates_one_scope_without_targeting_its_peer(self) -> None:
+        peer = {
+            **self.SESSION,
+            "session_id": "SESSION-CLAUDE-PEER",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PEER",
+            "runtime": {**self.SESSION["runtime"], "session_id": "runtime-peer"},
+        }
+        mismatch = session_bootstrap.CanonicalBindingNativeMismatch(
+            canonical_native_session_id="runtime-old",
+            requested_runtime_session_id="runtime-new",
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION_ID": "runtime-new",
+                    "LLM_COLLAB_SESSION_ID": "SESSION-CLAUDE-OLD",
+                },
+                clear=True,
+            ),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION, peer]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                side_effect=mismatch,
+            ) as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("detected", report["status"])
+        resolve.assert_called_once_with(
+            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new", strict=True
+        )
+        self.assertNotIn("SESSION-CLAUDE-PEER", json.dumps(report))
+        self.assertNotIn("repair_command", report)
+
+    def test_truncated_session_scan_is_explicitly_unavailable(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(
+                session_bootstrap,
+                "iter_sessions",
+                side_effect=session_bootstrap.UnreadableFile(
+                    "session records exceed the 5000 entry limit"
+                ),
+            ),
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("unavailable", report["status"])
+        self.assertIn("entry limit", report["reason"])
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        self.assertIn("CHECK UNAVAILABLE", output.getvalue())
+        self.assertNotEqual([], report)
+
+    def test_unreadable_canonical_ledger_is_explicitly_unavailable(self) -> None:
+        class FakePaths:
+            @staticmethod
+            def derive(*_args):
+                return object()
+
+        class BrokenStore:
+            @staticmethod
+            def open_reader(_paths):
+                raise OSError("canonical ledger is corrupt")
+
+        fake_ledger = SimpleNamespace(LedgerPaths=FakePaths, LedgerStore=BrokenStore)
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(session_autobridge_lib, "config_get", return_value="ws_alpha"),
+            patch.object(session_autobridge_lib, "project_state_root", return_value=Path("/tmp")),
+            patch.object(
+                session_autobridge_lib.importlib,
+                "import_module",
+                return_value=fake_ledger,
+            ),
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("unavailable", report["status"])
+        self.assertIn("canonical ledger is corrupt", report["reason"])
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        self.assertIn("CHECK UNAVAILABLE", output.getvalue())
+
+    def test_missing_canonical_binding_is_a_legitimate_clear_result(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                return_value=None,
+            ) as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("clear", report["status"])
+        self.assertFalse(report["canonical_binding_resolved"])
+        resolve.assert_called_once_with(
+            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new", strict=True
+        )
 
 
 if __name__ == "__main__":

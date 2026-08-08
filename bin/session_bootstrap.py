@@ -22,11 +22,13 @@ require_python()
 
 import argparse
 import json
+import os
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
 from _ax_trust import format_ax_status, probe_ax_trust
+from _activation_lease import runtime_id_from_env
 from _helpers import (
     ROOT,
     agent_ids,
@@ -38,6 +40,13 @@ from _helpers import (
     load_projects,
     utc_iso,
     watcher_enabled_agents,
+)
+from _session_autobridge import (
+    CanonicalBindingNativeMismatch,
+    UnreadableFile,
+    iter_sessions,
+    resolve_active_canonical_binding,
+    session_is_dispatchable,
 )
 
 
@@ -273,6 +282,110 @@ def announce_contract(agent_id: str) -> None:
         first = done.stdout.splitlines()[0]
         print(f"[contract] {first}")
         print(f"[contract] run: python bin/contract_drift.py --agent {agent_id}")
+    print()
+
+
+def binding_drifts(agent_id: str) -> dict:
+    """Classify this runtime's canonical binding without mutating or guessing scope."""
+    current_runtime_id = runtime_id_from_env()
+    if not current_runtime_id:
+        return {"status": "not_applicable", "reason": "runtime_id_unavailable"}
+    try:
+        sessions = iter_sessions(agent_id=agent_id, strict=True)
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "reason": f"{type(error).__name__}: {error}",
+        }
+
+    scopes: dict[tuple[str, str], list[dict]] = {}
+    for session in sessions:
+        if not session_is_dispatchable(session)[0]:
+            continue
+        project_id = session.get("project_id")
+        chat_id = session.get("chat_id")
+        runtime = session.get("runtime") or {}
+        if not project_id or not chat_id or not runtime.get("family"):
+            continue
+        scopes.setdefault((str(project_id), str(chat_id)), []).append(session)
+
+    current_scopes = {
+        scope
+        for scope, records in scopes.items()
+        if any(
+            str((record.get("runtime") or {}).get("session_id") or "")
+            == current_runtime_id
+            for record in records
+        )
+    }
+    logical_session_id = os.environ.get("LLM_COLLAB_SESSION_ID", "").strip()
+    logical_scopes = {
+        scope
+        for scope, records in scopes.items()
+        if logical_session_id
+        and any(str(record.get("session_id") or "") == logical_session_id for record in records)
+    }
+    correlated_scopes = current_scopes or logical_scopes or set(scopes)
+    if len(correlated_scopes) > 1:
+        return {
+            "status": "ambiguous",
+            "current_runtime_id": current_runtime_id,
+            "candidate_scope_count": len(correlated_scopes),
+            "question": "Which project/chat owns this restarting session?",
+        }
+    if not correlated_scopes:
+        return {"status": "clear", "current_runtime_id": current_runtime_id}
+
+    project_id, chat_id = next(iter(correlated_scopes))
+    try:
+        canonical = resolve_active_canonical_binding(
+            project_id, chat_id, agent_id, current_runtime_id, strict=True
+        )
+    except CanonicalBindingNativeMismatch as mismatch:
+        return {
+            "status": "detected",
+            "project_id": project_id,
+            "chat_id": chat_id,
+            "bound_runtime_id": mismatch.canonical_native_session_id,
+            "current_runtime_id": current_runtime_id,
+            "repair_available": False,
+        }
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "reason": f"{type(error).__name__}: {error}",
+        }
+    return {
+        "status": "clear",
+        "current_runtime_id": current_runtime_id,
+        "canonical_binding_resolved": canonical is not None,
+    }
+
+
+def announce_binding_drifts(report: dict) -> None:
+    status = report.get("status")
+    if status in {"clear", "not_applicable"}:
+        return
+    print("━" * 60)
+    if status == "unavailable":
+        print("⚠️  BINDING DRIFT CHECK UNAVAILABLE")
+        print("━" * 60)
+        print(f"  {report.get('reason', 'session scan could not be completed')}")
+        print("  Bootstrap will continue, but no claim about binding drift was made.")
+    elif status == "ambiguous":
+        print("⚠️  BINDING DRIFT CHECK AMBIGUOUS")
+        print("━" * 60)
+        print(f"  {report['question']}")
+        print("  No repair command was generated; peer sessions were not targeted.")
+    else:
+        print("⚠️  BINDING DRIFT — this native session is not the active binding")
+        print("━" * 60)
+        print(f"  scope           {report['project_id']}/{report['chat_id']}")
+        print(f"  active binding  {report['bound_runtime_id']}")
+        print(f"  current runtime {report['current_runtime_id']}")
+        print("  No self-service repair exists yet: non-Pi registration does not")
+        print("  update the canonical binding. Bootstrap did not mutate any lease.")
+    print("━" * 60)
     print()
 
 
@@ -560,6 +673,10 @@ def main():
             print(f"       Run: python scripts/init.py to generate identity files.\n", file=sys.stderr)
         identity_content = None
 
+    drift_info = binding_drifts(args.agent)
+    if not args.json_output:
+        announce_binding_drifts(drift_info)
+
     # Keep the potentially five-second optional probe behind identity output.
     ax_result = probe_ax_trust(agent)
 
@@ -664,6 +781,7 @@ def main():
             "tooling": currency,
             "dependencies": dependencies,
             "identity_loaded": identity_content is not None,
+            "binding_drift": drift_info,
             "inbox": inbox_summary,
             "queues": queue_info,
             "watcher": watcher_result,
