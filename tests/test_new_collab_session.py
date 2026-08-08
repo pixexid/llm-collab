@@ -71,27 +71,28 @@ class WakeChannelTest(unittest.TestCase):
 
 
 class CoworkerPromptTest(unittest.TestCase):
-    def test_codex_prompt_arms_the_watcher(self):
+    def test_codex_prompt_routes_watcher_start_through_canonical_workflow(self):
         # A Codex co-worker is onboarded onto routine dispatch, not polling.
         activation = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
         p = ncs.coworker_prompt("codex", ncs.wake_channel(activation),
                                 "llm-collab", "CHAT-ABCD1234", "app", "codex_app",
                                 ncs.needs_dispatch_wake(activation))
-        self.assertIn("pm2_watchers.py ensure --agent codex", p)
+        self.assertIn("docs/workflows/pm2-log-rotation.md", p)
+        self.assertIn("pm2_watchers.py status --agent codex", p)
         self.assertNotIn("NO native session watcher", p)
         # the register step still names the exact session; only the WATCHER is
         # agent-wide, because that is the one that dispatches.
         self.assertIn("--session SESSION-CODEX-ABCD1234 --agent codex", p)
         self.assertNotIn("--session SESSION-CODEX-ABCD1234 --repo-target", p)
         self.assertLess(
+            p.index("pm2_watchers.py status --agent codex"),
+            p.index("session_autobridge.py register"),
+        )
+        self.assertLess(
             p.index("pm2_watchers.py ensure --agent codex-appserver"),
             p.index("session_autobridge.py register"),
         )
         self.assertIn("--runtime-home <YOUR_HOME_FROM_STEP_1>", p)
-        self.assertLess(
-            p.index("session_autobridge.py register"),
-            p.rindex("pm2_watchers.py ensure --agent codex"),
-        )
 
     def test_watcher_prompt_arms_watcher(self):
         p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
@@ -160,21 +161,17 @@ class PickupBlockTest(unittest.TestCase):
         # Assert on the COMMAND lines, not the block: the explanatory comment
         # legitimately contains the string "--session".
         command = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
-        # The MANAGED singleton, not a raw poller: pm2 already runs one watcher
+        # The MANAGED singleton, not a raw poller: PM2 owns one watcher
         # per watcher_enabled agent, and a second agent-wide poller would
         # double-dispatch, since dispatch_session reads processed_messages
         # before invoking the runtime and records the path after
         # (PR #559 r3725819269).
-        self.assertIn("pm2_watchers.py ensure --agent codex", command)
         self.assertNotIn("watch_inbox.py", command)
-        # Transport setup now precedes registration, so pickup only ensures the
-        # dispatching watcher and cannot repeat transport setup too late.
+        # Registration already proved the managed watcher; pickup must not
+        # introduce a second poller or relocate the gate after the binding.
         cmds = [l.strip() for l in command.splitlines() if l.strip()]
-        self.assertEqual(
-            [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
-            cmds,
-            "pickup must only ensure the watcher after transport and registration",
-        )
+        self.assertEqual([], cmds)
+        self.assertIn("verified before registration", block)
         self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
 
@@ -245,19 +242,23 @@ class MainPathTest(unittest.TestCase):
                 ncs.main()
             return out.getvalue(), sub
 
-    def test_codex_initiator_gets_a_watcher(self):
+    def test_codex_initiator_checks_watcher_before_registration(self):
         # Contract v12: a Codex initiator arms the routine watcher like anyone
         # else. The old expectation (poll, await AX) taught every new Codex
         # collaboration session the routing model v12 retired.
-        out, _ = self._main([
+        out, subprocess_mock = self._main([
             "--project", "p", "--title", "t", "--me", "codex",
             "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
             "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check",
         ])
         # initiator (codex) section is before the coworker section.
         initiator = out.split("SETUP PROMPT")[0]
-        # The managed singleton, not a raw per-chat poller (r3725819269).
-        self.assertIn("pm2_watchers.py ensure --agent codex", initiator)
+        self.assertTrue(any(
+            call.args[0][1].endswith("pm2_watchers.py")
+            and call.args[0][2:5] == ["status", "--agent", "codex"]
+            for call in subprocess_mock.run.call_args_list
+        ))
+        self.assertIn("verified before registration", initiator)
         self.assertNotIn("NO native session watcher", initiator)
 
     def test_codex_initiator_ensures_transport_before_registration(self):
@@ -269,7 +270,7 @@ class MainPathTest(unittest.TestCase):
         def run(cmd, **kwargs):
             if cmd[1].endswith("new_chat.py"):
                 return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
-            calls.append("transport")
+            calls.append("watcher" if cmd[2] == "status" else "transport")
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         argv = ["--project", "p", "--title", "t", "--me", "codex",
@@ -285,7 +286,43 @@ class MainPathTest(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             ncs.main()
 
-        self.assertEqual(["transport", "register"], calls)
+        self.assertEqual(["watcher", "transport", "register"], calls)
+
+    def test_missing_or_offline_watcher_never_creates_binding(self):
+        argv = ["--project", "p", "--title", "t", "--me", "codex",
+                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+
+        for label in ("missing", "offline"):
+            with self.subTest(label):
+                registrations = []
+                with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+                     patch.object(ncs, "ensure_project", return_value=None), \
+                     patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+                     patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+                     patch.object(ncs, "preflight_starter_binding", return_value=None), \
+                     patch.object(ncs, "require_dispatching_watcher",
+                                  side_effect=RuntimeError(f"watcher {label}")), \
+                     patch.object(ncs, "ensure_codex_transport") as transport, \
+                     patch.object(ncs, "register_session",
+                                  side_effect=lambda *_args: registrations.append("binding")), \
+                     patch.object(ncs, "shutil") as sh, \
+                     patch.object(ncs.subprocess, "run") as run:
+                    run.return_value = type("R", (), {
+                        "returncode": 0,
+                        "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}',
+                        "stderr": "",
+                    })()
+                    error = None
+                    try:
+                        ncs.main()
+                    except SystemExit as exc:
+                        error = exc
+
+                self.assertEqual([], registrations, "binding created without an online watcher")
+                self.assertIn(f"watcher {label}", str(error))
+                transport.assert_not_called()
+                sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
 
     def test_claude_initiator_arms_watcher(self):
         out, _ = self._main([
@@ -398,6 +435,8 @@ class MainPathTest(unittest.TestCase):
                 def run(cmd, **kwargs):
                     if cmd[1].endswith("new_chat.py"):
                         return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+                    if cmd[1].endswith("pm2_watchers.py") and cmd[2] == "status":
+                        return type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})()
                     try:
                         with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
                              patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
@@ -499,6 +538,8 @@ class MainPathTest(unittest.TestCase):
             nonlocal last_status
             if cmd[1].endswith("new_chat.py"):
                 return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+            if cmd[1].endswith("pm2_watchers.py") and cmd[2] == "status":
+                return type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})()
             if cmd[0].endswith("curl"):
                 curl_commands.append(cmd)
                 try:
@@ -608,6 +649,8 @@ class MainPathTest(unittest.TestCase):
         def run(cmd, **kwargs):
             if cmd[1].endswith("new_chat.py"):
                 return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+            if cmd[1].endswith("pm2_watchers.py") and cmd[2] == "status":
+                return type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})()
             timeout = kwargs.get("timeout")
             seen_timeouts.append(timeout)
             threading.Event().wait(0.01)  # fake a blocked token read without a real hung mount

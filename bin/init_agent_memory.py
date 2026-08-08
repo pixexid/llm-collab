@@ -79,6 +79,7 @@ def build_snippet(agent_id: str, *, skill_capable: bool) -> str:
         )
     lines.extend(
         [
+            f"Before the first watcher-enabled bootstrap: `{ROOT}/docs/workflows/pm2-log-rotation.md`",
             f"Bootstrap every session: `{bootstrap_cmd}`",
             "Keep this memory file as a pointer; do not restate collab command families here.",
         ]

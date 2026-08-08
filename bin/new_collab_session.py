@@ -21,7 +21,8 @@ It:
   2. Preflights the initiator's native session against existing dispatchable
      scopes, before any chat directory or file is written.
   3. Creates the chat.
-  4. Establishes the initiator's transport first when dispatch requires one.
+  4. Verifies the initiator's managed watcher, then establishes its transport,
+     before registration when dispatch requires them.
   5. Registers ONLY the initiator's own, explicitly-supplied native session.
   6. Prints the initiator's own pickup command, branched by its wake channel
      (every watcher-backed initiator arms an inbox watcher, Codex included) — do
@@ -187,6 +188,31 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
 
 
 CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 70
+WATCHER_STATUS_TIMEOUT_SECONDS = 20
+
+
+def require_dispatching_watcher(agent: str) -> None:
+    cmd = [sys.executable, str(BIN / "pm2_watchers.py"), "status", "--agent", agent]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=WATCHER_STATUS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"checking the {agent} dispatching watcher timed out after "
+            f"{WATCHER_STATUS_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"checking the {agent} dispatching watcher failed: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"the {agent} dispatching watcher is not online; complete "
+            f"{ROOT}/docs/workflows/pm2-log-rotation.md before registration:\n"
+            f"{result.stderr or result.stdout}"
+        )
 
 
 def ensure_codex_transport(runtime_home: str) -> None:
@@ -281,15 +307,8 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ever wakes it."""
     if channel == "watcher" and needs_dispatch:
         return [
-            "# Ensure the MANAGED dispatching watcher (one per agent,",
-            "#    not per chat). Your turn is started by autobridge dispatch,",
-            "#    and watch_inbox only dispatches when --session is absent —",
-            "#    but a raw second poller alongside the PM2 one would",
-            "#    double-dispatch: both read processed_messages before invoking",
-            "#    the runtime and record after, so each can issue turn/start for",
-            "#    the same unread packet. `ensure` is idempotent: it starts the",
-            "#    singleton only if missing.",
-            f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
+            "# The managed dispatching watcher was verified before registration;",
+            "# do not start a second agent-wide poller.",
         ]
     if channel == "watcher":
         return [
@@ -335,12 +354,17 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family,
     if needs_dispatch:
         lines += [
             "",
-            "# 2. Establish the App Server transport before registration. STOP",
+            "# 2. Verify the MANAGED dispatching watcher BEFORE registration.",
+            "#    STOP if this fails; complete the canonical procedure first:",
+            f"#    {ROOT}/docs/workflows/pm2-log-rotation.md",
+            f"{LAUNCH} pm2_watchers.py status --agent {agent}",
+            "",
+            "# 3. Establish the App Server transport before registration. STOP",
             "#    if this fails; no binding may become dispatchable without it:",
             f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver \\",
             "  --runtime-home <YOUR_HOME_FROM_STEP_1>",
         ]
-        register_step = 3
+        register_step = 4
     lines += [
         "",
         f"# {register_step}. Register THAT id + THAT home (never guess, never substitute a default):",
@@ -467,6 +491,7 @@ def main():
         if my_home is None:
             raise RuntimeError("the initiator runtime home is empty")
         if needs_dispatch_wake(my_activation):
+            require_dispatching_watcher(args.me)
             ensure_codex_transport(my_home)
         register_session(my_session, args.me, args.project, chat, args.repo_target,
                          args.my_runtime_family, args.my_runtime_session_id, my_home)

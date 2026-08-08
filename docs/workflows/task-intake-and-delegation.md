@@ -149,6 +149,10 @@ python3 bin/autonomous_loop.py start --project <project_id> --agent codex --mode
 Each loop pass must recover all live coordination inputs before deciding the
 next action:
 
+This recurring recovery assumes the initial watcher enablement in
+[`Session Startup`](session-startup.md#bootstrap-first), including its canonical
+PM2 rotation gate, is already complete.
+
 - `current_runtime.py --agent codex`
 - `inbox.py --me codex --project <project_id> --limit 5 --peek` or the
   project-approved unread check

@@ -2,12 +2,14 @@
 """
 pm2_watchers.py — Manage PM2-based persistent inbox watchers.
 
+Enable watchers through docs/workflows/pm2-log-rotation.md so the archive and
+rotation gate precedes the first start. The manager implements that workflow;
+its usage examples below are non-creating operations only.
+
 PM2 app names use the pattern: {workspace_name}-{agent_id}
 (workspace_name from collab.config.json)
 
 Usage:
-  python bin/pm2_watchers.py start --agent orchestrator
-  python bin/pm2_watchers.py ensure --agent orchestrator   # start if not running
   python bin/pm2_watchers.py status --all
   python bin/pm2_watchers.py stop --agent orchestrator
   python bin/pm2_watchers.py logs --agent orchestrator --lines 50
@@ -388,6 +390,25 @@ def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
             verify_codex_sidecar_runtime_home(runtime_home)
 
 
+def process_status_exit_code(agent_id: str) -> int:
+    result = pm2_run(["describe", app_name(agent_id)], capture_output=True)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(
+            result.stderr,
+            end="" if result.stderr.endswith("\n") else "\n",
+            file=sys.stderr,
+        )
+    if result.returncode != 0:
+        return result.returncode
+    return 0 if re.search(
+        r"(?:│|\b)status\s*(?:│|:)\s*online(?:\s*│|\b)",
+        result.stdout or "",
+        re.IGNORECASE,
+    ) is not None else 1
+
+
 def main():
     args = parse_args()
 
@@ -470,9 +491,9 @@ def main():
         elif args.command == "delete":
             pm2_run(["delete", name])
         elif args.command == "status":
-            result = pm2_run(["describe", name])
-            if result.returncode != 0 and status_exit_code == 0:
-                status_exit_code = result.returncode
+            result = process_status_exit_code(agent_id)
+            if result != 0 and status_exit_code == 0:
+                status_exit_code = result
         elif args.command == "logs":
             pm2_run(["logs", name, "--lines", str(args.lines), "--nostream"])
 

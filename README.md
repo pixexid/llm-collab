@@ -134,6 +134,10 @@ After initialization, add optional project contracts such as
 `ui_ux.required_design_docs`, `db.shared_supabase_project_ref`,
 and `db.required_surfaces` directly to that project's `projects.json` entry.
 
+Before the first watcher-enabled bootstrap in a new workspace, complete the
+[PM2 Log Rotation workflow](docs/workflows/pm2-log-rotation.md). Bootstrap may
+restart the agent's PM2 watcher, so the archive and rotation gate comes first.
+
 `scripts/init.py` reinitializes the workspace. To add a project to an existing
 workspace, edit `projects.json` instead of rerunning initialization.
 
@@ -375,7 +379,7 @@ Prefix collaboration commands with `bin/llm-collab`:
 | `task_contract.py sync/validate ...` | Sync and validate UI/UX and database task contracts |
 | `project_issue_queue.py reconcile/validate --project <project>` | Refresh or validate a GitHub-backed execution queue |
 | `worktree_ctl.py create/list/preflight/...` | Manage isolated implementation worktrees |
-| `pm2_watchers.py start/status/logs ...` | Manage optional inbox watchers and delivery sidecars |
+| `pm2_watchers.py status/logs/stop ...` | Inspect or stop optional PM2 apps; enable them through the [PM2 Log Rotation workflow](docs/workflows/pm2-log-rotation.md) |
 | `autonomous_loop.py start/update/show/clear --project <project>` | Record persistent queue-runner state |
 | `post_merge_cleanup.py --project <project> ...` | Audit or clean integrated worktrees and branches |
 | `init_agent_memory.py --agent <id> --target <target>` | Generate collaboration-aware worker guidance |

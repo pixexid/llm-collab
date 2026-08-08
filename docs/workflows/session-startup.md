@@ -26,6 +26,11 @@ participant.
 
 ## Bootstrap first
 
+In a new workspace, complete the canonical
+[PM2 Log Rotation workflow](pm2-log-rotation.md) before the first
+watcher-enabled bootstrap. Bootstrap may restart the agent's PM2 watcher;
+subsequent session starts use the already-configured rotation setup.
+
 ```bash
 <runtime_root>/bin/llm-collab current_runtime.py --agent <agent_id>
 ```
