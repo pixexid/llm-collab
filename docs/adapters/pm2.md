@@ -148,6 +148,9 @@ runs. A failure is not proof that a busy runtime rejected the turn before
 acceptance, so this behavior must not be described as safe busy deferral. Avoid
 targeting a running operator thread.
 
+For settled-action diagnostic events and their response procedure, use the
+canonical [Session Autobridge Runbook](../workflows/session-autobridge-runbook.md#settled-diagnostic-failures).
+
 The planned [Thread Event Runner](../workflows/thread-event-runner-rfc.md)
 defines transactional busy deferral, coalescing, leases, and ambiguous-delivery
 reconciliation. None of those guarantees are implemented by the current PM2
