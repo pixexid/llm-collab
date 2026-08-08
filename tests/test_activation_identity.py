@@ -427,7 +427,7 @@ class DeliverFoundationTest(unittest.TestCase):
             {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
         )
         write_json(root / "agents.json", {"agents": []})
-        for agent in ("codex", "claude", "relay", "operator"):
+        for agent in ("codex", "claude", "relay"):
             payload = json.loads((root / "agents.json").read_text())
             payload["agents"].append(
                 {"id": agent, "display_name": agent,
@@ -460,7 +460,9 @@ class DeliverFoundationTest(unittest.TestCase):
         args[args.index("--to") + 1] = recipient
         return args
 
-    def bind_recipient(self, root: Path, recipient: str) -> None:
+    def bind_recipient(
+        self, root: Path, recipient: str, chat_id: str = "CHAT-TEST0001"
+    ) -> None:
         agents_path = root / "agents.json"
         agents = json.loads(agents_path.read_text())
         next(agent for agent in agents["agents"] if agent["id"] == recipient)[
@@ -468,7 +470,7 @@ class DeliverFoundationTest(unittest.TestCase):
         ]["watcher_enabled"] = True
         write_json(agents_path, agents)
 
-        session_id = f"SESSION-{recipient.upper()}-EXACT"
+        session_id = f"SESSION-{recipient.upper()}-{chat_id}-EXACT"
         runtime_family = {"codex": "codex_app", "claude": "claude_app", "relay": "pi"}[
             recipient
         ]
@@ -479,7 +481,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 "session_id": session_id,
                 "agent_id": recipient,
                 "project_id": "amiga",
-                "chat_id": "CHAT-TEST0001",
+                "chat_id": chat_id,
                 "mode": "auto-read",
                 "status": "parked",
                 "wake_strategy": "runtime_trigger",
@@ -498,11 +500,11 @@ class DeliverFoundationTest(unittest.TestCase):
             / "session_autobridge"
             / "bindings"
             / "amiga"
-            / "CHAT-TEST0001"
+            / chat_id
             / f"{recipient}.json",
             {
                 "project_id": "amiga",
-                "chat_id": "CHAT-TEST0001",
+                "chat_id": chat_id,
                 "agent_id": recipient,
                 "session_id": session_id,
                 "runtime_family": runtime_family,
@@ -730,6 +732,7 @@ class DeliverFoundationTest(unittest.TestCase):
             self.assertNotIn("other-project", p.read_text())
 
     def deliver_same_second(self, root: Path, *, forced_nonce: bool) -> None:
+        self.bind_recipient(root, "claude")
         extra_patch = "deliver.ts = lambda: '2026-01-01T00-00-00'; "
         if forced_nonce:
             # Adversarial randomness: os.urandom always returns the same
@@ -743,7 +746,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
                     str(REPO_ROOT / "bin"),
-                    *self.delivery_args("operator"), "--body-file", str(body),
+                    *self.delivery_args(), "--body-file", str(body),
                     "--activation", "--related-task", "TASK-TEST01",
                     "--worktree", self.worktree, "--branch", "b",
                 ],
@@ -753,13 +756,13 @@ class DeliverFoundationTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
 
     def assert_two_distinct_deliveries(self, root: Path) -> None:
-        packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-operator_*.md"))
+        packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
         self.assertEqual(2, len(packets), "no overwrite on same-second collision")
         sender_copies = sorted(self.chat_dir.glob("2026-01-01T00-00-00_from-codex_*.md"))
         self.assertEqual(2, len(sender_copies), "both sender copies survive")
         contents = {p.read_text() for p in packets}
         self.assertEqual(2, len(contents), "two distinct immutable packet contents")
-        inbox = json.loads((root / "agents" / "operator" / "inbox.json").read_text())
+        inbox = json.loads((root / "agents" / "claude" / "inbox.json").read_text())
         self.assertEqual(2, len(inbox["unread"]), "two distinct inbox entries")
         for p in packets:
             self.assertIn(
@@ -926,6 +929,7 @@ class DeliverFoundationTest(unittest.TestCase):
 
     def test_symlinked_worktree_serializes_one_canonical_identity(self):
         root = self.make_workspace()
+        self.bind_recipient(root, "claude")
         link = root / "wt-link"
         link.symlink_to(self.worktree)
         write(root / "b.md", "work")
@@ -934,7 +938,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=""),
                     str(REPO_ROOT / "bin"),
-                    "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "operator",
+                    "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "claude",
                     "--project", "amiga", "--title", f"canon {i}",
                     "--body-file", str(root / "b.md"),
                     "--activation", "--related-task", "TASK-TEST01",
@@ -946,7 +950,7 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
         worktrees = set()
-        for p in sorted(self.chat_dir.glob("*_to-operator_canon-*.md")):
+        for p in sorted(self.chat_dir.glob("*_to-claude_canon-*.md")):
             for line in p.read_text().splitlines():
                 if line.startswith("worktree:"):
                     worktrees.add(line.split(":", 1)[1].strip())
@@ -962,6 +966,8 @@ class DeliverFoundationTest(unittest.TestCase):
         root = self.make_workspace()
         chat2 = root / "Chats" / "2026-01-02_other__CHAT-TEST0002"
         write_json(chat2 / "meta.json", {"chat_id": "CHAT-TEST0002", "project_id": "amiga"})
+        self.bind_recipient(root, "claude", "CHAT-TEST0001")
+        self.bind_recipient(root, "claude", "CHAT-TEST0002")
         body = root / "b.md"
         write(body, "work")
         extra_patch = (
@@ -973,7 +979,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
                     str(REPO_ROOT / "bin"),
-                    "--chat", chat, "--from", "codex", "--to", "operator",
+                    "--chat", chat, "--from", "codex", "--to", "claude",
                     "--project", "amiga", "--title", "same title",
                     "--body-file", str(body),
                     "--activation", "--related-task", "TASK-TEST01",
@@ -984,8 +990,8 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
 
-        packet1 = next(self.chat_dir.glob("2026-01-01T00-00-00_to-operator_*.md"))
-        packet2 = next(chat2.glob("2026-01-01T00-00-00_to-operator_*.md"))
+        packet1 = next(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        packet2 = next(chat2.glob("2026-01-01T00-00-00_to-claude_*.md"))
         self.assertEqual(packet1.name, packet2.name, "precondition: identical basenames")
 
         commands = []
@@ -1023,9 +1029,10 @@ class DeliverFoundationTest(unittest.TestCase):
 
     def test_non_activation_messages_unchanged(self):
         root = self.make_workspace()
-        result = self.run_deliver(root, recipient="operator")
+        self.bind_recipient(root, "claude")
+        result = self.run_deliver(root)
         self.assertEqual(0, result.returncode, result.stderr)
-        packets = sorted(self.chat_dir.glob("*_to-operator_*.md"))
+        packets = sorted(self.chat_dir.glob("*_to-claude_*.md"))
         body = packets[0].read_text()
         self.assertNotIn("activation", body.split("---")[1], "no activation frontmatter")
         self.assertNotIn("ACTIVATION PACKET", body)
