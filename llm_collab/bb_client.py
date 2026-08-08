@@ -39,7 +39,7 @@ import json
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
@@ -49,6 +49,12 @@ PINNED_BB_VERSION = "0.35.1"
 # Refuse rather than parse past this. A response this large is a contract break,
 # and truncating it would turn a resource limit into a correctness bug.
 MAX_RESPONSE_CHARS = 1_048_576
+
+# Healthy local SIGKILL delivery completes in moments. Ten seconds leaves room
+# for a transient kernel/storage stall without letting a permanently blocked
+# uninterruptible child wedge the caller forever. If this expires, userspace
+# cannot reclaim the child: it remains unreaped and its exit status is lost.
+KILL_CHILD_REAP_TIMEOUT_SECONDS = 10.0
 
 # bb's own `thread log --limit` default. Passed EXPLICITLY so the page bound is
 # this module's, not an implicit default that can move under us.
@@ -78,6 +84,10 @@ REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 class BbTransportTimeout(Exception):
     """Raised by a transport when a call exceeds its deadline."""
+
+
+class BbChildReapTimeout(BbTransportTimeout):
+    """SIGKILL was sent, but the child remained unreaped past the reap bound."""
 
 
 @dataclass(frozen=True)
@@ -736,7 +746,7 @@ class BbClient:
             # second real turn.
             return BbRefusal(
                 REFUSAL_AMBIGUOUS,
-                f"{' '.join(argv)} timed out; the operation may have been performed",
+                f"{result.detail}; the operation may have been performed",
             )
         if isinstance(result, BbRefusal) and result.reason == REFUSAL_MALFORMED_RESPONSE:
             # The only malformed refusal _call() raises is its size bound, and it
@@ -893,14 +903,24 @@ def subprocess_transport(
         # subtracted from what the waits below get.
         deadline = time.monotonic() + timeout_seconds
         process = None
+        reap_timed_out = False
 
         def kill_child() -> None:
+            nonlocal reap_timed_out
             assert process is not None
             try:
                 process.kill()
             except ProcessLookupError:
                 pass
-            process.wait()
+            try:
+                process.wait(timeout=KILL_CHILD_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                reap_timed_out = True
+                raise BbChildReapTimeout(
+                    f"{' '.join(argv)}: SIGKILL sent but the child did not exit within "
+                    f"{KILL_CHILD_REAP_TIMEOUT_SECONDS}s; its exit status is unavailable "
+                    "and the child remains unreaped because userspace cannot reclaim it"
+                ) from exc
 
         def discard_late_process(late_process) -> None:
             try:
@@ -971,7 +991,29 @@ def subprocess_transport(
         finally:
             launch_decided.set()
 
-        pool = ThreadPoolExecutor(max_workers=2)
+        def start_reader(stream, name: str):
+            future = Future()
+
+            def read_stream() -> None:
+                if not future.set_running_or_notify_cancel():
+                    return
+                try:
+                    value = _read_bounded(stream, max_response_chars)
+                except BaseException as exc:
+                    future.set_exception(exc)
+                else:
+                    future.set_result(value)
+
+            thread = threading.Thread(
+                target=read_stream,
+                name=f"bb-subprocess-{name}-reader",
+                daemon=True,
+            )
+            thread.start()
+            return future, thread
+
+        out, stdout_reader = start_reader(process.stdout, "stdout")
+        err, stderr_reader = start_reader(process.stderr, "stderr")
         aborting = False
         try:
             # Giving each wait a fresh `timeout_seconds` made the configured
@@ -979,8 +1021,6 @@ def subprocess_transport(
             # stderr just under a second limit, returned after nearly twice it,
             # and process.wait() could add a third interval. The watcher's
             # configured bound has to bound the CALL.
-            out = pool.submit(_read_bounded, process.stdout, max_response_chars)
-            err = pool.submit(_read_bounded, process.stderr, max_response_chars)
             stdout = out.result(timeout=remaining())
             stderr = err.result(timeout=remaining())
             exit_code = process.wait(timeout=remaining())
@@ -1001,12 +1041,16 @@ def subprocess_transport(
         finally:
             # A timed-out/oversized reader must never be joined before the child
             # is dead: it may still hold the pipe open and turn the deadline into
-            # a watcher-wide hang. The pipes are closed below so those readers
-            # can unwind without delaying this call.
-            pool.shutdown(wait=not aborting, cancel_futures=True)
+            # a watcher-wide hang. If the child cannot die, even closing its pipe
+            # from this thread may block behind the reader. Leave each running
+            # reader and its descriptor explicitly abandoned; it finishes if the
+            # child returns, and cannot delay interpreter exit if it never does.
+            if not aborting:
+                stdout_reader.join()
+                stderr_reader.join()
             if process is not None:
-                for pipe in (process.stdout, process.stderr):
-                    if pipe is not None:
+                for pipe, reader in ((process.stdout, out), (process.stderr, err)):
+                    if pipe is not None and (not reap_timed_out or reader.done()):
                         pipe.close()
         return BbTransportResult(exit_code, stdout, stderr)
 

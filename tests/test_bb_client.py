@@ -11,6 +11,7 @@ import io
 import json
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import unittest
@@ -19,6 +20,7 @@ from unittest.mock import patch
 
 from llm_collab.bb_client import (
     EXECUTION_PROBE_EVENTS,
+    KILL_CHILD_REAP_TIMEOUT_SECONDS,
     MAX_EVENT_PAGE,
     MAX_RESPONSE_CHARS,
     PINNED_BB_VERSION,
@@ -30,6 +32,7 @@ from llm_collab.bb_client import (
     REFUSAL_TRANSPORT_FAILED,
     REFUSAL_VERSION_MISMATCH,
     SLICE_1A_PROFILE,
+    BbChildReapTimeout,
     BbClient,
     BbEventPage,
     BbProfile,
@@ -403,6 +406,21 @@ class DeadlineTest(unittest.TestCase):
         self.assertIsInstance(outcome, BbRefusal)
         self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
         self.assertEqual(1, transport.count("thread", "spawn"), "a timed-out spawn is never retried")
+
+    def test_task_bearing_reap_timeout_states_that_exit_status_is_unavailable(self):
+        client, transport = enabled_client(
+            {
+                "thread spawn": BbChildReapTimeout(
+                    "SIGKILL sent; exit status is unavailable and the child remains unreaped"
+                )
+            }
+        )
+        outcome = spawn(client)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_AMBIGUOUS, outcome.reason)
+        self.assertIn("exit status is unavailable", outcome.detail)
+        self.assertIn("remains unreaped", outcome.detail)
+        self.assertEqual(1, transport.count("thread", "spawn"))
 
     def test_a_read_gets_exactly_one_attempt_against_one_deadline(self):
         """A retry loop hands each attempt the full timeout, so N attempts is N deadlines.
@@ -913,6 +931,194 @@ class ProductionTransportTest(unittest.TestCase):
         transport = subprocess_transport(self._python("import time; time.sleep(30)"))
         with self.assertRaises(BbTransportTimeout):
             transport([], 0.5)
+
+    def test_killed_child_is_reaped_with_its_exit_status_intact(self):
+        """Bounding the reap must not turn the common completed wait into a leak."""
+        import llm_collab.bb_client as bb
+
+        process = None
+
+        class ExitingAfterKill:
+            def __init__(self, *_args, **_kwargs):
+                nonlocal process
+                process = self
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+                self.wait_calls = []
+                self.returncode = None
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                if len(self.wait_calls) == 1:
+                    raise subprocess.TimeoutExpired("fake-bb", timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["fake-bb"])
+        with patch.object(bb.subprocess, "Popen", ExitingAfterKill):
+            with self.assertRaises(BbTransportTimeout):
+                transport([], 0.5)
+
+        self.assertIsNotNone(process)
+        self.assertEqual(-9, process.returncode)
+        self.assertEqual(KILL_CHILD_REAP_TIMEOUT_SECONDS, process.wait_calls[1])
+
+    def test_unreapable_child_reports_a_bounded_explicit_outcome(self):
+        """GH-653: an unkillable child cannot wedge the transport's caller."""
+        import llm_collab.bb_client as bb
+
+        test_case = self
+        process = None
+
+        class NeverExits:
+            def __init__(self, *_args, **_kwargs):
+                nonlocal process
+                process = self
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+                self.wait_calls = []
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                if timeout is None:
+                    test_case.fail("kill_child called process.wait() without a timeout")
+                raise subprocess.TimeoutExpired("fake-bb", timeout)
+
+            def kill(self):
+                pass
+
+        transport = subprocess_transport(["fake-bb"])
+        started = time.monotonic()
+        with patch.object(bb.subprocess, "Popen", NeverExits):
+            with self.assertRaises(BbChildReapTimeout) as raised:
+                transport([], 0.5)
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertIsNotNone(process)
+        self.assertEqual(KILL_CHILD_REAP_TIMEOUT_SECONDS, process.wait_calls[1])
+        self.assertIn("exit status is unavailable", str(raised.exception))
+        self.assertIn("remains unreaped", str(raised.exception))
+
+    def test_reap_timeout_abandons_only_daemon_reader_threads(self):
+        """Blocked readers may survive the call, but must not hold interpreter exit."""
+        import llm_collab.bb_client as bb
+
+        release_reads = threading.Event()
+        reads_started = [threading.Event(), threading.Event()]
+        streams = []
+
+        class BlockingStream:
+            def __init__(self, index):
+                self.index = index
+                self.closed = False
+                streams.append(self)
+
+            def read(self, _size=-1):
+                reads_started[self.index].set()
+                release_reads.wait()
+                return ""
+
+            def close(self):
+                self.closed = True
+
+        class NeverExits:
+            def __init__(self, *_args, **_kwargs):
+                self.stdout = BlockingStream(0)
+                self.stderr = BlockingStream(1)
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("fake-bb", timeout)
+
+            def kill(self):
+                pass
+
+        before_threads = set(threading.enumerate())
+        readers = []
+        try:
+            transport = subprocess_transport(["fake-bb"])
+            with patch.object(bb.subprocess, "Popen", NeverExits):
+                with self.assertRaises(BbChildReapTimeout):
+                    transport([], 0.1)
+
+            self.assertTrue(all(started.wait(1) for started in reads_started))
+            readers = [
+                thread
+                for thread in threading.enumerate()
+                if thread not in before_threads and thread.name.startswith("bb-subprocess-")
+            ]
+            self.assertEqual(2, len(readers), "both blocked readers must be accounted for")
+            self.assertTrue(
+                all(thread.daemon for thread in readers),
+                "a reap timeout left a non-daemon reader able to wedge interpreter exit",
+            )
+            self.assertTrue(all(thread.is_alive() for thread in readers))
+            self.assertTrue(
+                all(not stream.closed for stream in streams),
+                "blocked descriptors were described as closed even though their reads survived",
+            )
+        finally:
+            release_reads.set()
+            for thread in readers:
+                thread.join(timeout=1)
+
+    def test_reap_timeout_does_not_delay_interpreter_exit(self):
+        script = textwrap.dedent(
+            """
+            import subprocess
+            import threading
+            from unittest.mock import patch
+
+            import llm_collab.bb_client as bb
+
+            never = threading.Event()
+
+            class BlockingStream:
+                def read(self, _size=-1):
+                    never.wait()
+                    return ""
+
+                def close(self):
+                    raise AssertionError("reap timeout tried to close a blocked stream")
+
+            class NeverExits:
+                def __init__(self, *_args, **_kwargs):
+                    self.stdout = BlockingStream()
+                    self.stderr = BlockingStream()
+
+                def wait(self, timeout=None):
+                    raise subprocess.TimeoutExpired("fake-bb", timeout)
+
+                def kill(self):
+                    pass
+
+            transport = bb.subprocess_transport(["fake-bb"])
+            with patch.object(bb.subprocess, "Popen", NeverExits):
+                try:
+                    transport([], 0.1)
+                except bb.BbChildReapTimeout:
+                    pass
+                else:
+                    raise AssertionError("reap timeout was not reported")
+            """
+        )
+        started = time.monotonic()
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertLess(
+            time.monotonic() - started,
+            1.0,
+            "blocked reader threads delayed interpreter exit",
+        )
 
     def test_launch_time_is_charged_against_the_budget(self):
         """GH-584: launch cost is subtracted from the post-launch waits."""
