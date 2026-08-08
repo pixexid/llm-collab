@@ -300,14 +300,8 @@ def _process_is_terminal_failure(record: dict) -> bool:
 def wait_for_managed_readiness(
     owned_names: frozenset[str],
     definitions: dict[str, dict],
-) -> tuple[dict[str, dict], list[dict]]:
-    """Wait for declared PM2 processes to be online with populated metadata.
-
-    Returns the owned managed processes and the FULL pm2 jlist snapshot from the
-    readiness poll, so a caller can run converse checks (an undeclared process
-    running this runtime's watcher) against the same process list rather than
-    re-reading pm2.
-    """
+) -> dict[str, dict]:
+    """Wait for declared PM2 processes to be online with populated metadata."""
     deadline = time.monotonic() + PM2_READINESS_TIMEOUT_SECONDS
     expected = set(definitions)
     while True:
@@ -317,9 +311,9 @@ def wait_for_managed_readiness(
             _process_is_terminal_failure(actual[name])
             for name in expected.intersection(actual)
         ):
-            return actual, records
+            return actual
         if expected.issubset(actual) and all(_process_is_ready(actual[name]) for name in expected):
-            return actual, records
+            return actual
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             details = []
@@ -366,23 +360,78 @@ def _record_status(record: dict) -> str | None:
     return status if isinstance(status, str) else None
 
 
-def _first_operand(args: object) -> str | None:
-    """The program an interpreter runs: the first non-flag token in ``args``.
+_PYTHON_INTERPRETER_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
+# Options that consume the following token as their value, enumerated from
+# `python3.11 --help`. Short: -c cmd, -m mod, -W arg, -X opt. Long:
+# --check-hash-based-pycs mode. Every other 3.11 option (-b -B -d -E -h -i -I -O
+# -OO -P -q -s -S -u -v -V -x --help --version --help-env --help-xoptions
+# --help-all) is a flag that consumes nothing. -c/-m terminate the option list
+# and run a command string / module, so they execute NO file.
+_PYTHON_SHORT_VALUE_OPTIONS = frozenset({"-c", "-m", "-W", "-X"})
+_PYTHON_LONG_VALUE_OPTIONS = frozenset({"--check-hash-based-pycs"})
+_PYTHON_NO_FILE_OPTIONS = frozenset({"-c", "-m"})
 
-    A leading ``-`` marks an interpreter flag (python's ``-u``), not the program,
-    so it is skipped. Everything after the operand belongs to that program, so a
-    path that appears only as a later positional or as a flag value is DATA, not
-    an executed script. Mirrors how an interpreter itself picks argv[0]. ``args``
-    is a list on this install; the string branch guards a representation change.
+
+def _is_python_interpreter(exec_path: object) -> bool:
+    """True when PM2's resolved ``pm_exec_path`` is a Python interpreter binary.
+
+    The deployed watcher is a Python file, so only a Python interpreter executes
+    it as a program. A bare binary (``cat``, ``grep``, ``node``) carrying the
+    watcher path as an argument reads it as DATA, not a program. PM2's
+    ``exec_interpreter`` cannot make this distinction: it is resolved from the
+    script EXTENSION (``.py`` -> python) and is ``'none'`` for every bare-binary
+    script -- so a ``python3`` script and a ``cat`` script both report
+    ``exec_interpreter='none'``. The basename of PM2's own resolved
+    ``pm_exec_path`` is the only discriminator, and Python's binary names are
+    stable (``python``, ``python3``, ``python3.11``).
     """
-    if isinstance(args, list):
-        tokens = [str(arg) for arg in args if isinstance(arg, (str, int, float))]
-    elif isinstance(args, str):
-        tokens = args.split()
-    else:
-        return None
-    for token in tokens:
+    return isinstance(exec_path, str) and bool(
+        _PYTHON_INTERPRETER_RE.match(os.path.basename(exec_path))
+    )
+
+
+def _python_program_operand(args: list[str]) -> str | None:
+    """The file a Python interpreter runs, or None when it runs no file.
+
+    Walks the interpreter argv per Python 3.11's option grammar, with every
+    value-taking option enumerated from `python3.11 --help`, so an option with a
+    SEPARATE value cannot masquerade as the program. `python3 --check-hash-based
+    -pycs default <watcher>` is the shape that broke the short-only list: a LONG
+    option whose value is the next token. Value options -c/-m run a command
+    string / module (no file); -W/-X/--check-hash-based-pycs consume their value
+    (separate, short-attached `-Wignore`, or long-`=` `--opt=value`) and continue
+    to the program. `--` ends option processing; `-` is stdin. Returns the first
+    program token, else None.
+
+    Residual (stated, not silent): the value-option set is fixed to Python 3.11.
+    Every 3.11 flag is self-consuming, so a flag is always safe; the only gap is
+    a FUTURE Python adding a value-taking option, which would fail OPEN the same
+    way --check-hash-based-pycs did. Re-derive from the installed interpreter if
+    the runtime moves off 3.11.
+    """
+    index = 0
+    count = len(args)
+    while index < count:
+        token = args[index]
+        if token == "--":
+            return args[index + 1] if index + 1 < count else None
+        if token == "-":
+            return None  # program is stdin
+        if token.startswith("--"):
+            name = token.split("=", 1)[0]
+            if name in _PYTHON_LONG_VALUE_OPTIONS:
+                index += 1 if "=" in token else 2  # --opt=value vs --opt value
+                continue
+            index += 1  # long flag (--help, --version, --help-all, ...)
+            continue
         if token.startswith("-"):
+            option = token[:2]
+            if option in _PYTHON_SHORT_VALUE_OPTIONS:
+                if option in _PYTHON_NO_FILE_OPTIONS:
+                    return None  # -c cmd / -m mod run no file
+                index += 1 if len(token) > 2 else 2  # -Wignore vs -W ignore
+                continue
+            index += 1  # short flag (-u, -O, -OO, -bb, ...)
             continue
         return token
     return None
@@ -407,24 +456,46 @@ def _token_resolves_to(token: str, cwd: str | None, resolved_watch_script: str) 
 def _record_executes_watch_script(record: dict, resolved_watch_script: str) -> bool:
     """True when a LIVE process is executing the runtime's watch script.
 
-    Two executable positions count and only those: the ``script`` field itself
-    (a directly-invoked watcher), or the first non-flag operand of ``args`` (the
-    program an interpreter runs). A path that appears only as a later argument or
-    a flag value is data, not an executed script, so it is not flagged (an
-    unrelated app that merely receives the watcher path as input is not a
-    dispatcher). Only a process in a live PM2 status can dispatch -- a stopped or
-    errored entry has no live process and ``pm2 save`` resurrects it stopped, not
-    live -- so it is not an offender even when its command line names the script.
+    Two execution shapes count, derived from what PM2 reports rather than by
+    scanning command tokens:
+
+    * Direct execution -- PM2 resolved ``pm_exec_path`` (the file it runs) to the
+      watch script. This is PM2's own resolved answer to "what file does this
+      process execute", so it covers a bare-script watcher AND a ``.py`` PM2
+      auto-interprets (``exec_interpreter`` set from the extension). No argv
+      reasoning at all.
+
+    * Interpreter-as-script -- PM2 ran ``<binary> <args>`` where the binary is a
+      Python interpreter (``script: "python3"``; ``exec_interpreter`` is ``'none'``
+      because PM2 never marks a bare-binary script as an interpreter) and the
+      watch script is the interpreter's program operand. The operand is found with
+      a Python-aware parse so interpreter options (``-W ignore``) and the ``--``
+      terminator cannot hide or impersonate it. Scoped to Python because the
+      watcher is a Python file: a non-interpreter binary (``cat``) carrying the
+      path as its first argument reads it as data, not a program.
+
+    Only a process in a live PM2 status can dispatch -- a stopped or errored entry
+    has no live process and ``pm2 save`` resurrects it stopped, not live.
     """
     if _record_status(record) not in PM2_LIVE_STATUSES:
         return False
     environment = record["pm2_env"]
     cwd = environment.get("pm_cwd")
     cwd_text = cwd if isinstance(cwd, str) else None
-    script = environment.get("script")
-    if isinstance(script, str) and _token_resolves_to(script, cwd_text, resolved_watch_script):
+    exec_path = environment.get("pm_exec_path")
+    if isinstance(exec_path, str) and _token_resolves_to(
+        exec_path, cwd_text, resolved_watch_script
+    ):
         return True
-    operand = _first_operand(environment.get("args"))
+    if not _is_python_interpreter(exec_path):
+        return False
+    raw_args = environment.get("args")
+    tokens = (
+        [str(arg) for arg in raw_args if isinstance(arg, (str, int, float))]
+        if isinstance(raw_args, list)
+        else []
+    )
+    operand = _python_program_operand(tokens)
     return operand is not None and _token_resolves_to(operand, cwd_text, resolved_watch_script)
 
 
@@ -468,13 +539,12 @@ def verify_deployment(
         raise DeployError(f"target head does not match deployed head {head}")
     if git(target, "status", "--porcelain=v1", "--untracked-files=no"):
         raise DeployError("deployed target has tracked changes after reset")
-    actual, records = wait_for_managed_readiness(owned_names, definitions)
+    actual = wait_for_managed_readiness(owned_names, definitions)
     expected = set(definitions)
     if set(actual) != expected:
         missing = sorted(expected - set(actual))
         extra = sorted(set(actual) - expected)
         raise DeployError(f"PM2 roster mismatch: missing={missing} extra={extra}")
-    refuse_undeclared_runtime_watchers(target, expected, records)
     for name, definition in definitions.items():
         record = actual[name]
         environment = record.get("pm2_env")
@@ -601,6 +671,16 @@ def deploy(source: Path, target: Path | None = None) -> dict[str, str]:
     # taking the existing watcher roster down.
     previous_definitions = ecosystem_definitions(target)
     previous_owned_names = frozenset(previous_definitions)
+    # Gate before the FIRST mutation (GH-679): an undeclared process executing
+    # this runtime's watcher is a live dispatcher on the same inbox/log surfaces,
+    # so conformance cannot be established while it runs. Detecting it only after
+    # reset_target would mean code replacement happened under it, and rollback's
+    # verify_deployment would hit the same offender and abort. Inspect the live
+    # roster now and refuse without mutating anything, so there is nothing to roll
+    # back for this condition. verify_deployment deliberately does NOT re-run this
+    # check, which is what keeps rollback reachable when a deploy fails for
+    # another reason.
+    refuse_undeclared_runtime_watchers(target, set(previous_owned_names), pm2_jlist())
     try:
         fence_watchers(previous_owned_names)
         reset_target(target, head)
@@ -608,6 +688,14 @@ def deploy(source: Path, target: Path | None = None) -> dict[str, str]:
         owned_names = previous_owned_names | frozenset(definitions)
         reconcile_pm2(target, owned_names, definitions)
         verify_deployment(target, head, owned_names, definitions)
+        # Recheck after the mutations (GH-679 TOCTOU): a watcher that started
+        # AFTER the preflight snapshot -- while we fenced, reset, restarted, or
+        # polled readiness -- is invisible to verify_deployment, which sees only
+        # owned processes. Inspect the live roster again before pm2 save so a
+        # mid-deploy shadow reaches rollback instead of being persisted into the
+        # reboot dump. The preflight gate above stays: it is what prevents code
+        # replacement under a live dispatcher.
+        refuse_undeclared_runtime_watchers(target, set(owned_names), pm2_jlist())
         pm2_run(["save"])
     except (OSError, subprocess.SubprocessError, DeployError) as error:
         try:
