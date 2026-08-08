@@ -1376,6 +1376,310 @@ class SessionAutobridgeTest(unittest.TestCase):
             prepared=prepared,
         )
 
+    def test_watch_inbox_event_failure_after_success_returns_receipt_without_redispatch(self):
+        session = {
+            "session_id": "SESSION-EVENT-FAILURE",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-event-failure"},
+        }
+        message = {"path": "Chats/event-failure/packet.md", "frontmatter": {}}
+        runtime_trigger = Mock(
+            return_value={"returncode": 0, "delivery_accepted": True}
+        )
+        returned_actions = []
+        watcher_events = []
+
+        def settle(payload, _path, *, prepared=None):
+            payload.clear()
+            payload.update(prepared[0])
+
+        def dispatch(*args, **kwargs):
+            result = session_autobridge_lib.dispatch_session(*args, **kwargs)
+            returned_actions.extend(result["actions"])
+            return result
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            runtime_trigger,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            side_effect=settle,
+        ), patch.object(
+            session_autobridge_lib,
+            "append_event",
+            side_effect=OSError("event fsync failed"),
+        ), patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=["SESSION-EVENT-FAILURE"],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            side_effect=dispatch,
+        ), patch.object(
+            watch_inbox_lib,
+            "emit",
+            side_effect=lambda event, _json: watcher_events.append(event),
+        ), patch.object(
+            watch_inbox_lib,
+            "mark_messages_read",
+        ) as mark_read:
+            first = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+            second = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+
+        self.assertIn(message["path"], session["processed_messages"])
+        self.assertEqual([message["path"]], first)
+        self.assertEqual([], second)
+        self.assertEqual(1, len(returned_actions))
+        self.assertEqual(
+            [
+                {
+                    "operation": "append_event",
+                    "error_type": "OSError",
+                    "detail": "event fsync failed",
+                }
+            ],
+            returned_actions[0]["diagnostic_errors"],
+        )
+        consumed = [
+            event for event in watcher_events if event["event"] == "autobridge_consumed"
+        ]
+        self.assertEqual(1, len(consumed))
+        self.assertEqual(
+            returned_actions[0]["diagnostic_errors"],
+            consumed[0]["diagnostic_errors"],
+        )
+        mark_read.assert_called_once_with("gemini", [message["path"]])
+        runtime_trigger.assert_called_once_with(session, message)
+
+    def test_leased_dispatch_still_settles_before_event_failure(self):
+        session = {
+            "session_id": "SESSION-LEASED-EVENT-FAILURE",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-leased-event-failure"},
+        }
+        message = {
+            "path": "Chats/leased-event-failure/packet.md",
+            "frontmatter": {},
+            "activation_lease": {"fence_token": 1},
+        }
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        fenced_boundaries = []
+
+        def settle(payload, _path, *, prepared=None):
+            payload.clear()
+            payload.update(prepared[0])
+
+        def fenced(_session, _message, *, boundary, mutation):
+            fenced_boundaries.append(boundary)
+            return True, None, mutation()
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "activation_fenced_mutation",
+            side_effect=fenced,
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            runtime_trigger,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            side_effect=settle,
+        ), patch.object(
+            session_autobridge_lib,
+            "append_event",
+            side_effect=OSError("event fsync failed"),
+        ):
+            first = session_autobridge_lib.dispatch_session(
+                "SESSION-LEASED-EVENT-FAILURE"
+            )
+            second = session_autobridge_lib.dispatch_session(
+                "SESSION-LEASED-EVENT-FAILURE"
+            )
+
+        self.assertIn("mark_message_processed", fenced_boundaries)
+        self.assertIn(message["path"], session["processed_messages"])
+        self.assertEqual(
+            "OSError", first["actions"][0]["diagnostic_errors"][0]["error_type"]
+        )
+        self.assertEqual([], second["actions"])
+        runtime_trigger.assert_called_once_with(session, message)
+
+    def test_mixed_poll_event_failure_returns_settled_action_and_receipt(self):
+        session = {
+            "session_id": "SESSION-MIXED-EVENT-FAILURE",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-mixed"},
+        }
+        message = {"path": "Chats/mixed/accepted.md", "frontmatter": {}}
+        refusal = {
+            "path": "Chats/mixed/refused.md",
+            "reason": "route_ambiguous",
+            "packet_mtime": 1.0,
+        }
+        runtime_trigger = Mock(
+            return_value={"returncode": 0, "delivery_accepted": True}
+        )
+        returned_actions = []
+        watcher_events = []
+
+        def matching(
+            _session,
+            *,
+            invocation_repo_targets=None,
+            repo_scope_refusals=None,
+            skip_paths=None,
+        ):
+            repo_scope_refusals.append(refusal)
+            return [message]
+
+        def settle(payload, _path, *, prepared=None):
+            payload.clear()
+            payload.update(prepared[0])
+
+        def append(_session_id, event):
+            if event.get("message_path") == refusal["path"]:
+                raise OSError("post-loop event fsync failed")
+
+        def dispatch(*args, **kwargs):
+            result = session_autobridge_lib.dispatch_session(*args, **kwargs)
+            returned_actions.extend(result["actions"])
+            return result
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "matching_unread_messages",
+            side_effect=matching,
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            runtime_trigger,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            side_effect=settle,
+        ), patch.object(
+            session_autobridge_lib,
+            "append_event",
+            side_effect=append,
+        ), patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=["SESSION-MIXED-EVENT-FAILURE"],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            side_effect=dispatch,
+        ), patch.object(
+            watch_inbox_lib,
+            "emit",
+            side_effect=lambda event, _json: watcher_events.append(event),
+        ), patch.object(
+            watch_inbox_lib,
+            "mark_messages_read",
+        ) as mark_read:
+            first = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+            second = watch_inbox_lib.dispatch_autobridge("gemini", json_output=True)
+
+        self.assertEqual([message["path"]], first)
+        self.assertEqual([], second)
+        self.assertIn(message["path"], session["processed_messages"])
+        self.assertEqual(1, len(returned_actions))
+        self.assertEqual(
+            "post-loop event fsync failed",
+            returned_actions[0]["diagnostic_errors"][0]["detail"],
+        )
+        consumed = [
+            event for event in watcher_events if event["event"] == "autobridge_consumed"
+        ]
+        self.assertEqual(1, len(consumed))
+        self.assertEqual(
+            returned_actions[0]["diagnostic_errors"],
+            consumed[0]["diagnostic_errors"],
+        )
+        mark_read.assert_called_once_with("gemini", [message["path"]])
+        runtime_trigger.assert_called_once_with(session, message)
+
+    def test_dispatch_routes_event_writes_through_settlement_seam(self):
+        self.assertNotIn(
+            "append_event", session_autobridge_lib.dispatch_session.__code__.co_names
+        )
+
+    def test_pre_dispatch_failure_remains_retryable(self):
+        session = {
+            "session_id": "SESSION-PRE-DISPATCH-FAILURE",
+            "agent_id": "gemini",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {"family": "gemini_cli", "session_id": "runtime-pre-dispatch-failure"},
+        }
+        message = {"path": "Chats/pre-dispatch-failure/packet.md", "frontmatter": {}}
+        runtime_trigger = Mock(return_value={"returncode": 0})
+        prepared = session_autobridge_lib.reserve_message_result(
+            session,
+            message,
+            include_canonical=True,
+        )
+
+        def settle(payload, _path, *, prepared=None):
+            payload.clear()
+            payload.update(prepared[0])
+
+        with self._dispatch_patch_context(session, [message]), patch.object(
+            session_autobridge_lib,
+            "reserve_message_result",
+            side_effect=[ValueError("pre-dispatch failure"), prepared],
+        ), patch.object(
+            session_autobridge_lib,
+            "execute_runtime_trigger",
+            runtime_trigger,
+        ), patch.object(
+            session_autobridge_lib,
+            "mark_message_processed",
+            side_effect=settle,
+        ), patch.object(
+            session_autobridge_lib,
+            "append_event",
+            side_effect=[OSError("pre-settlement event failure"), None],
+        ):
+            with self.assertRaisesRegex(OSError, "pre-settlement event failure"):
+                session_autobridge_lib.dispatch_session(
+                    "SESSION-PRE-DISPATCH-FAILURE"
+                )
+            self.assertNotIn(message["path"], session.get("processed_messages", []))
+            second = session_autobridge_lib.dispatch_session(
+                "SESSION-PRE-DISPATCH-FAILURE"
+            )
+
+        self.assertEqual(1, len(second["actions"]))
+        self.assertIn(message["path"], session["processed_messages"])
+        runtime_trigger.assert_called_once_with(session, message)
+
     def test_watcher_and_digest_use_the_bounded_session_iterator(self):
         sessions = [
             {

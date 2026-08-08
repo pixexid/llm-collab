@@ -941,17 +941,17 @@ def dispatch_autobridge(
                         )
                     continue
                 consumed_paths.append(action["message_path"])
-                emit(
-                    {
-                        "ts": utc_now_str(),
-                        "event": "autobridge_consumed",
-                        "detail": action["message_path"],
-                        "agent": agent_id,
-                        "session_id": session_id,
-                        "message_path": action["message_path"],
-                    },
-                    json_output,
-                )
+                consumed_event = {
+                    "ts": utc_now_str(),
+                    "event": "autobridge_consumed",
+                    "detail": action["message_path"],
+                    "agent": agent_id,
+                    "session_id": session_id,
+                    "message_path": action["message_path"],
+                }
+                if action.get("diagnostic_errors"):
+                    consumed_event["diagnostic_errors"] = action["diagnostic_errors"]
+                emit(consumed_event, json_output)
             elif (
                 action.get("effective_action") == "runtime_trigger"
                 and runtime_ok
