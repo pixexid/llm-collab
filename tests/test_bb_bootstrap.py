@@ -18,12 +18,18 @@ from llm_collab.bb_bootstrap import (
     BOOTSTRAP_TERMINAL_BINDING,
     BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
     BOOTSTRAP_REPO_TARGET_REQUIRED,
+    BOOTSTRAP_PROFILE_UNAVAILABLE,
+    BOOTSTRAP_MALFORMED_ACTIVATION,
     BootstrapPlan,
     BootstrapRefusal,
     plan_bootstrap,
     project_enables_bb,
     resolve_bootstrap_repo_id,
     execute_bootstrap,
+    classify_first_delivery_assignment,
+    ASSIGNMENT_READ_ONLY,
+    ASSIGNMENT_AUTHORING,
+    ASSIGNMENT_MALFORMED_ACTIVATION,
     BOOTSTRAP_STARTED,
     BOOTSTRAP_DUPLICATE,
     BOOTSTRAP_AMBIGUOUS,
@@ -251,6 +257,181 @@ class ExecuteBootstrapTest(unittest.TestCase):
         outcome = self._run(start=start)
         self.assertEqual(BOOTSTRAP_ORPHANED, outcome.state)
         self.assertEqual("thr_both", outcome.native_thread_id)
+
+
+class FirstDeliveryAssignmentTest(unittest.TestCase):
+    """GH-596: the bb bootstrap must fail closed on ANY activation marker before
+    the read-only launch, because a partial/malformed activation is never an
+    ordinary message (docs/schema-reference.md). The work type is read from the
+    markers the packet carries, never from its body."""
+
+    def test_a_lane_less_analysis_packet_is_read_only(self):
+        self.assertEqual(
+            ASSIGNMENT_READ_ONLY,
+            classify_first_delivery_assignment(
+                {"canonical_message_id": "cmid_1", "body": "audit the source"}
+            ),
+        )
+
+    def test_the_body_text_is_not_the_signal(self):
+        # A guard bound to how the caller phrased the prompt is the wrong proxy:
+        # an analysis packet whose body happens to say "implement" is still
+        # read-only because it carries no activation marker.
+        self.assertEqual(
+            ASSIGNMENT_READ_ONLY,
+            classify_first_delivery_assignment({"body": "implement feature X now"}),
+        )
+
+    def test_a_complete_well_formed_activation_is_authoring(self):
+        self.assertEqual(
+            ASSIGNMENT_AUTHORING,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "/repo/wt", "branch": "bb/feat-x"}
+            ),
+        )
+
+    def test_a_non_mapping_is_read_only(self):
+        self.assertEqual(ASSIGNMENT_READ_ONLY, classify_first_delivery_assignment(None))
+        self.assertEqual(
+            ASSIGNMENT_READ_ONLY, classify_first_delivery_assignment("not a packet")
+        )
+
+    # --- every malformed shape derived from docs/schema-reference.md ----------
+
+    def test_activation_only_is_malformed(self):
+        # activation: true with no worktree/branch.
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment({"activation": True}),
+        )
+
+    def test_blank_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "   ", "branch": "x"}
+            ),
+        )
+
+    def test_non_string_branch_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "/repo/wt", "branch": 123}
+            ),
+        )
+
+    def test_non_string_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": ["/repo/wt"], "branch": "x"}
+            ),
+        )
+
+    def test_worktree_without_branch_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment({"worktree": "/repo/wt"}),
+        )
+
+    def test_branch_without_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment({"branch": "bb/feat-x"}),
+        )
+
+    def test_lane_fields_without_activation_true_is_malformed(self):
+        # "any activation marker without activation: true present".
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"worktree": "/repo/wt", "branch": "bb/feat-x"}
+            ),
+        )
+
+    def test_coerced_activation_marker_is_malformed(self):
+        # activation must be exactly boolean true, not "true" / 1.
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": "true", "worktree": "/repo/wt", "branch": "x"}
+            ),
+        )
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": 1, "worktree": "/repo/wt", "branch": "x"}
+            ),
+        )
+
+    def test_relative_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "relative/path", "branch": "x"}
+            ),
+        )
+
+    def test_home_relative_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "~/repo/wt", "branch": "x"}
+            ),
+        )
+
+    def test_dotdot_segment_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "/repo/../wt", "branch": "x"}
+            ),
+        )
+
+    def test_duplicate_separator_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "/repo//wt", "branch": "x"}
+            ),
+        )
+
+    def test_trailing_separator_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "/repo/wt/", "branch": "x"}
+            ),
+        )
+
+    def test_double_leading_slash_worktree_is_malformed(self):
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": "//repo/wt", "branch": "x"}
+            ),
+        )
+
+    def test_explicit_null_worktree_is_malformed(self):
+        # Key present with null is still a marker (presence), and null is not a
+        # canonical worktree.
+        self.assertEqual(
+            ASSIGNMENT_MALFORMED_ACTIVATION,
+            classify_first_delivery_assignment(
+                {"activation": True, "worktree": None, "branch": "x"}
+            ),
+        )
+
+    def test_the_two_refusal_reasons_are_distinct(self):
+        self.assertEqual("bb_bootstrap_profile_unavailable", BOOTSTRAP_PROFILE_UNAVAILABLE)
+        self.assertEqual(
+            "bb_bootstrap_malformed_activation", BOOTSTRAP_MALFORMED_ACTIVATION
+        )
+        self.assertNotEqual(
+            BOOTSTRAP_PROFILE_UNAVAILABLE, BOOTSTRAP_MALFORMED_ACTIVATION
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

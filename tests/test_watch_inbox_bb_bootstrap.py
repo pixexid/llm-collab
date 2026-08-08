@@ -23,11 +23,16 @@ from _helpers import InboxScanLimitExceeded  # noqa: E402
 import llm_collab.bb_managed_start as bb_managed_start  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
+    SLICE_1A_PROFILE,
     BbClient,
     BbRefusal,
     BbTransportResult,
     BbTransportTimeout,
     subprocess_transport,
+)
+from llm_collab.bb_bootstrap import (  # noqa: E402
+    BOOTSTRAP_MALFORMED_ACTIVATION,
+    BOOTSTRAP_PROFILE_UNAVAILABLE,
 )
 
 
@@ -741,6 +746,240 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             self.assertEqual(candidate["native_thread_id"], session_payload["runtime"]["session_id"])
             self.assertEqual(["Chats/project/first.md"], session_payload["processed_messages"])
             self.assertTrue((bindings / "project-one" / "CHAT-ONE" / "glmpi.json").is_file())
+
+    def _authoring_packet(self) -> dict:
+        # A complete, well-formed writer-lane first delivery: deliver.py
+        # --activation atomically binds activation: true plus a canonical
+        # worktree and branch. The body is irrelevant to the work-type decision
+        # (GH-596): the lane identity is the signal.
+        packet = self.packet()
+        packet["frontmatter"] = {
+            **packet["frontmatter"],
+            "activation": True,
+            "worktree": "/repo/worktrees/lane",
+            "branch": "bb/feat-x",
+        }
+        return packet
+
+    def _malformed_activation_packet(self) -> dict:
+        # A partial/malformed activation marker: activation: true with a blank
+        # worktree. Per docs/schema-reference.md this is never an ordinary
+        # message and must fail closed before execution — it must NOT launch.
+        packet = self.packet()
+        packet["frontmatter"] = {
+            **packet["frontmatter"],
+            "activation": True,
+            "worktree": "   ",
+            "branch": "bb/feat-x",
+        }
+        return packet
+
+    def test_authoring_first_delivery_refuses_profile_unavailable_without_spawning(self) -> None:
+        """GH-596: a writer-lane first delivery must refuse, not launch K3."""
+        project = {"id": "project-one", "bb": {"enabled": True}}
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-") as raw:
+            root = Path(raw)
+            state_root = root / "state"
+            repo_root = root / "repo"
+            runtime_home = root / "runtime-home"
+            for path in (repo_root, runtime_home):
+                path.mkdir()
+            with patch.object(
+                watch_inbox, "bb_bootstrap_enabled", return_value=True
+            ), patch.object(
+                watch_inbox, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                watch_inbox, "get_project", return_value=project
+            ), patch.object(
+                watch_inbox,
+                "_bb_start_inputs",
+                return_value={
+                    "native_project_id": "project-one",
+                    "endpoint_id": "endpoint_bb_one",
+                    "runtime_instance_id": "runtime_bb_one",
+                    "runtime_home": str(runtime_home),
+                    "repo_id": "app",
+                    "repo_root": str(repo_root),
+                    "cwd": str(repo_root),
+                    "executable": ["bb"],
+                    "timeout_seconds": 1.0,
+                    "session_source": None,
+                },
+            ), patch.object(
+                session_autobridge, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                session_autobridge, "project_state_root", return_value=state_root
+            ), patch.object(
+                session_autobridge, "AUTOBRIDGE_ROOT", state_root
+            ), patch.object(
+                session_autobridge, "SESSIONS_DIR", state_root / "sessions"
+            ), patch.object(
+                session_autobridge, "BINDINGS_DIR", state_root / "bindings"
+            ), patch.object(
+                session_autobridge, "EVENTS_DIR", state_root / "events"
+            ), patch.object(
+                session_autobridge, "SESSION_WRITE_LOCK", state_root / "session.lock"
+            ), patch.object(
+                bb_managed_start, "bb_start_native"
+            ) as start_factory, patch.object(
+                watch_inbox, "emit", side_effect=lambda event, _json: events.append(event)
+            ):
+                consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                    "glmpi",
+                    False,
+                    project_id="project-one",
+                    repo_targets=["app"],
+                    messages={"Chats/project/first.md": self._authoring_packet()},
+                )
+        self.assertEqual([], consumed, "an authoring refusal must not consume the packet")
+        self.assertFalse(start_factory.called, "the spawn must never run for a refused profile")
+        refused = [e for e in events if e.get("event") == "bb_bootstrap"]
+        self.assertEqual(1, len(refused), events)
+        self.assertEqual(BOOTSTRAP_PROFILE_UNAVAILABLE, refused[0]["reason"])
+
+    def test_malformed_activation_first_delivery_refuses_distinctly_without_spawning(self) -> None:
+        """GH-596: a partial/malformed activation marker must fail closed too,
+        with a reason distinct from profile_unavailable, and never spawn."""
+        project = {"id": "project-one", "bb": {"enabled": True}}
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-") as raw:
+            root = Path(raw)
+            state_root = root / "state"
+            repo_root = root / "repo"
+            runtime_home = root / "runtime-home"
+            for path in (repo_root, runtime_home):
+                path.mkdir()
+            with patch.object(
+                watch_inbox, "bb_bootstrap_enabled", return_value=True
+            ), patch.object(
+                watch_inbox, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                watch_inbox, "get_project", return_value=project
+            ), patch.object(
+                watch_inbox,
+                "_bb_start_inputs",
+                return_value={
+                    "native_project_id": "project-one",
+                    "endpoint_id": "endpoint_bb_one",
+                    "runtime_instance_id": "runtime_bb_one",
+                    "runtime_home": str(runtime_home),
+                    "repo_id": "app",
+                    "repo_root": str(repo_root),
+                    "cwd": str(repo_root),
+                    "executable": ["bb"],
+                    "timeout_seconds": 1.0,
+                    "session_source": None,
+                },
+            ), patch.object(
+                session_autobridge, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                session_autobridge, "project_state_root", return_value=state_root
+            ), patch.object(
+                session_autobridge, "AUTOBRIDGE_ROOT", state_root
+            ), patch.object(
+                session_autobridge, "SESSIONS_DIR", state_root / "sessions"
+            ), patch.object(
+                session_autobridge, "BINDINGS_DIR", state_root / "bindings"
+            ), patch.object(
+                session_autobridge, "EVENTS_DIR", state_root / "events"
+            ), patch.object(
+                session_autobridge, "SESSION_WRITE_LOCK", state_root / "session.lock"
+            ), patch.object(
+                bb_managed_start, "bb_start_native"
+            ) as start_factory, patch.object(
+                watch_inbox, "emit", side_effect=lambda event, _json: events.append(event)
+            ):
+                consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                    "glmpi",
+                    False,
+                    project_id="project-one",
+                    repo_targets=["app"],
+                    messages={"Chats/project/first.md": self._malformed_activation_packet()},
+                )
+        self.assertEqual([], consumed, "a malformed activation must not consume the packet")
+        self.assertFalse(
+            start_factory.called, "the spawn must never run for a malformed activation"
+        )
+        refused = [e for e in events if e.get("event") == "bb_bootstrap"]
+        self.assertEqual(1, len(refused), events)
+        self.assertEqual(BOOTSTRAP_MALFORMED_ACTIVATION, refused[0]["reason"])
+        self.assertNotEqual(BOOTSTRAP_PROFILE_UNAVAILABLE, refused[0]["reason"])
+
+    def test_analysis_first_delivery_still_launches_on_slice_1a_profile(self) -> None:
+        """GH-596 both directions: a read-only first delivery still launches K3."""
+        project = {"id": "project-one", "bb": {"enabled": True}}
+        candidate = {
+            "native_thread_id": "thread_bb_one",
+            "project_id": "project-one",
+            "environment_id": "environment_one",
+            "provider_id": "pi",
+            "status": "active",
+            "endpoint_id": "endpoint_bb_one",
+            "runtime_instance_id": "runtime_bb_one",
+            "provider": "pi",
+            "model": "kimi-coding/k3",
+            "reasoning_level": "high",
+            "source": "managed_bb_thread_start",
+        }
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-") as raw:
+            root = Path(raw)
+            state_root = root / "state"
+            repo_root = root / "repo"
+            runtime_home = root / "runtime-home"
+            for path in (repo_root, runtime_home):
+                path.mkdir()
+            with patch.object(
+                watch_inbox, "bb_bootstrap_enabled", return_value=True
+            ), patch.object(
+                watch_inbox, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                watch_inbox, "get_project", return_value=project
+            ), patch.object(
+                watch_inbox,
+                "_bb_start_inputs",
+                return_value={
+                    "native_project_id": "project-one",
+                    "endpoint_id": "endpoint_bb_one",
+                    "runtime_instance_id": "runtime_bb_one",
+                    "runtime_home": str(runtime_home),
+                    "repo_id": "app",
+                    "repo_root": str(repo_root),
+                    "cwd": str(repo_root),
+                    "executable": ["bb"],
+                    "timeout_seconds": 1.0,
+                    "session_source": None,
+                },
+            ), patch.object(
+                session_autobridge, "config_get", return_value="ws_bb_one"
+            ), patch.object(
+                session_autobridge, "project_state_root", return_value=state_root
+            ), patch.object(
+                session_autobridge, "AUTOBRIDGE_ROOT", state_root
+            ), patch.object(
+                session_autobridge, "SESSIONS_DIR", state_root / "sessions"
+            ), patch.object(
+                session_autobridge, "BINDINGS_DIR", state_root / "bindings"
+            ), patch.object(
+                session_autobridge, "EVENTS_DIR", state_root / "events"
+            ), patch.object(
+                session_autobridge, "SESSION_WRITE_LOCK", state_root / "session.lock"
+            ), patch.object(
+                bb_managed_start, "bb_start_native"
+            ) as start_factory:
+                start_factory.return_value = lambda _start_id: candidate
+                # self.packet() carries NO worktree/branch: a read-only analysis
+                # first delivery, which must still launch on SLICE_1A_PROFILE.
+                consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                    "glmpi",
+                    False,
+                    project_id="project-one",
+                    repo_targets=["app"],
+                    messages={"Chats/project/first.md": self.packet()},
+                )
+        self.assertTrue(start_factory.called, "an analysis first delivery must still spawn")
+        self.assertEqual(SLICE_1A_PROFILE, start_factory.call_args.kwargs["profile"])
+        self.assertEqual(["Chats/project/first.md"], consumed)
 
     def test_unscoped_watcher_observes_using_each_session_project(self) -> None:
         session = {

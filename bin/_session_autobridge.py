@@ -1854,6 +1854,34 @@ def execute_bb_bootstrap_plan(
     SessionLifecycleCore = lifecycle_module.SessionLifecycleCore
     TrustedProjectRoot = lifecycle_module.TrustedProjectRoot
 
+    # Fail closed at the profile-resolution seam, before any ledger write or
+    # native spawn. The only measured profile (SLICE_1A_PROFILE) is read-only, so
+    # a first delivery carrying a writer-lane identity cannot launch on it; and a
+    # partial/malformed activation marker must fail closed before execution too
+    # (docs/schema-reference.md). The two refusals carry distinct reasons so a
+    # malformed packet is never misreported as a profile decision (GH-596). This
+    # owns no second routing table — it refuses the work types no measured
+    # profile supports, and never inspects the packet body.
+    classification = bootstrap_module.classify_first_delivery_assignment(packet)
+    if classification == bootstrap_module.ASSIGNMENT_AUTHORING:
+        return bootstrap_module.BootstrapOutcome(
+            bootstrap_module.BOOTSTRAP_PROFILE_UNAVAILABLE,
+            detail=(
+                "first packet carries a complete writer-lane identity; "
+                "no BB profile is authoring-qualified, so it cannot launch on "
+                "the read-only SLICE_1A_PROFILE"
+            ),
+        )
+    if classification == bootstrap_module.ASSIGNMENT_MALFORMED_ACTIVATION:
+        return bootstrap_module.BootstrapOutcome(
+            bootstrap_module.BOOTSTRAP_MALFORMED_ACTIVATION,
+            detail=(
+                "first packet carries a partial or malformed activation marker "
+                "(activation/worktree/branch); it is never an ordinary message "
+                "and must fail closed before execution"
+            ),
+        )
+
     workspace_id = config_get("workspace_id")
     if not isinstance(workspace_id, str) or not workspace_id:
         raise ValueError("workspace_id is required for bb bootstrap")
