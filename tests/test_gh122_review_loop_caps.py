@@ -1414,7 +1414,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "merge-with-followups",
             "merge-with-followups-or-close",
             "review_request.py",
-            "two active implementation lanes",
+            "two active writing lanes",
         ):
             self.assertIn(normalized(phrase), recent_entry)
         # The summary is only safe to keep short because it names where the full

@@ -96,18 +96,33 @@ worker impersonate a bus participant.
 
 ## Lane WIP limit
 
-At most **two implementation lanes** are active (`in_progress`) at once across
-the workspace. A lane is active from its first branch until its PR merges or
-its terminal disposition is recorded. Before activating a third lane, one of
-the two must ship, merge-with-followups, or be closed by the lane owner and
-release-gate worker.
+At most **two writing lanes** are active at once across the workspace. A writing
+lane has a designated writer, a branch, and a deliverable that changes files or
+other persistent project artifacts. It is active from that assignment until its
+PR merges or its terminal disposition is recorded.
+
+A read-only lane delivers evidence or advice only, with no implementation branch
+and no designated writer; audits, probes, scoping, and reviews do not count
+against the cap. If its assignment authorizes a write, classify it as a writing
+lane before activation.
+
+The scarce resource is **orchestrator verification capacity**, not worktrees.
+Two is the judgment of how many writing lanes one orchestrator can independently
+verify without rubber-stamping; rubber-stamping makes a clean verdict stop
+meaning anything. Before activating a third writing lane, one of the two must
+ship, merge-with-followups, or be closed by the lane owner and release-gate
+worker.
+
+[One-writer-per-lane](../../AGENTS.md#one-writer-per-lane) is a separate,
+unchanged rule. It did the concrete collision-prevention work by keeping PRs
+#605 and #607 off the same file.
 
 Fragments spawned by a capped PR (descope/split/backend-first children) do not
 enter the board automatically: they go to triage, and each is activated only
-when a WIP slot is free and — for Tier A — it carries the lane contract its
-parent lacked. A split, successor PR, or new child issue is not progress
-unless it shortens the path to `main`; count it as the same lane until it
-proves otherwise.
+when a writing-lane slot is free and — for Tier A — it carries the lane contract
+its parent lacked. A split, successor PR, or new child issue is not progress
+unless it shortens the path to `main`; count it as the same lane until it proves
+otherwise.
 
 ## Canonical ordered queue
 

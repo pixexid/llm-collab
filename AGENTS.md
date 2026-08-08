@@ -144,7 +144,8 @@ all of it:
   review-fix forces a recorded merge-with-followups-or-close decision;
 - review requests are generated mechanically by `bin/review_request.py`; a
   hand-typed SHA is a process defect;
-- at most **two active implementation lanes**.
+- at most **two active writing lanes**; definitions, exclusions, and rationale
+  live in [`Lane WIP limit`](docs/workflows/task-intake-and-delegation.md#lane-wip-limit).
 
 Earlier versions are in the git history of this file. Nothing below depends on
 reading them.
