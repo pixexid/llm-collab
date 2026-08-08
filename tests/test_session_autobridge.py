@@ -1548,7 +1548,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         return session, message, result, watcher_events, consumed, mark_read
 
-    def test_watcher_text_renderer_exposes_structured_data_compactly(self):
+    def test_watcher_text_renderer_exposes_nonroutine_data_and_keeps_poll_line_compact(self):
         text_output = StringIO()
         with redirect_stdout(text_output):
             watch_inbox_lib.emit(
@@ -1588,7 +1588,7 @@ class SessionAutobridgeTest(unittest.TestCase):
             [
                 '[2026-08-08T12:00:00] future_event: ready data={"new_field":{"visible":true}}',
                 '[2026-08-08T12:00:01] new_message: Chats/CHAT-ONE/packet.md data={"agent":"codex"}',
-                '[2026-08-08T12:00:02] bb_observation: idle data={"project_id":"llm-collab","session_id":"thread-one","state":"idle","last_event_seq":42,"processed_events":0,"receipt_id":null}',
+                "[2026-08-08T12:00:02] bb_observation: idle",
             ],
             text_output.getvalue().splitlines(),
         )

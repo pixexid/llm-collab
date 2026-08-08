@@ -148,7 +148,11 @@ def emit(msg: dict, json_output: bool) -> None:
         ts = msg.get("ts", "")
         event = msg.get("event", "")
         detail = msg.get("detail", "")
-        data = {key: value for key, value in msg.items() if key not in {"ts", "event", "detail"}}
+        # Healthy BB observations fire every poll; every other event defaults to
+        # complete structured data so new diagnostics cannot disappear silently.
+        data = {} if event == "bb_observation" else {
+            key: value for key, value in msg.items() if key not in {"ts", "event", "detail"}
+        }
         suffix = f" data={json.dumps(data, separators=(',', ':'))}" if data else ""
         print(f"[{ts}] {event}: {detail}{suffix}", flush=True)
 
