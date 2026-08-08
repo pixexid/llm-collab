@@ -408,38 +408,22 @@ Use the mandatory one-pass GitHub Codex gate:
   An ambiguous or removed reaction is non-terminal, and a bare `eyes` reaction or the request comment itself is never a
   verdict — `eyes` means accepted and in progress
 - a connector-authored `+1` (`thumbs-up`) **at PR level, with no manual request
-  comment in existence**, is terminal CLEAN for the PR's automatic first pass.
+  comment in existence**, satisfies the PR's automatic first-pass bot requirement
+  only. It never independently binds the current head.
   **That reaction is itself the automatic pass's clean artifact.** The connector
   emits nothing else when it has no suggestions, so there is no separate proof that
   the pass ran, and requiring one would make this model unsatisfiable — the exact
-  deadlock it exists to remove. Verify all three: the actor is the connector, no
-  ordinary push and no `head_ref_force_pushed` event occurred between the PR's
-  `createdAt` and the `+1`, and **every other artifact class is empty** — no
-  review object, no top-level comment, no inline thread. That last condition is the
+  deadlock it exists to remove. Verify both: the actor is the connector and
+  **every other artifact class is empty** — no review object, no top-level comment,
+  no inline thread. That last condition is the
   safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
   what keeps this model from reading a pass over unresolved threads
-  (llm-collab#317). Any head change voids it, and it grants no second bot pass —
-  locally prove the amended head or remain blocked. A PR-level reaction carries no
-  SHA, so anchor the interval at the PR's `createdAt`, not at the current head's
-  push. Establish it from durable, queryable data: the PR's `createdAt`, every
-  commit reachable from the current PR head, and retained
-  `head_ref_force_pushed` events. GitHub exposes each commit's `committedDate`, not
-  push time, so require every such `committedDate` to be at or before the PR's
-  `createdAt` and no retained force-push event inside the interval. If a push
-  occurred inside that interval or the durable record cannot prove otherwise, the
-  `+1` is a prior-head signal — route it through the prior-OID path below and
-  locally prove every amendment, never as a terminal clean pass for the current
-  head. A clean automatic `+1`
-  never justifies a second review request. The old guard required an existing
-  `eyes` pickup artifact, but the connector swaps `eyes` for `+1`, so it was never
-  satisfiable at merge time. Merged PRs #603, #605, #607, #608, and #615 each
-  retain exactly one reaction and no `eyes`, providing the record for this
-  replacement. The connector defines this protocol itself: if
-  it has suggestions it comments, otherwise it reacts `+1`. This model exists
-  because v9/v11 made the automatic pass primary while the two models above both
-  presuppose a manual request comment to carry the reaction; without it the
-  connector has nowhere to put a clean verdict but PR level, and requiring a posted
-  text review would deadlock every clean automatic pass
+  (llm-collab#317). A PR-level reaction carries no SHA, GitHub publishes no push
+  time, and the timeline retains no connector pickup event, so no GitHub-side head
+  binding exists. Required local exact-head verification therefore binds the current
+  head and proves every amendment through the existing prior-OID path below.
+  GH-629 tracks the sender-side push observation that could restore reaction-only
+  head binding. A clean automatic `+1` never justifies a second review request
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
   mandatory final-head request, required local exact-head verification, mutation and
   verification evidence, and settle plus adjudication. Requiring a posted text
@@ -659,23 +643,19 @@ Codex review gate as complete when any of these holds:
   an old SHA for the current one carries a `+1` for a review of the *old* head and the
   first four checks all pass. Within **this** model a `+1` attributable only by timestamp,
   or sitting on any other artifact, is **not** terminal — the automatic model below is the
-  only PR-level exception, and it carries its own five conditions. That reaction is
+  only PR-level exception, and it carries its own bot-pass safeguards. That reaction is
   terminal for the bot wait on that
   head when the required gates above remain clean, and it receives the same
   approximately five-minute post-clean settle and full re-read as a text verdict,
   or
 - a connector-authored `+1` sits **at PR level** with no manual request comment in
-  existence, no ordinary push and no `head_ref_force_pushed` event occurred between
-  the PR's `createdAt` and the `+1`, and **every other artifact class is empty** — no
-  review object, no top-level comment, no inline thread. Use only queryable durable
-  data: the PR's `createdAt`, each current-head commit's `committedDate`, and
-  retained `head_ref_force_pushed` events. GitHub exposes `committedDate`, not push
-  time; every current-head commit must be dated at or before `createdAt`, with no
-  retained force-push event inside the interval. If a push occurred inside that
-  interval or the durable record is ambiguous, the `+1` is not terminal here — fall
-  back to the prior-OID clause below with local proof of every amendment. The reaction is
-  itself the automatic pass's clean artifact; do not look for a separate proof that the
-  pass ran. A `+1` alongside any
+  existence, the actor is the connector, and **every other artifact class is empty**
+  — no review object, no top-level comment, no inline thread — satisfies the
+  automatic first-pass bot requirement. It does not independently bind the reaction
+  to the current head; the required local exact-head verification supplies head
+  binding through the prior-OID path below and proves every amendment. The reaction
+  is itself the automatic pass's clean artifact; do not look for a separate proof
+  that the pass ran. A `+1` alongside any
   finding artifact is not terminal. This is the automatic first pass's clean shape: the
   connector comments when it has suggestions and reacts `+1` when it does not. It receives
   the same settle and full re-read as a text verdict, and grants no second bot pass,

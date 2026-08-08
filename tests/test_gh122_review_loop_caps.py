@@ -481,14 +481,29 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "at PR level, with no manual request comment in existence",
                 sources["review_policy"],
             )
-            self.assertIn("Verify all three", sources["review_policy"])
+            self.assertIn("Verify both", sources["review_policy"])
             for condition in (
                 "the actor is the connector",
-                "no ordinary push and no `head_ref_force_pushed` event occurred "
-                "between the PR's `createdAt` and the `+1`",
                 "every other artifact class is empty",
             ):
                 self.assertIn(condition, sources["review_policy"])
+            self.assertIn(
+                "satisfies the PR's automatic first-pass bot requirement only",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "It never independently binds the current head",
+                sources["review_policy"],
+            )
+            self.assertIn(
+                "Required local exact-head verification therefore binds the current "
+                "head and proves every amendment through the existing prior-OID path",
+                sources["review_policy"],
+            )
+            self.assertNotIn(
+                "is independently terminal for head binding",
+                sources["review_policy"],
+            )
             # The model must NOT require separate proof that the automatic pass
             # ran: on a clean pass the reaction is the only artifact the connector
             # emits, so such a condition is circular and unsatisfiable. The
@@ -1876,45 +1891,46 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("compact_wait_gate", check)
 
     def test_automatic_plus_one_fails_closed_on_a_mid_pass_push(self):
-        """GH-616: a PR-level +1 carries no SHA, so PR creation must start the
-        durable no-push interval. An in-interval or ambiguous push record fails
-        closed through the prior-OID local-proof path."""
+        """GH-616: a PR-level +1 completes the bot pass but cannot bind a head;
+        required local exact-head verification owns that proof."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "anchor the interval at the PR's `createdAt`, not at the current head's "
-            "push",
+            "satisfies the PR's automatic first-pass bot requirement only",
+            text,
+        )
+        self.assertIn("It never independently binds the current head", text)
+        self.assertIn(
+            "A PR-level reaction carries no SHA, GitHub publishes no push time, and "
+            "the timeline retains no connector pickup event",
             text,
         )
         self.assertIn(
-            "GitHub exposes each commit's `committedDate`, not push time", text
-        )
-        self.assertIn("no retained force-push event inside the interval", text)
-        self.assertIn(
-            "route it through the prior-OID path below and locally prove every amendment",
+            "Required local exact-head verification therefore binds the current head "
+            "and proves every amendment through the existing prior-OID path",
             text,
         )
+        self.assertIn("GH-629", text)
+        self.assertNotIn("is independently terminal for head binding", text)
 
     def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
         """GH-616 (canonical list): the merge-driving automatic PR-level +1 bullet
-        must carry the same PR-creation-anchored binding as the review-policy
-        enumeration and route an ambiguous/prior-head +1 through local proof."""
+        must limit the reaction to bot-pass proof and require local exact-head
+        verification for head binding."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "no ordinary push and no `head_ref_force_pushed` event occurred between "
-            "the PR's `createdAt` and the `+1`",
+            "satisfies the automatic first-pass bot requirement",
             text,
         )
         self.assertIn(
-            "Use only queryable durable data: the PR's `createdAt`, each current-head "
-            "commit's `committedDate`, and retained `head_ref_force_pushed` events",
+            "It does not independently bind the reaction to the current head",
             text,
         )
         self.assertIn(
-            "If a push occurred inside that interval or the durable record is "
-            "ambiguous, the `+1` is not terminal here — fall back to the prior-OID "
-            "clause below with local proof of every amendment",
+            "the required local exact-head verification supplies head binding through "
+            "the prior-OID path below and proves every amendment",
             text,
         )
+        self.assertNotIn("is independently terminal for head binding", text)
 
 
 class AxIsNeverPrimaryDocTest(unittest.TestCase):
