@@ -1548,6 +1548,68 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         return session, message, result, watcher_events, consumed, mark_read
 
+    def test_watcher_text_renderer_exposes_nonroutine_data_and_keeps_poll_line_compact(self):
+        text_output = StringIO()
+        with redirect_stdout(text_output):
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:00",
+                    "event": "future_event",
+                    "detail": "ready",
+                    "new_field": {"visible": True},
+                },
+                json_output=False,
+            )
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:01",
+                    "event": "new_message",
+                    "detail": "Chats/CHAT-ONE/packet.md",
+                    "agent": "codex",
+                },
+                json_output=False,
+            )
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:02",
+                    "event": "bb_observation",
+                    "detail": "idle",
+                    "project_id": "llm-collab",
+                    "session_id": "thread-one",
+                    "state": "idle",
+                    "last_event_seq": 42,
+                    "processed_events": 0,
+                    "receipt_id": None,
+                },
+                json_output=False,
+            )
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:03",
+                    "event": "autobridge_refusal_summary",
+                    "detail": "1 already-refused message(s) skipped",
+                    "agent": "codex",
+                    "suppressed_by_reason": {"repo_scope_mismatch": 1},
+                    "new_refusals": 0,
+                },
+                json_output=False,
+            )
+
+        expected = [
+            '[2026-08-08T12:00:00] future_event: ready data={"new_field":{"visible":true}}',
+            '[2026-08-08T12:00:01] new_message: Chats/CHAT-ONE/packet.md data={"agent":"codex"}',
+            "[2026-08-08T12:00:02] bb_observation: idle",
+            "[2026-08-08T12:00:03] autobridge_refusal_summary: 1 already-refused message(s) skipped",
+        ]
+        rendered = text_output.getvalue().splitlines()
+        self.assertEqual(len(expected[2]), len(rendered[2]))
+        self.assertEqual(len(expected[3]), len(rendered[3]))
+        self.assertEqual(expected, rendered)
+        self.assertEqual(
+            frozenset({"autobridge_refusal_summary", "bb_observation"}),
+            watch_inbox_lib.DETAIL_ONLY_TEXT_EVENTS,
+        )
+
     def test_settled_wake_reports_diagnostic_failure(self):
         session, message, result, watcher_events, consumed, mark_read = (
             self._settled_action_diagnostic_report(
@@ -1594,9 +1656,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             for line in text_output.getvalue().splitlines()
             if "autobridge_wake_signaled" in line
         )
-        self.assertIn(
-            "Chats/runtime_trigger/packet.md diagnostic_errors=", wake_line
-        )
+        self.assertIn("Chats/runtime_trigger/packet.md data=", wake_line)
+        self.assertIn('"diagnostic_errors":[', wake_line)
         self.assertIn('"detail":"runtime_trigger event fsync failed"', wake_line)
 
     def test_settled_nonruntime_actions_report_diagnostic_failure(self):
@@ -1619,6 +1680,16 @@ class SessionAutobridgeTest(unittest.TestCase):
                 expected[effective_action] = result["actions"][0]["diagnostic_errors"]
                 reported[effective_action] = diagnostic.get("diagnostic_errors")
                 mark_read.assert_not_called()
+
+                text_output = StringIO()
+                with redirect_stdout(text_output):
+                    watch_inbox_lib.emit(diagnostic, json_output=False)
+                rendered = text_output.getvalue()
+                self.assertIn("autobridge_diagnostic_error", rendered)
+                self.assertIn(
+                    f'"effective_action":"{effective_action}"', rendered
+                )
+                self.assertIn('"diagnostic_errors":[', rendered)
         self.assertEqual(expected, reported)
 
     def test_settled_scope_refusal_reports_diagnostic_failure_in_text(self):
@@ -1661,7 +1732,8 @@ class SessionAutobridgeTest(unittest.TestCase):
             for line in text_output.getvalue().splitlines()
             if "autobridge_repo_scope_refused" in line
         )
-        self.assertIn(f"{message['path']} diagnostic_errors=", refusal_line)
+        self.assertIn(f"{message['path']} data=", refusal_line)
+        self.assertIn('"diagnostic_errors":[', refusal_line)
         self.assertIn('"detail":"runtime_trigger event fsync failed"', refusal_line)
 
     def test_leased_dispatch_still_settles_before_event_failure(self):

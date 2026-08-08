@@ -141,6 +141,11 @@ def send_notification(title: str, body: str) -> None:
         pass
 
 
+DETAIL_ONLY_TEXT_EVENTS = frozenset(
+    {"autobridge_refusal_summary", "bb_observation"}
+)
+
+
 def emit(msg: dict, json_output: bool) -> None:
     if json_output:
         print(json.dumps(msg), flush=True)
@@ -148,12 +153,13 @@ def emit(msg: dict, json_output: bool) -> None:
         ts = msg.get("ts", "")
         event = msg.get("event", "")
         detail = msg.get("detail", "")
-        if msg.get("diagnostic_errors"):
-            detail = (
-                f"{detail} diagnostic_errors="
-                f"{json.dumps(msg['diagnostic_errors'], separators=(',', ':'))}"
-            )
-        print(f"[{ts}] {event}: {detail}", flush=True)
+        # Only unchanged per-poll summaries stay lean. Every other event defaults
+        # to complete data so new diagnostics cannot disappear silently.
+        data = {} if event in DETAIL_ONLY_TEXT_EVENTS else {
+            key: value for key, value in msg.items() if key not in {"ts", "event", "detail"}
+        }
+        suffix = f" data={json.dumps(data, separators=(',', ':'))}" if data else ""
+        print(f"[{ts}] {event}: {detail}{suffix}", flush=True)
 
 
 def utc_now_str() -> str:

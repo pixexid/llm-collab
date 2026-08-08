@@ -389,10 +389,17 @@ The implemented behavior is narrower:
 
 An `append_event` failure after packet settlement does not change the action
 outcome. Existing per-action events such as `autobridge_consumed` and
-`autobridge_wake_signaled` carry a `diagnostic_errors` list; the default text
-log appends that list as compact JSON. A settled relay, notify, or manual no-op
-has no ordinary per-action event, so it emits `autobridge_diagnostic_error`
-with `effective_action` and `diagnostic_errors` instead.
+`autobridge_wake_signaled` carry a `diagnostic_errors` list. The default text
+log keeps `ts`, `event`, and `detail` in its scan-friendly prefix, then appends
+every other event field in one compact `data={...}` JSON object. Exactly two
+unchanged-state, per-poll events stay detail-only: `bb_observation` and
+`autobridge_refusal_summary`. This avoids their permanent payload increment
+while GH-664 tracks bounding the PM2 log sink. This is an event-class gate, not
+a field allow-list: action, refusal, error, diagnostic, and unknown events
+expose new structured fields by default. A settled relay, notify, or manual
+no-op has no ordinary per-action event, so it emits
+`autobridge_diagnostic_error` with `effective_action` and `diagnostic_errors`
+instead.
 
 Treat either form as a diagnostic-log repair, not a dispatch retry: inspect each
 entry's `operation`, `error_type`, and `detail`, repair the session event-log
