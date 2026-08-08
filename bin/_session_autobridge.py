@@ -71,6 +71,9 @@ MAX_DISPATCH_INBOX_BYTES = 16 * 1024 * 1024
 MAX_DISPATCH_PACKET_BYTES = 256 * 1024
 MAX_EVENT_LOG_BYTES = 1024 * 1024
 EVENT_LOG_TRUNCATION_RESERVE_BYTES = 256
+EVENT_COMPACTION_METADATA_KEYS = frozenset(
+    {"ts", "first_seen_at_utc", "last_seen_at_utc", "repeat_count"}
+)
 
 
 def bb_bootstrap_enabled(config_reader=None) -> bool:
@@ -1203,16 +1206,16 @@ def _append_event_path(
             isinstance(last_event, dict)
             and last_event.get("repeat_compacted") is True
             and type(last_event.get("repeat_count")) is int
-            and (
-                last_event.get("event"),
-                last_event.get("reason"),
-                last_event.get("message_path"),
-            )
-            == (
-                event_payload.get("event"),
-                event_payload.get("reason"),
-                event_payload.get("message_path"),
-            )
+            and {
+                key: value
+                for key, value in last_event.items()
+                if key not in EVENT_COMPACTION_METADATA_KEYS
+            }
+            == {
+                key: value
+                for key, value in event_payload.items()
+                if key not in EVENT_COMPACTION_METADATA_KEYS
+            }
         )
         if replace_last:
             event_payload = {

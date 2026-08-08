@@ -233,8 +233,8 @@ class SessionAutobridgeTest(unittest.TestCase):
                 {
                     "event": "session_skipped",
                     "reason": "lease_expired",
-                    "status": "changed but not retained",
-                    "detail": "later detail",
+                    "status": "parked",
+                    "detail": "first detail",
                 },
             )
             session_autobridge_lib.append_event(
@@ -11609,8 +11609,9 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "payload = json.load(sys.stdin)",
                     "output_file = Path(sys.argv[1])",
                     "marker_file = Path(sys.argv[2])",
-                    "if not marker_file.exists():",
-                    "    marker_file.write_text('busy')",
+                    "attempts = int(marker_file.read_text()) if marker_file.exists() else 0",
+                    "marker_file.write_text(str(attempts + 1))",
+                    "if attempts < 2:",
                     "    sys.exit(7)",
                     "output_file.write_text(json.dumps(payload, indent=2))",
                 ]
@@ -11649,7 +11650,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "--me",
                 "gemini",
                 "--max-polls",
-                "2",
+                "3",
                 "--poll-seconds",
                 "1",
                 "--json",
@@ -11678,6 +11679,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("Watcher retry", runtime_payload["message"]["title"])
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER-RETRY")
         self.assertIn(message_rel, session_payload["processed_messages"])
+        event_log = root / "State" / "session_autobridge" / "events" / "SESSION-WATCHER-RETRY.jsonl"
+        dispatches = [
+            event
+            for line in event_log.read_text().splitlines()
+            for event in [json.loads(line)]
+            if event["event"] == "message_dispatched"
+        ]
+        self.assertEqual([7, 0], [event["runtime_result"]["returncode"] for event in dispatches])
+        self.assertEqual([2, 1], [event["repeat_count"] for event in dispatches])
 
 
 if __name__ == "__main__":
