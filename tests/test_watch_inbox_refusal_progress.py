@@ -8,9 +8,11 @@ change into backlog cleanup.
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -92,6 +94,85 @@ class RefusalProgressStoreTest(unittest.TestCase):
             )
             payload = json.loads((self.root / "watcher-refusal-progress.json").read_text())
             self.assertEqual(1, payload["version"])
+
+    def test_store_at_exact_byte_cap_round_trips_completely(self) -> None:
+        entry = {
+            "fp": "fp1",
+            "mtime": None,
+            "session_id": "SESSION-A",
+            "reason": "repo_mismatch",
+            "packet_repo_targets": ["other"],
+            "packet_project": "llm-collab",
+            "path": "",
+            "session_repo_targets": ["app"],
+            "session_scope": ["'app'"],
+        }
+        refused = {"SESSION-A\u0000Chats/x/a.md": entry}
+        base_size = len(
+            json.dumps({"version": 1, "refused": refused}, indent=2).encode("utf-8")
+        )
+        cap = base_size + 64
+        entry["path"] = "x" * 64
+        self.assertEqual(
+            cap,
+            len(
+                json.dumps({"version": 1, "refused": refused}, indent=2).encode(
+                    "utf-8"
+                )
+            ),
+        )
+
+        from unittest.mock import patch
+
+        with self._patch_dir(), patch.object(
+            watch_inbox, "MAX_REFUSAL_PROGRESS_BYTES", cap
+        ):
+            self.assertTrue(watch_inbox.save_refusal_progress("claude", refused))
+            self.assertEqual(cap, watch_inbox.refusal_progress_path("claude").stat().st_size)
+            self.assertEqual(refused, watch_inbox.load_refusal_progress("claude"))
+
+    def test_oversized_store_is_visibly_refused_and_preserves_last_store(self) -> None:
+        from unittest.mock import patch
+
+        with self._patch_dir():
+            self.assertTrue(
+                watch_inbox.save_refusal_progress("claude", {"kept.md": "fp1"})
+            )
+            path = watch_inbox.refusal_progress_path("claude")
+            before = path.read_bytes()
+            cap = len(before) + 1
+            oversized = {"new.md": "x" * cap}
+            warning = io.StringIO()
+            with patch.object(
+                watch_inbox, "MAX_REFUSAL_PROGRESS_BYTES", cap
+            ), redirect_stderr(warning):
+                self.assertFalse(
+                    watch_inbox.save_refusal_progress("claude", oversized)
+                )
+
+            self.assertIn("serialized bytes exceeds", warning.getvalue())
+            self.assertEqual(before, path.read_bytes())
+            self.assertLessEqual(path.stat().st_size, cap)
+            self.assertIn("kept.md", watch_inbox.load_refusal_progress("claude"))
+            self.assertEqual([], sorted(self.root.glob("*.tmp")))
+
+    def test_atomic_replace_failure_preserves_last_readable_store(self) -> None:
+        from unittest.mock import patch
+
+        with self._patch_dir():
+            self.assertTrue(
+                watch_inbox.save_refusal_progress("claude", {"kept.md": "fp1"})
+            )
+            path = watch_inbox.refusal_progress_path("claude")
+            before = path.read_bytes()
+            with patch.object(watch_inbox.os, "replace", side_effect=OSError("boom")):
+                self.assertFalse(
+                    watch_inbox.save_refusal_progress("claude", {"new.md": "fp2"})
+                )
+
+            self.assertEqual(before, path.read_bytes())
+            self.assertIn("kept.md", watch_inbox.load_refusal_progress("claude"))
+            self.assertEqual([], sorted(self.root.glob("*.tmp")))
 
     def test_store_is_separate_from_the_durable_inbox(self) -> None:
         """AC2/AC7: refusal progress is watcher-owned state. It must not be the
@@ -310,8 +391,12 @@ class RestartRoundTripTest(unittest.TestCase):
             {path}, watch_inbox.terminal_refusal_paths(live, repo_targets, project_id)
         )
         with self._patch_dir():
+            inbox = self.root / "inbox.json"
+            inbox.write_text(json.dumps({"unread": [path], "read": []}))
+            inbox_before = inbox.read_bytes()
             watch_inbox.save_refusal_progress("claude", live)
             reloaded = watch_inbox.load_refusal_progress("claude")
+            self.assertEqual(inbox_before, inbox.read_bytes())
         # ...and still skips after a save/load cycle
         self.assertEqual(
             {path},
