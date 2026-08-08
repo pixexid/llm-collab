@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "bin"))
 
 import watch_inbox  # noqa: E402
+import _helpers as helpers  # noqa: E402
 import _session_autobridge as session_autobridge  # noqa: E402
 from _helpers import InboxScanLimitExceeded  # noqa: E402
 import llm_collab.bb_managed_start as bb_managed_start  # noqa: E402
@@ -110,6 +111,52 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             any(
                 call.args[0].get("event") == "error"
                 and call.args[0].get("detail") == "over cap"
+                for call in emit.call_args_list
+            )
+        )
+
+    def test_default_watcher_refuses_oversized_index_before_unbounded_index_load(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-bytes-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text('{"unread": [], "read": []}' + " " * 128)
+            argv = [
+                "watch_inbox.py",
+                "--me",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--poll-seconds",
+                "1",
+                "--max-polls",
+                "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                watch_inbox, "require_current_runtime"
+            ), patch.object(
+                watch_inbox, "agent_ids", return_value=["glmpi"]
+            ), patch.object(
+                watch_inbox, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                helpers, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                session_autobridge,
+                "MAX_DISPATCH_INBOX_BYTES",
+                inbox_path.stat().st_size - 1,
+            ), patch.object(
+                watch_inbox, "load_agent_inbox"
+            ) as unbounded_load, patch.object(
+                watch_inbox, "load_refusal_progress", return_value={}
+            ), patch.object(
+                watch_inbox, "dispatch_autobridge"
+            ) as dispatch, patch.object(watch_inbox, "emit") as emit:
+                watch_inbox.main()
+
+        unbounded_load.assert_not_called()
+        dispatch.assert_not_called()
+        self.assertTrue(
+            any(
+                call.args[0].get("event") == "error"
+                and "byte limit" in call.args[0].get("detail", "")
                 for call in emit.call_args_list
             )
         )

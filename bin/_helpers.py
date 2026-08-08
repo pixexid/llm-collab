@@ -22,6 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from _bounded_io import (
+    ReadBudget,
+    UnreadableFile,
+    active_read_budget,
+    read_regular_file_bounded,
+)
+
 # ---------------------------------------------------------------------------
 # Root resolution
 # ---------------------------------------------------------------------------
@@ -623,10 +630,13 @@ def agent_inbox_path(agent_id: str) -> Path:
 # Inbox state (pointer model)
 # ---------------------------------------------------------------------------
 
-def load_agent_inbox(agent_id: str) -> dict:
+def load_agent_inbox(agent_id: str, *, budget: ReadBudget | None = None) -> dict:
     path = agent_inbox_path(agent_id)
     if not path.exists():
         return {"agent": agent_id, "updated_utc": utc_iso(), "unread": [], "read": []}
+    if budget is not None:
+        raw = read_regular_file_bounded(path, budget.remaining)
+        return json.loads(raw.decode("utf-8"))
     return json.loads(path.read_text())
 
 
@@ -685,28 +695,42 @@ def mark_messages_read(agent_id: str, paths: list[str]) -> None:
 
 def get_unread_messages(agent_id: str, *, limit: int | None = None) -> list[dict]:
     """Return every unread message, or the requested number of live messages."""
-    inbox = load_agent_inbox(agent_id)
-    unread_paths = inbox["unread"]
-    if len(unread_paths) > MAX_MESSAGE_SCAN_ENTRIES:
-        raise InboxScanLimitExceeded(
-            f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; "
-            "refusing an incomplete result"
-        )
-    if limit is not None and limit > MAX_MESSAGE_SCAN_ENTRIES:
-        raise InboxScanLimitExceeded(
-            f"requested inbox limit {limit} exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries"
-        )
-    if limit is not None and limit <= 0:
-        return []
-    messages = []
-    for rel_path in unread_paths:
-        abs_path = ROOT / rel_path
-        if abs_path.exists():
-            fm, body = parse_frontmatter(abs_path.read_text())
-            messages.append({"path": rel_path, "frontmatter": fm, "body": body})
-            if limit is not None and len(messages) == limit:
-                break
-    return messages
+    from _session_autobridge import (
+        MAX_DISPATCH_INBOX_BYTES,
+        MAX_DISPATCH_PACKET_BYTES,
+    )
+
+    budget = ReadBudget(MAX_DISPATCH_INBOX_BYTES, "inbox scan")
+    try:
+        with active_read_budget(budget):
+            inbox = load_agent_inbox(agent_id, budget=budget)
+            unread_paths = inbox["unread"]
+            if len(unread_paths) > MAX_MESSAGE_SCAN_ENTRIES:
+                raise InboxScanLimitExceeded(
+                    f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; "
+                    "refusing an incomplete result"
+                )
+            if limit is not None and limit > MAX_MESSAGE_SCAN_ENTRIES:
+                raise InboxScanLimitExceeded(
+                    f"requested inbox limit {limit} exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries"
+                )
+            if limit is not None and limit <= 0:
+                return []
+            messages = []
+            for rel_path in unread_paths:
+                abs_path = ROOT / rel_path
+                if abs_path.exists():
+                    raw = read_regular_file_bounded(
+                        abs_path,
+                        min(MAX_DISPATCH_PACKET_BYTES, budget.remaining),
+                    )
+                    fm, body = parse_frontmatter(raw.decode("utf-8"))
+                    messages.append({"path": rel_path, "frontmatter": fm, "body": body})
+                    if limit is not None and len(messages) == limit:
+                        break
+            return messages
+    except UnreadableFile as error:
+        raise InboxScanLimitExceeded(str(error)) from error
 
 
 # ---------------------------------------------------------------------------
