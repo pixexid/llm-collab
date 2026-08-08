@@ -184,14 +184,13 @@ included, is woken by its durable packet and its own watcher **whenever its
 binding dispatches** (`autobridge_ready: true`); only when `deliver.py` reports
 `ax_doorbell_required: true` instead does a Codex packet take the AX fallback.
 
-Do not read `watcher_pickup_ready` as the signal for that. It requires
-`wake_fallback_allowed` **and** `is_watcher_only_target`, so a dispatchable
-binding turns it off for every recipient, and it excludes Codex besides. A
-healthy bound delivery reports `autobridge_ready: true` with
-`watcher_pickup_ready: false` — that pair is the routine success case, not a
-missing-pickup diagnosis. `watcher_pickup_ready` marks the *unbound* non-Codex
-watcher fallback. Treat `activation_unavailable` as a configuration blocker, record it
-precisely, and do not misreport it as routine operator relay.
+Do not read `watcher_pickup_ready` as the signal for that. It is retained for
+compatibility but is false for new admitted deliveries. A healthy bound delivery
+reports `autobridge_ready: true` with `watcher_pickup_ready: false`; an unbound
+watcher-backed recipient is refused before write. The only admitted unbound route
+is an explicit `routing_mode: broadcast` for the operator or a watcher-disabled
+human/human relay. Treat a typed routing refusal as a configuration blocker,
+record its exact reason, and do not misreport it as routine operator relay.
 
 For a BB worker, the approved bridge above is BB itself: update the task or
 issue if scope changed, then communicate through `bb-workers.md`. The mailbox

@@ -1374,7 +1374,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 13 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 14 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
@@ -1399,6 +1399,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v14",
+            "send-time routing admission fail closed before durability",
+            "two packets to Claude",
+            "both carried `target_session_id: null`",
+            "reading the chat directory by hand",
+            "after the sender asked why there had been no reply",
+            "Message file schema",
+            "Send a packet",
             "Contract v13",
             "writing lanes only",
             "Read-only lanes",
