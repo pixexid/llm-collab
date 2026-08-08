@@ -274,14 +274,13 @@ python bin/deliver.py \
 ```
 
 **`--repo-targets` is not optional in practice.** If the recipient's session
-declares a repo scope and your packet declares none, the packet is written to the
-mailbox and then **refused at dispatch** — the recipient never sees it.
+declares a repo scope and your packet declares none, `deliver.py` refuses before
+the durable write — the recipient never sees it and no stranded packet remains.
 
 This is not hypothetical: on 2026-07-25 it silently dropped **27 consecutive
 packets** over eleven hours, and the lane only kept working because GitHub PR
-comments were carrying the conversation. `deliver.py` now prints a loud
-`DURABLE WRITE OK — RUNTIME DISPATCH REFUSED` banner naming both scopes when this
-happens, but the fix is to declare the scope.
+comments were carrying the conversation. `deliver.py` now exits 2 with a typed
+routing refusal naming both scopes. The fix is to declare the scope.
 
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
@@ -289,10 +288,11 @@ For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
 block. Run only its exact printed command, and only when it is
 printed. Contract v12's fallback predicate is unchanged, and landing capability
 is a live runtime property rather than a standing window-count claim.
-`watcher_pickup_ready` marks the unbound non-Codex watcher fallback
-only — a bound recipient reports `autobridge_ready: true` with
-`watcher_pickup_ready: false`, and that is the routine success case. `deliver.py`
-exit 0 means the durable packet is written and the reply is complete.
+A bound recipient reports `autobridge_ready: true` with
+`watcher_pickup_ready: false`, and that is the routine success case. An unbound
+watcher-backed recipient is refused before write. Exit 0 means the durable packet
+was admitted; an admitted unbound broadcast always reports
+`routing_mode: broadcast` explicitly.
 
 ## 5. Verify it actually dispatched
 
@@ -367,8 +367,7 @@ is not the test; a *terminal* review is.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Peer never replies; their thread is idle | packet refused at dispatch | check the watcher log (step 5); re-send with `--repo-targets` |
-| `deliver.py` prints `DURABLE WRITE OK — RUNTIME DISPATCH REFUSED` | packet scope not a subset of the recipient's | declare the right `--repo-targets` |
+| `deliver.py` exits 2 with `delivery_refused: true` | no exact target, AX fallback, or documented broadcast route was admitted | repair the binding or declare the right `--repo-targets`; no packet was written |
 | `blocker: the recipient's binding could not be READ` | the binding file exists but is unreadable | repair or remove that binding; nothing will wake them until then |
 | Waiting a long time for a bot review | automatic review did not start or stalled | see step 7; use the one Tier A fallback request, otherwise report the review-infrastructure blocker |
 | `codex_stream` refuses with "not registered in projects.json" | project not registered, or wrong id | register it, or correct the id |
@@ -383,7 +382,7 @@ broken. Each line is a merged change and the symptom it produces.
 | Change | What you see if you did not know |
 |---|---|
 | Review is automatic and mandatory once per PR | Do not merge before its first terminal pass. See step 7. |
-| `deliver.py` refuses an out-of-scope packet up front | `autobridge_ready: false` with `route_ambiguous`, and a loud banner. Previously it reported success and dropped the packet silently. |
+| `deliver.py` refuses an unroutable packet up front | Exit 2 with `delivery_refused: true`, `durable_write: false`, and a typed reason. Previously it wrote a packet that no exact-session watcher could read. |
 | New field `binding_unreadable_blocker` in `deliver.py` output | `true` means the recipient's binding exists but could not be **read**. Every wake flag is false and nothing will reach them until it is repaired or removed — this is the one refusal with no automatic fallback. |
 | `codex_stream.py` exists | You can watch a peer's thread live instead of guessing whether it is working. Step 6. |
 | `codex_stream` has **no** `--runtime-home` | The flag was removed: the home decides which App Server you attach to, so it comes from the validated binding and never from an argument. `session_autobridge register --runtime-home` is unaffected. |

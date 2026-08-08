@@ -40,7 +40,7 @@ class DeliverEmptyBodyTest(unittest.TestCase):
                         {
                             "id": "claude",
                             "display_name": "Claude",
-                            "activation": {"type": "cli_session", "watcher_enabled": True},
+                            "activation": {"type": "human_relay", "watcher_enabled": False},
                         },
                     ]
                 }
@@ -141,6 +141,8 @@ class DeliverEmptyBodyTest(unittest.TestCase):
             result = self.run_deliver(root, "A real packet body.\n")
 
             self.assertEqual(0, result.returncode, result.stderr)
+            payload, _ = json.JSONDecoder().raw_decode(result.stdout)
+            self.assertEqual("broadcast", payload["routing_mode"])
             packets = list(chat_dir.glob("*_to-claude_*.md"))
             self.assertEqual(1, len(packets))
             self.assertIn("A real packet body.", packets[0].read_text())
