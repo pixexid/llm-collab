@@ -15,11 +15,15 @@ import sys as _grsys; from pathlib import Path as _grPath
 _grsys.path.insert(0, str(_grPath(__file__).resolve().parent)); import _runtime_gate_testkit  # noqa: E402,F401  GH-503: deterministic gate-bypass install (any run form)
 
 import json
+import os
 import subprocess
 import tempfile
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -247,6 +251,91 @@ class WatcherReloadTest(unittest.TestCase):
                 self.assertEqual({"status": "ok"}, session_bootstrap.start_watcher("claude"))
 
         self.assertEqual("restart", run.call_args.args[0][2])
+
+
+class BindingDriftBannerTest(unittest.TestCase):
+    SESSION = {
+        "session_id": "SESSION-CLAUDE-OLD",
+        "agent_id": "claude",
+        "project_id": "llm-collab",
+        "chat_id": "CHAT-DRIFT",
+        "mode": "notify",
+        "status": "active",
+        "wake_strategy": "runtime_trigger",
+        "repo_targets": ["app"],
+        "runtime": {
+            "family": "claude_app",
+            "session_id": "runtime-old",
+            "home": "/tmp/claude-home",
+        },
+    }
+
+    def test_bootstrap_prints_exact_rebind_command_on_runtime_mismatch(self) -> None:
+        mismatch = session_bootstrap.CanonicalBindingNativeMismatch(
+            canonical_native_session_id="runtime-old",
+            requested_runtime_session_id="runtime-new",
+        )
+        output = StringIO()
+        ax = SimpleNamespace(as_dict=lambda: {})
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(sys, "argv", ["session_bootstrap.py", "--agent", "claude", "--no-watcher"]),
+            patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
+            patch.object(
+                session_bootstrap,
+                "get_agent",
+                return_value={"id": "claude", "activation": {"watcher_enabled": False}},
+            ),
+            patch.object(
+                session_bootstrap,
+                "tooling_currency",
+                return_value={"state": "current", "head": "abc", "fetched": True},
+            ),
+            patch.object(session_bootstrap, "announce_tooling"),
+            patch.object(session_bootstrap, "dependency_report", return_value={}),
+            patch.object(session_bootstrap, "announce_dependencies"),
+            patch.object(session_bootstrap, "announce_contract"),
+            patch.object(
+                session_bootstrap,
+                "agent_identity_path",
+                return_value=Path("/definitely/missing/identity.md"),
+            ),
+            patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
+            patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
+            patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
+            patch.object(session_bootstrap, "queue_summaries", return_value=[]),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                side_effect=mismatch,
+            ),
+            redirect_stdout(output),
+        ):
+            session_bootstrap.main()
+
+        text = output.getvalue()
+        self.assertIn("BINDING DRIFT", text)
+        self.assertIn("--runtime-session-id runtime-new", text)
+        self.assertIn("--supersedes-session SESSION-CLAUDE-OLD", text)
+        self.assertNotIn("<", text)
+
+    def test_matching_runtime_is_silent(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-current"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                return_value={"binding_id": "binding-current"},
+            ),
+        ):
+            drifts = session_bootstrap.binding_drifts("claude")
+        self.assertEqual([], drifts)
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(drifts)
+        self.assertEqual("", output.getvalue())
 
 
 if __name__ == "__main__":

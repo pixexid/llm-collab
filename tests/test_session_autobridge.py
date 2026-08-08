@@ -743,6 +743,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(
             session_autobridge_cli, "get_agent", return_value={"activation": {}}
         ), patch.object(
+            session_autobridge_cli, "resolve_project_repo_path", return_value=root
+        ), patch.object(
+            session_autobridge_cli, "_claude_session_evidence", return_value="match"
+        ), patch.object(
             session_autobridge_lib,
             "SESSION_WRITE_LOCK",
             root / "State" / "session_autobridge" / ".session-write.lock",
@@ -2588,12 +2592,26 @@ class SessionAutobridgeTest(unittest.TestCase):
         return self.run_cli_with_env(root, None, *args)
 
     def run_cli_with_env(self, root: Path, env: dict[str, str] | None, *args: str) -> dict:
+        effective_env = {**self.subprocess_env(root), **(env or {})}
+        if args and args[0] == "register" and "--runtime-family" in args:
+            family = args[args.index("--runtime-family") + 1]
+            if family == "claude_app" and "--runtime-session-id" in args:
+                runtime_id = args[args.index("--runtime-session-id") + 1]
+                project_path = root
+                slug = str(project_path.resolve()).replace("/", "-")
+                write_claude_session_jsonl(
+                    Path(effective_env["CLAUDE_HOME"])
+                    / "projects"
+                    / slug
+                    / f"{runtime_id}.jsonl",
+                    cwd=project_path.resolve(),
+                )
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), *args, "--json"],
             cwd=root,
             text=True,
             capture_output=True,
-            env={**self.subprocess_env(root), **(env or {})},
+            env=effective_env,
             check=True,
         )
         return json.loads(result.stdout)
@@ -2601,6 +2619,7 @@ class SessionAutobridgeTest(unittest.TestCase):
     def subprocess_env(self, root: Path) -> dict[str, str]:
         return {
             **os.environ,
+            "CLAUDE_HOME": str(root / ".claude"),
             "LLM_COLLAB_UI_REFRESH": "0",
             "LLM_COLLAB_CANONICAL_CONTROL": "enabled",
             "PYTHONPATH": os.pathsep.join(
@@ -4795,6 +4814,116 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertEqual("claude-session-456", discovered["session_id"])
 
+    def test_claude_registration_requires_named_artifact_project_proof(self):
+        root = self.make_workspace()
+        amiga = root / "amiga-repo"
+        nuvyr = root / "nuvyr-repo"
+        amiga.mkdir()
+        nuvyr.mkdir()
+        write_json(
+            root / "projects.json",
+            {
+                "projects": [
+                    {"id": "amiga", "repos": {"app": str(amiga)}},
+                    {"id": "nuvyr", "repos": {"app": str(nuvyr)}},
+                ]
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        env = self.subprocess_env(root)
+
+        def register(project: str, chat: str, runtime_id: str):
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "register",
+                    "--session",
+                    f"SESSION-{runtime_id}",
+                    "--agent",
+                    "claude",
+                    "--project",
+                    project,
+                    "--chat",
+                    chat,
+                    "--repo-target",
+                    "app",
+                    "--mode",
+                    "notify",
+                    "--runtime-family",
+                    "claude_app",
+                    "--runtime-session-id",
+                    runtime_id,
+                    "--runtime-session-source",
+                    "first_read",
+                    "--json",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+        for project, project_path in (("amiga", amiga), ("nuvyr", nuvyr)):
+            with self.subTest(project=project):
+                runtime_id = f"same-{project}"
+                slug = str(project_path.resolve()).replace("/", "-")
+                write_claude_session_jsonl(
+                    Path(env["CLAUDE_HOME"])
+                    / "projects"
+                    / slug
+                    / f"{runtime_id}.jsonl",
+                    cwd=project_path.resolve(),
+                )
+                done = register(project, f"CHAT-{project.upper()}", runtime_id)
+                self.assertEqual(0, done.returncode, done.stderr)
+                binding = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "bindings"
+                    / project
+                    / f"CHAT-{project.upper()}"
+                    / "claude.json"
+                )
+                self.assertEqual(runtime_id, json.loads(binding.read_text())["runtime_session_id"])
+
+        cross_id = "cross-project"
+        amiga_slug = str(amiga.resolve()).replace("/", "-")
+        write_claude_session_jsonl(
+            Path(env["CLAUDE_HOME"])
+            / "projects"
+            / amiga_slug
+            / f"{cross_id}.jsonl",
+            cwd=nuvyr.resolve(),
+        )
+        cross = register("amiga", "CHAT-CROSS", cross_id)
+        self.assertNotEqual(0, cross.returncode)
+        self.assertIn("belongs to another project", cross.stderr)
+        self.assertFalse(
+            (root / "State" / "session_autobridge" / "sessions" / f"SESSION-{cross_id}.json").exists()
+        )
+
+        unprovable = register("amiga", "CHAT-UNPROVABLE", "missing-artifact")
+        self.assertNotEqual(0, unprovable.returncode)
+        self.assertIn("project membership could not be proven", unprovable.stderr)
+        self.assertFalse(
+            (
+                root
+                / "State"
+                / "session_autobridge"
+                / "sessions"
+                / "SESSION-missing-artifact.json"
+            ).exists()
+        )
+
     def test_claude_discovery_does_not_fall_back_to_other_projects_legacy_index(self):
         # Regression for the 2026-07-27 defect (#95): current Claude writes
         # per-session .jsonl, not the legacy sessions-index.json, so an unscoped
@@ -6078,6 +6207,11 @@ class SessionAutobridgeTest(unittest.TestCase):
                      "--runtime-family", "claude_app",
                      "--runtime-session-id", "THREAD-OLD",
                      "--runtime-session-source", "first_read")
+        slug = str(root.resolve()).replace("/", "-")
+        write_claude_session_jsonl(
+            root / ".claude" / "projects" / slug / "THREAD-NEW.jsonl",
+            cwd=root.resolve(),
+        )
         binding = (root / "State" / "session_autobridge" / "bindings" / "amiga" / "CHAT-REG1"
                    / "claude.json")
         self.assertTrue(binding.exists())
@@ -6130,8 +6264,10 @@ class SessionAutobridgeTest(unittest.TestCase):
                 print('RAISED:', type(error).__name__, error)
         """)
         try:
-            done = _sp.run([_sys.executable, "-c", program], cwd=root, text=True,
-                           capture_output=True, timeout=20)
+            done = _sp.run(
+                [_sys.executable, "-c", program], cwd=root, text=True,
+                capture_output=True, timeout=20, env=self.subprocess_env(root),
+            )
         except _sp.TimeoutExpired:
             self.fail("registration blocked on the swapped binding pathname")
 
@@ -11538,6 +11674,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         with patch.object(
             session_autobridge_cli, "get_agent", return_value={"activation": {}}
         ), patch.object(
+            session_autobridge_cli, "resolve_project_repo_path", return_value=root
+        ), patch.object(
+            session_autobridge_cli, "_claude_session_evidence", return_value="match"
+        ), patch.object(
             session_autobridge_lib,
             "SESSION_WRITE_LOCK",
             root / "State" / "session_autobridge" / ".session-write.lock",
@@ -11583,6 +11723,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         with patch.object(session_autobridge_cli, "get_agent",
                           return_value=agent), \
+             patch.object(session_autobridge_cli, "resolve_project_repo_path",
+                          return_value=root), \
+             patch.object(session_autobridge_cli, "_claude_session_evidence",
+                          return_value="match"), \
              patch.object(
                  session_autobridge_lib,
                  "SESSION_WRITE_LOCK",

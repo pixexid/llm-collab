@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 15 -->
+<!-- CONTRACT_VERSION: 16 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,15 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v16 (2026-08-08) changes first-class Claude registration eligibility:
+an explicitly named native session must prove that its named artifact belongs to
+the target project's app checkout before registration can write a lease. The
+canonical restart ownership, bootstrap drift report, and dead-id packet recovery
+live in
+[`Session Startup`](docs/workflows/session-startup.md#restarted-first-class-sessions).
+The version signal makes the stricter registration acceptance visible to cached
+workers. Related GH-538.
 
 Contract v15 (2026-08-08) makes measured BB model failures hard exclusions for
 every text-bearing assignment, read-only included. Read-only work produces the

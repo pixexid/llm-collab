@@ -25,7 +25,14 @@ import json
 import os
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-from _helpers import canonical_path, ensure_project, get_agent, now_utc, utc_iso
+from _helpers import (
+    canonical_path,
+    ensure_project,
+    get_agent,
+    now_utc,
+    resolve_project_repo_path,
+    utc_iso,
+)
 from _session_autobridge import (
     BindingUnreadable,
     CanonicalBindingNativeMismatch,
@@ -34,6 +41,10 @@ from _session_autobridge import (
     SESSION_MODES,
     SESSION_STATUSES,
     WAKE_STRATEGIES,
+    MAX_CLAUDE_RECORD_PREFIX_BYTES,
+    _claude_session_evidence,
+    claude_home,
+    claude_project_slug,
     discover_runtime_session,
     dispatch_session,
     iter_sessions,
@@ -673,6 +684,37 @@ def register_session(args) -> dict:
     # registrations). Capture the native id before runtime may be set to None.
     gh468_native_session_id = runtime.get("session_id") if runtime else None
     gh468_native_family = runtime.get("family") if runtime else None
+
+    # An explicitly named Claude session is registrable only when its own artifact
+    # proves membership in the target checkout. The project slug is only a lookup
+    # hint (it can collide), so the existing evidence reader validates cwd + native
+    # identity together before any binding/session write.
+    if args.runtime_session_id is not None and gh468_native_family == "claude_app":
+        project_path = resolve_project_repo_path(str(args.project), "app")
+        evidence = "unprovable"
+        if project_path is not None:
+            artifact = (
+                claude_home()
+                / "projects"
+                / str(claude_project_slug(str(project_path)))
+                / f"{args.runtime_session_id}.jsonl"
+            )
+            evidence = _claude_session_evidence(
+                artifact,
+                MAX_CLAUDE_RECORD_PREFIX_BYTES,
+                os.path.realpath(project_path),
+                str(args.runtime_session_id),
+            )
+        if evidence != "match":
+            detail = (
+                "belongs to another project"
+                if evidence == "other_project"
+                else "project membership could not be proven"
+            )
+            raise SystemExit(
+                f"[error] Claude session artifact {detail}; refusing registration "
+                "and no session was written."
+            )
 
     if not runtime:
         runtime = None

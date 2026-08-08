@@ -45,6 +45,23 @@ until the exact native session watcher and its target/sibling probes pass. Follo
 Do not treat the agent-wide watcher reported by `session_bootstrap.py` as that
 proof.
 
+### Restarted first-class sessions
+
+A restarted session owns its binding repair. At bootstrap, if the runtime id no
+longer matches the active canonical binding, the worker self-heals by running the
+exact `session_autobridge.py register --supersedes-session` command printed in the
+drift banner; the banner itself only detects and reports, and never mutates or
+refuses bootstrap. The named stale lease must be superseded by the worker that
+knows its new native runtime id.
+
+Rebinding does not recover packets already addressed to the dead runtime id.
+Those packets stay invisible to exact reads because the exact-read target filter
+skips non-matching ids rather than refusing. Find the drift-window mail directly:
+
+```bash
+grep -R -- "target_session_id: <dead-id>" Chats/
+```
+
 ## Keep The Tooling Current
 
 `llm-collab` is the shared coordination tool. Keep the parked operator checkout
