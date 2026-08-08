@@ -137,6 +137,89 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_autobridge_lib.autobridge_wake_log_path("X"),
         )
 
+    def test_event_log_cap_is_declared_and_normal_write_is_unchanged(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(session_autobridge_lib, "MAX_EVENT_LOG_BYTES", 700):
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "normal", "detail": "kept"}
+            )
+            path = Path(tmp) / "SESSION-BOUND.jsonl"
+            normal = json.loads(path.read_text())
+            self.assertEqual(
+                {"detail": "kept", "event": "normal", "ts": normal["ts"]},
+                normal,
+            )
+
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "oversized", "detail": "x" * 700}
+            )
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(2, len(events))
+            self.assertEqual("event_log_truncated", events[-1]["event"])
+            self.assertIs(events[-1]["truncated"], True)
+            self.assertEqual(700, events[-1]["limit_bytes"])
+            self.assertLessEqual(path.stat().st_size, 700)
+
+            bounded = path.read_bytes()
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "after_cap"}
+            )
+            self.assertEqual(bounded, path.read_bytes())
+
+    def test_event_log_repeat_keeps_first_detail_and_reason_transition(self):
+        timestamps = [
+            "2026-08-08T01:00:00+00:00",
+            "2026-08-08T01:00:15+00:00",
+            "2026-08-08T01:00:30+00:00",
+        ]
+        legacy = b'{"event":"legacy","reason":"lease_expired"}\n'
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(session_autobridge_lib, "utc_iso", side_effect=timestamps):
+            path = Path(tmp) / "SESSION-DEDUPE.jsonl"
+            path.write_bytes(legacy)
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "lease_expired",
+                    "status": "parked",
+                    "detail": "first detail",
+                },
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "lease_expired",
+                    "status": "changed but not retained",
+                    "detail": "later detail",
+                },
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "reader_runtime_family_unresolved",
+                    "status": "parked",
+                },
+            )
+
+            raw = path.read_bytes()
+            self.assertTrue(raw.startswith(legacy), "legacy log bytes must stay untouched")
+            events = [json.loads(line) for line in raw.splitlines()]
+            self.assertEqual(3, len(events))
+            repeated, transitioned = events[1:]
+            self.assertEqual(2, repeated["repeat_count"])
+            self.assertEqual("first detail", repeated["detail"])
+            self.assertEqual("parked", repeated["status"])
+            self.assertEqual(timestamps[0], repeated["first_seen_at_utc"])
+            self.assertEqual(timestamps[1], repeated["last_seen_at_utc"])
+            self.assertEqual("reader_runtime_family_unresolved", transitioned["reason"])
+            self.assertEqual(timestamps[2], transitioned["ts"])
+            self.assertEqual(1, transitioned["repeat_count"])
+
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
         write(
