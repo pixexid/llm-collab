@@ -4797,7 +4797,6 @@ def dispatch_session(
                 continue
             event["relay_result"] = relay_result
 
-        mark_after_event = False
         if should_mark_processed:
             if message.get("activation_lease"):
                 asserted, assertion_event, _ = activation_fenced_mutation(
@@ -4816,14 +4815,12 @@ def dispatch_session(
                     event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
                     should_mark_processed = False
             else:
-                mark_after_event = True
+                mark_message_processed(
+                    session,
+                    message["path"],
+                    prepared=prepared_result,
+                )
         append_event(session_id, event)
-        if should_mark_processed and mark_after_event:
-            mark_message_processed(
-                session,
-                message["path"],
-                prepared=prepared_result,
-            )
         actions.append(event)
 
     for refusal in repo_scope_refusals:
