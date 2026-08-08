@@ -353,26 +353,39 @@ def wait_for_managed_readiness(
         time.sleep(min(PM2_READINESS_POLL_SECONDS, remaining))
 
 
-def _record_command_tokens(environment: dict) -> list[str]:
-    """Executable tokens for a pm2 record: the script plus its arguments.
+def _record_status(record: dict) -> str | None:
+    """The PM2 status of a record, or None when it is not usable.
 
-    A Python watcher is launched as ``script=<interpreter> args=[<watch_script>, ...]``
-    so the watch script lives in ``args``; a directly-invoked script lives in
-    ``script``. Collecting both keeps the predicate about what the process
-    executes rather than which field PM2 filed it under. ``args`` is a list on
-    this install (the declared-process check already compares it to one); the
-    string branch guards a representation change without weakening the match.
+    None (rather than raising) so the undeclared-watcher scan can skip records
+    that carry no status instead of aborting a deploy over an unrelated process.
     """
-    tokens: list[str] = []
-    script = environment.get("script")
-    if isinstance(script, str):
-        tokens.append(script)
-    args = environment.get("args")
+    environment = record.get("pm2_env")
+    if not isinstance(environment, dict):
+        return None
+    status = environment.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _first_operand(args: object) -> str | None:
+    """The program an interpreter runs: the first non-flag token in ``args``.
+
+    A leading ``-`` marks an interpreter flag (python's ``-u``), not the program,
+    so it is skipped. Everything after the operand belongs to that program, so a
+    path that appears only as a later positional or as a flag value is DATA, not
+    an executed script. Mirrors how an interpreter itself picks argv[0]. ``args``
+    is a list on this install; the string branch guards a representation change.
+    """
     if isinstance(args, list):
-        tokens.extend(str(arg) for arg in args if isinstance(arg, (str, int, float)))
+        tokens = [str(arg) for arg in args if isinstance(arg, (str, int, float))]
     elif isinstance(args, str):
-        tokens.extend(args.split())
-    return tokens
+        tokens = args.split()
+    else:
+        return None
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        return token
+    return None
 
 
 def _token_resolves_to(token: str, cwd: str | None, resolved_watch_script: str) -> bool:
@@ -392,15 +405,27 @@ def _token_resolves_to(token: str, cwd: str | None, resolved_watch_script: str) 
 
 
 def _record_executes_watch_script(record: dict, resolved_watch_script: str) -> bool:
-    environment = record.get("pm2_env")
-    if not isinstance(environment, dict):
+    """True when a LIVE process is executing the runtime's watch script.
+
+    Two executable positions count and only those: the ``script`` field itself
+    (a directly-invoked watcher), or the first non-flag operand of ``args`` (the
+    program an interpreter runs). A path that appears only as a later argument or
+    a flag value is data, not an executed script, so it is not flagged (an
+    unrelated app that merely receives the watcher path as input is not a
+    dispatcher). Only a process in a live PM2 status can dispatch -- a stopped or
+    errored entry has no live process and ``pm2 save`` resurrects it stopped, not
+    live -- so it is not an offender even when its command line names the script.
+    """
+    if _record_status(record) not in PM2_LIVE_STATUSES:
         return False
+    environment = record["pm2_env"]
     cwd = environment.get("pm_cwd")
     cwd_text = cwd if isinstance(cwd, str) else None
-    return any(
-        _token_resolves_to(token, cwd_text, resolved_watch_script)
-        for token in _record_command_tokens(environment)
-    )
+    script = environment.get("script")
+    if isinstance(script, str) and _token_resolves_to(script, cwd_text, resolved_watch_script):
+        return True
+    operand = _first_operand(environment.get("args"))
+    return operand is not None and _token_resolves_to(operand, cwd_text, resolved_watch_script)
 
 
 def refuse_undeclared_runtime_watchers(
