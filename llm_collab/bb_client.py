@@ -50,6 +50,12 @@ PINNED_BB_VERSION = "0.35.1"
 # and truncating it would turn a resource limit into a correctness bug.
 MAX_RESPONSE_CHARS = 1_048_576
 
+# Healthy local SIGKILL delivery completes in moments. Ten seconds leaves room
+# for a transient kernel/storage stall without letting a permanently blocked
+# uninterruptible child wedge the caller forever. If this expires, userspace
+# cannot reclaim the child: it remains unreaped and its exit status is lost.
+KILL_CHILD_REAP_TIMEOUT_SECONDS = 10.0
+
 # bb's own `thread log --limit` default. Passed EXPLICITLY so the page bound is
 # this module's, not an implicit default that can move under us.
 MAX_EVENT_PAGE = 100
@@ -78,6 +84,10 @@ REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 class BbTransportTimeout(Exception):
     """Raised by a transport when a call exceeds its deadline."""
+
+
+class BbChildReapTimeout(BbTransportTimeout):
+    """SIGKILL was sent, but the child remained unreaped past the reap bound."""
 
 
 @dataclass(frozen=True)
@@ -736,7 +746,7 @@ class BbClient:
             # second real turn.
             return BbRefusal(
                 REFUSAL_AMBIGUOUS,
-                f"{' '.join(argv)} timed out; the operation may have been performed",
+                f"{result.detail}; the operation may have been performed",
             )
         if isinstance(result, BbRefusal) and result.reason == REFUSAL_MALFORMED_RESPONSE:
             # The only malformed refusal _call() raises is its size bound, and it
@@ -900,7 +910,14 @@ def subprocess_transport(
                 process.kill()
             except ProcessLookupError:
                 pass
-            process.wait()
+            try:
+                process.wait(timeout=KILL_CHILD_REAP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                raise BbChildReapTimeout(
+                    f"{' '.join(argv)}: SIGKILL sent but the child did not exit within "
+                    f"{KILL_CHILD_REAP_TIMEOUT_SECONDS}s; its exit status is unavailable "
+                    "and the child remains unreaped because userspace cannot reclaim it"
+                ) from exc
 
         def discard_late_process(late_process) -> None:
             try:
