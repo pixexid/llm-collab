@@ -157,6 +157,14 @@ class RuntimeGateTest(unittest.TestCase):
                 current_runtime.require_current_runtime("deliver", environ=env)
         self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
 
+    def test_sentinel_without_token_does_not_bypass(self):
+        with tempfile.NamedTemporaryFile() as sentinel:
+            env = {current_runtime.TEST_SENTINEL_ENV: sentinel.name}
+            with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
+                with self.assertRaises(SystemExit) as cm:
+                    current_runtime.require_current_runtime("deliver", environ=env)
+            self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
+
     def test_token_mismatch_does_not_bypass(self):
         import tempfile
         fd, path = tempfile.mkstemp()
@@ -172,22 +180,61 @@ class RuntimeGateTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_fifo_sentinel_fails_closed_without_hanging(self):
-        # A sentinel path pointing at a FIFO must NOT be read (would block forever);
-        # it must fail closed and enforce the gate.
-        import tempfile
-        d = tempfile.mkdtemp()
-        fifo = os.path.join(d, "sentinel-fifo")
-        os.mkfifo(fifo)
-        try:
-            env = {current_runtime.TEST_TOKEN_ENV: "t", current_runtime.TEST_SENTINEL_ENV: fifo}
+    def test_missing_sentinel_file_does_not_bypass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {
+                current_runtime.TEST_TOKEN_ENV: "t",
+                current_runtime.TEST_SENTINEL_ENV: str(Path(directory) / "missing"),
+            }
             with patch.object(current_runtime, "current_tooling", side_effect=_stale()):
                 with self.assertRaises(SystemExit) as cm:
                     current_runtime.require_current_runtime("deliver", environ=env)
             self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
-        finally:
-            os.unlink(fifo)
-            os.rmdir(d)
+
+    def test_fifo_sentinel_fails_closed_without_hanging(self):
+        # Force the old stat-then-open implementation past its type check. Its
+        # blocking open then hangs on this writer-less FIFO; the descriptor-based
+        # helper ignores the path stat and rejects the FIFO after a non-blocking open.
+        script = r"""
+import os
+import stat
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, "bin")
+import current_runtime
+
+real_stat = current_runtime.os.stat
+fifo = sys.argv[1]
+
+def fake_stat(path, *args, **kwargs):
+    if os.fspath(path) == fifo:
+        return SimpleNamespace(st_mode=stat.S_IFREG, st_size=1)
+    return real_stat(path, *args, **kwargs)
+
+current_runtime.os.stat = fake_stat
+result = current_runtime._test_sentinel_authorized({
+    current_runtime.TEST_TOKEN_ENV: "t",
+    current_runtime.TEST_SENTINEL_ENV: fifo,
+})
+print(result)
+raise SystemExit(0 if result is False else 1)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "sentinel-fifo"
+            os.mkfifo(fifo)
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-c", script, str(fifo)],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("sentinel authorization blocked on a writer-less FIFO")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual("False", proc.stdout.strip())
 
     def test_oversized_sentinel_does_not_bypass(self):
         import tempfile

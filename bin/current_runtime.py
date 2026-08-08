@@ -6,10 +6,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import stat
 import subprocess
 import sys
 from pathlib import Path
+
+from _session_autobridge import UnreadableFile, read_regular_file_bounded
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -121,15 +122,8 @@ def _test_sentinel_authorized(env) -> bool:
     if not token or not sentinel:
         return False
     try:
-        info = os.stat(sentinel, follow_symlinks=False)
-        # A stale/hostile sentinel path (FIFO, device, or huge file) must FAIL
-        # CLOSED, never hang or exhaust memory: require a small regular file and
-        # read a bounded amount. A token is short (32 hex chars); 256 is ample.
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
-            return False
-        with open(sentinel, "r", encoding="utf-8") as handle:
-            content = handle.read(256)
-    except OSError:
+        content = read_regular_file_bounded(Path(sentinel), 256).decode("utf-8")
+    except (OSError, UnicodeDecodeError, UnreadableFile):
         return False
     return content.strip() == token
 
