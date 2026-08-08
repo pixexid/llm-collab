@@ -21,6 +21,7 @@ INBOX_SCRIPT = REPO_ROOT / "bin" / "inbox.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 import inbox as inbox_lib
 import _helpers as helpers_lib
+import _session_autobridge as session_autobridge_lib
 from _activation_lease import RUNTIME_ID_ENV_VARS
 
 
@@ -1165,10 +1166,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
             autospec=True,
             side_effect=lambda path: path.parent.name == "live",
         ), patch.object(
-            Path,
-            "read_text",
-            autospec=True,
-            side_effect=lambda path: path.name,
+            helpers_lib,
+            "read_regular_file_bounded",
+            side_effect=lambda path, _limit: path.name.encode(),
         ), patch.object(
             helpers_lib,
             "parse_frontmatter",
@@ -1222,10 +1222,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "load_agent_inbox",
             return_value={"agent": "codex", "unread": paths, "read": []},
         ), patch.object(Path, "exists", autospec=True, return_value=True), patch.object(
-            Path,
-            "read_text",
-            autospec=True,
-            side_effect=lambda path: path.parent.name,
+            helpers_lib,
+            "read_regular_file_bounded",
+            side_effect=lambda path, _limit: path.parent.name.encode(),
         ), patch.object(
             helpers_lib,
             "parse_frontmatter",
@@ -1234,6 +1233,80 @@ class InboxMarkAllReadTest(unittest.TestCase):
             messages = helpers_lib.get_unread_messages("codex")
 
         self.assertEqual(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES, len(messages))
+        self.assertEqual(
+            {"amiga", "nuvyr"},
+            {message["frontmatter"]["project_id"] for message in messages},
+        )
+
+    def test_default_unread_scan_refuses_oversized_index_before_parsing(self) -> None:
+        inbox_path = self.root / "agents" / "codex" / "inbox.json"
+        inbox_path.write_text(inbox_path.read_text() + " " * 128)
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_DISPATCH_INBOX_BYTES",
+            inbox_path.stat().st_size - 1,
+        ), patch.object(helpers_lib.json, "loads", wraps=json.loads) as loads:
+            with self.assertRaises(inbox_lib.InboxScanLimitExceeded):
+                helpers_lib.get_unread_messages("codex")
+
+        loads.assert_not_called()
+
+    def test_default_unread_scan_refuses_oversized_single_packet(self) -> None:
+        path = self.add_message("LARGE", project_line="amiga")
+        packet_path = self.root / path
+        packet_path.write_text(
+            packet_path.read_text()
+            + "x" * (session_autobridge_lib.MAX_DISPATCH_PACKET_BYTES + 1)
+        )
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib,
+            "agent_inbox_path",
+            return_value=self.root / "agents" / "codex" / "inbox.json",
+        ):
+            with self.assertRaises(inbox_lib.InboxScanLimitExceeded):
+                helpers_lib.get_unread_messages("codex")
+
+    def test_default_unread_scan_budget_is_cumulative_across_packets(self) -> None:
+        paths = [
+            self.add_message("A", project_line="amiga"),
+            self.add_message("B", project_line="nuvyr"),
+            self.add_message("C", project_line="amiga"),
+        ]
+        inbox_path = self.root / "agents" / "codex" / "inbox.json"
+        packet_paths = [self.root / path for path in paths]
+        budget_limit = (
+            inbox_path.stat().st_size
+            + sum(path.stat().st_size for path in packet_paths)
+            - 1
+        )
+        self.assertTrue(
+            all(path.stat().st_size < budget_limit for path in packet_paths)
+        )
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib, "agent_inbox_path", return_value=inbox_path
+        ), patch.object(
+            session_autobridge_lib,
+            "MAX_DISPATCH_INBOX_BYTES",
+            budget_limit,
+        ):
+            with self.assertRaises(inbox_lib.InboxScanLimitExceeded):
+                helpers_lib.get_unread_messages("codex")
+
+    def test_default_unread_scan_normal_amiga_and_non_amiga_inbox_is_unaffected(self) -> None:
+        paths = [
+            self.add_message("NORMAL-AMIGA", project_line="amiga"),
+            self.add_message("NORMAL-NUVYR", project_line="nuvyr"),
+        ]
+        with patch.object(helpers_lib, "ROOT", self.root), patch.object(
+            helpers_lib,
+            "agent_inbox_path",
+            return_value=self.root / "agents" / "codex" / "inbox.json",
+        ):
+            messages = helpers_lib.get_unread_messages("codex")
+
+        self.assertEqual(paths, [message["path"] for message in messages])
         self.assertEqual(
             {"amiga", "nuvyr"},
             {message["frontmatter"]["project_id"] for message in messages},

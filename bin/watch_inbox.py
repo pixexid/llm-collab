@@ -243,6 +243,19 @@ def exact_session_messages(args, refusal_progress: dict) -> list[dict]:
             save_refusal_progress(args.me, refusal_progress)
 
 
+def default_inbox_snapshot(agent_id: str) -> tuple[set[str], dict[str, dict]]:
+    unread: set[str] = set()
+    messages = {
+        message["path"]: message
+        for message in get_unread_messages(
+            agent_id,
+            snapshot_paths=unread,
+        )
+    }
+    unread.update(messages)
+    return unread, messages
+
+
 def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
     session_ids: list[str] = []
     for session in iter_sessions(agent_id=agent_id):
@@ -1118,8 +1131,20 @@ def main():
                         sys.exit(75)
                     time.sleep(poll_interval)
         elif inbox_path.exists():
-            data = load_agent_inbox(args.me)
-            seen_paths = set(data.get("unread", []))
+            while True:
+                try:
+                    seen_paths, _ = default_inbox_snapshot(args.me)
+                    break
+                except Exception as error:
+                    emit(
+                        {
+                            "ts": utc_now_str(),
+                            "event": "error",
+                            "detail": str(error),
+                        },
+                        args.json_output,
+                    )
+                    time.sleep(poll_interval)
 
     polls = 0
     while True:
@@ -1131,9 +1156,7 @@ def main():
                     message["path"]: message for message in exact_messages
                 }
             elif inbox_path.exists():
-                data = load_agent_inbox(args.me)
-                unread = set(data.get("unread", []))
-                messages = {message["path"]: message for message in get_unread_messages(args.me)}
+                unread, messages = default_inbox_snapshot(args.me)
             else:
                 unread = set()
                 messages = {}
