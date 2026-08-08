@@ -184,30 +184,51 @@ def session_has_exact_canonical_binding(session: dict) -> bool:
     )
 
 
-def exact_session_messages(args) -> list[dict]:
-    budget = ExactReadBudget(MAX_EXACT_SESSION_BYTES)
-    with active_read_budget(budget):
-        try:
-            session = exact_read_session(args, budget)
-        except Exception as error:
-            raise ExactWatcherAuthorityError(str(error)) from error
-        messages, refusals, _refusal_only = select_exact_read_messages(
-            args, session, budget
-        )
-        for refusal in refusals:
-            emit(
-                {
-                    "ts": utc_now_str(),
-                    "event": "exact_session_refused",
-                    "detail": refusal["path"],
-                    "agent": args.me,
-                    "session_id": args.session,
-                    "message_path": refusal["path"],
-                    "reason": refusal["reason"],
-                },
-                args.json_output,
+def exact_session_messages(args, refusal_progress: dict) -> list[dict]:
+    before = dict(refusal_progress)
+    try:
+        budget = ExactReadBudget(MAX_EXACT_SESSION_BYTES)
+        with active_read_budget(budget):
+            try:
+                session = exact_read_session(args, budget)
+            except Exception as error:
+                raise ExactWatcherAuthorityError(str(error)) from error
+            messages, refusals, refusal_only = select_exact_read_messages(
+                args, session, budget
             )
-    return messages
+            for refusal in refusals:
+                if not record_refusal_progress(
+                    refusal_progress,
+                    {},
+                    path=refusal["path"],
+                    reason=refusal["reason"],
+                    repo_targets=args.repo_target,
+                    project_id=args.project,
+                    session_id=args.session,
+                    track_packet_mtime=False,
+                ):
+                    continue
+                emit(
+                    {
+                        "ts": utc_now_str(),
+                        "event": "exact_session_refused",
+                        "detail": refusal["path"],
+                        "agent": args.me,
+                        "session_id": args.session,
+                        "message_path": refusal["path"],
+                        "reason": refusal["reason"],
+                    },
+                    args.json_output,
+                )
+            if refusal_only:
+                raise ExactWatcherAuthorityError(
+                    "exact_session_refused: "
+                    f"{json.dumps(refusals, sort_keys=True)}"
+                )
+            return messages
+    finally:
+        if refusal_progress != before:
+            save_refusal_progress(args.me, refusal_progress)
 
 
 def autobridge_session_ids(agent_id: str, project_id: str | None = None) -> list[str]:
@@ -408,6 +429,54 @@ def refusal_fingerprint(reason: str, repo_targets, packet_repo_targets, subscrib
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def record_refusal_progress(
+    progress: dict,
+    stats: dict,
+    *,
+    path: str,
+    reason: str,
+    repo_targets=None,
+    project_id=None,
+    session_id=None,
+    packet_repo_targets=None,
+    packet_project=None,
+    session_scope=None,
+    packet_mtime=None,
+    track_packet_mtime=True,
+) -> bool:
+    """Record one refusal decision; return True only when it should be emitted."""
+    fingerprint = refusal_fingerprint(
+        reason,
+        repo_targets,
+        packet_repo_targets,
+        project_id,
+        packet_project,
+        session_id,
+        session_scope,
+    )
+    key = progress_key(session_id, path)
+    observed = None
+    if track_packet_mtime:
+        observed = packet_mtime if packet_mtime is not None else _packet_mtime(path)
+    existing = progress.get(key) or {}
+    if existing.get("fp") == fingerprint and existing.get("mtime") == observed:
+        stats[reason] = stats.get(reason, 0) + 1
+        return False
+    progress[key] = {
+        "path": path,
+        "session_repo_targets": repo_targets,
+        "session_scope": _stable_targets(session_scope),
+        "fp": fingerprint,
+        "mtime": observed,
+        "reason": reason,
+        "packet_repo_targets": packet_repo_targets,
+        "packet_project": packet_project,
+        "session_id": session_id,
+    }
+    stats["_new"] = stats.get("_new", 0) + 1
+    return True
 
 
 def bb_bootstrap_enabled() -> bool:
@@ -686,33 +755,19 @@ def dispatch_autobridge(
     def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None, packet_mtime=None) -> bool:
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
-        fingerprint = refusal_fingerprint(
-            reason, repo_targets, packet_repo_targets, project_id, packet_project,
-            session_id,
-            session_scope,
+        return record_refusal_progress(
+            progress,
+            stats,
+            path=path,
+            reason=reason,
+            repo_targets=repo_targets,
+            project_id=project_id,
+            session_id=session_id,
+            packet_repo_targets=packet_repo_targets,
+            packet_project=packet_project,
+            session_scope=session_scope,
+            packet_mtime=packet_mtime,
         )
-        key = progress_key(session_id, path)
-        existing = progress.get(key) or {}
-        # Use the mtime observed WITH the body that produced this decision. A
-        # fresh stat here would certify a version we never examined.
-        observed = packet_mtime if packet_mtime is not None else _packet_mtime(path)
-        existing = progress.get(key) or {}
-        if existing.get("fp") == fingerprint and existing.get("mtime") == observed:
-            stats[reason] = stats.get(reason, 0) + 1
-            return False
-        progress[key] = {
-            "path": path,
-            "session_repo_targets": repo_targets,
-            "session_scope": _stable_targets(session_scope),
-            "fp": fingerprint,
-            "mtime": observed,
-            "reason": reason,
-            "packet_repo_targets": packet_repo_targets,
-            "packet_project": packet_project,
-            "session_id": session_id,
-        }
-        stats["_new"] = stats.get("_new", 0) + 1
-        return True
 
     bootstrap_consumed = _bootstrap_bb_before_dispatch(
         agent_id,
@@ -966,7 +1021,8 @@ def main():
             while True:
                 try:
                     seen_paths = {
-                        message["path"] for message in exact_session_messages(args)
+                        message["path"]
+                        for message in exact_session_messages(args, refusal_progress)
                     }
                     break
                 except Exception as error:
@@ -989,7 +1045,7 @@ def main():
     while True:
         try:
             if args.session:
-                exact_messages = exact_session_messages(args)
+                exact_messages = exact_session_messages(args, refusal_progress)
                 unread = {message["path"] for message in exact_messages}
                 messages = {
                     message["path"]: message for message in exact_messages
