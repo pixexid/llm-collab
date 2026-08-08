@@ -11,10 +11,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root_src="$(cd "$here/../.." && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/tools/axbridge" "$tmp/bin"
+export AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS="${AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS:-0.01}"
+export AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS="${AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS:-4}"
 cp "$root_src/bin/axsend-ensure" "$tmp/bin/axsend-ensure"
 : > "$tmp/tools/axbridge/build.sh"   # noop build
 log="$tmp/argv.log"
 tcount="$tmp/turns_count"
+sleep_log="$tmp/sleep.log"
 # Stub axsend: RING_EXIT sets the ring exit code; `turns` prints TURNS_BASELINE on
 # its first call (the wrapper's pre-ring baseline) and TURNS_AFTER on every call
 # after (post-ring polls). `confirm` reports delivered unless CONFIRM_EXIT!=0.
@@ -45,6 +48,12 @@ exit 0
 STUB
 sed -i '' "s#\$AXSEND_STUB_LOG#$log#g; s#\$AXSEND_STUB_TURNS_COUNT#$tcount#g" "$tmp/tools/axbridge/axsend"
 chmod +x "$tmp/tools/axbridge/axsend" "$tmp/bin/axsend-ensure"
+
+cat > "$tmp/bin/sleep" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" >> "$AXSEND_STUB_SLEEP_LOG"
+STUB
+chmod +x "$tmp/bin/sleep"
 
 fails=0
 # run <ring_exit> <baseline> <after> <args...> -> sets $rc to the wrapper exit
@@ -106,6 +115,21 @@ assert "successful submit ring emits exactly one outcome (from confirm)" '(( rc 
 # stays 1) must NOT promote — the old fix would falsely promote from mere existence.
 run 7 1 1 ring --app ZCode --text tok --submit
 assert "ring 7 + stale identical turn (1->1, no increase) -> stays nonzero" '(( rc != 0 ))'
+assert "stale freshness proof keeps all four polling attempts" '[[ "$(count turns)" == "5" ]]'
+
+# Unset production defaults remain four attempts at two seconds. The sleep stub
+# records the requested interval without making this default-path proof slow.
+: > "$log"; : > "$tcount"; : > "$sleep_log"
+set +e
+env -u AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS \
+  -u AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS \
+  PATH="$tmp/bin:$PATH" AXSEND_STUB_SLEEP_LOG="$sleep_log" \
+  RING_EXIT=7 TURNS_BASELINE=1 TURNS_AFTER=1 \
+  "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit >/dev/null 2>&1
+rc=$?
+set -e
+assert "unset freshness defaults keep four polling attempts" '(( rc == 7 )) && [[ "$(wc -l < "$sleep_log" | tr -d " ")" == "4" ]]'
+assert "unset freshness poll interval remains exactly two seconds" '[[ "$(sort -u "$sleep_log")" == "2" ]]'
 
 # R8: exit 9 == post-submit identity loss is AMBIGUOUS and is NEVER auto-promoted
 # (a later auto-resolution cannot prove it is the same frozen window/thread). Even
