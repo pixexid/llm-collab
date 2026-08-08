@@ -152,20 +152,60 @@ class SessionAutobridgeTest(unittest.TestCase):
             )
 
             session_autobridge_lib.append_event(
-                "SESSION-BOUND", {"event": "oversized", "detail": "x" * 700}
+                "SESSION-BOUND", {"event": "fills_head", "detail": "x" * 300}
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "recent", "detail": "y" * 150}
             )
             events = [json.loads(line) for line in path.read_text().splitlines()]
-            self.assertEqual(2, len(events))
-            self.assertEqual("event_log_truncated", events[-1]["event"])
-            self.assertIs(events[-1]["truncated"], True)
-            self.assertEqual(700, events[-1]["limit_bytes"])
-            self.assertLessEqual(path.stat().st_size, 700)
-
-            bounded = path.read_bytes()
-            session_autobridge_lib.append_event(
-                "SESSION-BOUND", {"event": "after_cap"}
+            self.assertTrue(
+                any(event["event"] == "event_log_truncated" for event in events),
+                events,
             )
-            self.assertEqual(bounded, path.read_bytes())
+            marker_index = next(
+                index
+                for index, event in enumerate(events)
+                if event["event"] == "event_log_truncated"
+            )
+            self.assertEqual("bounded_head_and_tail", events[marker_index]["retention"])
+            self.assertIs(events[marker_index]["truncated"], True)
+            self.assertIn(
+                "recent",
+                [event["event"] for event in events[marker_index + 1 :]],
+            )
+
+            for index in range(20):
+                session_autobridge_lib.append_event(
+                    "SESSION-BOUND",
+                    {"event": f"tail-{index}", "detail": "z" * 100},
+                )
+            retained = [json.loads(line) for line in path.read_text().splitlines()]
+            marker_index = next(
+                index
+                for index, event in enumerate(retained)
+                if event["event"] == "event_log_truncated"
+            )
+            self.assertEqual("normal", retained[0]["event"])
+            self.assertEqual("tail-19", retained[-1]["event"])
+            tail_bytes = sum(
+                len((json.dumps(event, sort_keys=True) + "\n").encode())
+                for event in retained[marker_index + 1 :]
+            )
+            self.assertLessEqual(tail_bytes, 700)
+
+            legacy_path = Path(tmp) / "SESSION-LEGACY-BOUND.jsonl"
+            legacy = (
+                json.dumps({"event": "legacy", "detail": "a" * 700}) + "\n"
+            ).encode()
+            legacy_path.write_bytes(legacy)
+            session_autobridge_lib.append_event(
+                "SESSION-LEGACY-BOUND", {"event": "new_tail"}
+            )
+            self.assertTrue(legacy_path.read_bytes().startswith(legacy))
+            self.assertEqual(
+                "new_tail",
+                json.loads(legacy_path.read_text().splitlines()[-1])["event"],
+            )
 
     def test_event_log_repeat_keeps_first_detail_and_reason_transition(self):
         timestamps = [

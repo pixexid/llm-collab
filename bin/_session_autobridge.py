@@ -1164,26 +1164,40 @@ def _append_event_path(
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
+        search_start = max(
+            0,
+            size - MAX_EVENT_LOG_BYTES - EVENT_LOG_TRUNCATION_RESERVE_BYTES,
+        )
+        handle.seek(search_start)
+        search_window = handle.read(size - search_start)
+        tail_start = 0
+        cursor = search_start
+        for raw_line in search_window.splitlines(keepends=True):
+            try:
+                candidate = json.loads(raw_line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                candidate = None
+            cursor += len(raw_line)
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("event") == "event_log_truncated"
+                and candidate.get("retention") == "bounded_head_and_tail"
+            ):
+                tail_start = cursor
+
         last_start = size
         last_event = None
         if size:
-            tail_start = max(0, size - MAX_EVENT_LOG_BYTES)
-            handle.seek(tail_start)
-            tail = handle.read(size - tail_start).removesuffix(b"\n")
+            last_read_start = max(tail_start, size - MAX_EVENT_LOG_BYTES)
+            handle.seek(last_read_start)
+            tail = handle.read(size - last_read_start).removesuffix(b"\n")
             separator = tail.rfind(b"\n")
-            if separator >= 0 or tail_start == 0:
-                last_start = tail_start + separator + 1
+            if separator >= 0 or last_read_start == tail_start:
+                last_start = last_read_start + separator + 1
                 try:
                     last_event = json.loads(tail[separator + 1 :])
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     pass
-
-        if (
-            isinstance(last_event, dict)
-            and last_event.get("event") == "event_log_truncated"
-            and last_event.get("truncated") is True
-        ):
-            return
 
         replace_last = (
             isinstance(last_event, dict)
@@ -1212,13 +1226,37 @@ def _append_event_path(
             encoded = (json.dumps(event_payload, sort_keys=True) + "\n").encode()
             projected_size = size + len(encoded)
 
-        if projected_size + EVENT_LOG_TRUNCATION_RESERVE_BYTES > MAX_EVENT_LOG_BYTES:
+        if len(encoded) > MAX_EVENT_LOG_BYTES:
+            encoded = (
+                json.dumps(
+                    {
+                        "event": "event_log_event_truncated",
+                        "message_path": event_payload.get("message_path"),
+                        "original_bytes": len(encoded),
+                        "original_event": event_payload.get("event"),
+                        "original_reason": event_payload.get("reason"),
+                        "truncated": True,
+                        "ts": seen_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            replace_last = False
+            projected_size = size + len(encoded)
+
+        region_limit = MAX_EVENT_LOG_BYTES - (
+            0 if tail_start else EVENT_LOG_TRUNCATION_RESERVE_BYTES
+        )
+        projected_region_size = projected_size - tail_start
+        if projected_region_size > region_limit and not tail_start:
             marker = (
                 json.dumps(
                     {
                         "event": "event_log_truncated",
-                        "limit_bytes": MAX_EVENT_LOG_BYTES,
-                        "retained_bytes": size,
+                        "head_retained_bytes": size,
+                        "retention": "bounded_head_and_tail",
+                        "tail_limit_bytes": MAX_EVENT_LOG_BYTES,
                         "truncated": True,
                         "ts": seen_at,
                     },
@@ -1228,6 +1266,24 @@ def _append_event_path(
             ).encode()
             handle.seek(0, os.SEEK_END)
             handle.write(marker)
+            handle.write(encoded)
+        elif projected_region_size > region_limit:
+            handle.seek(tail_start)
+            retained = handle.read(size - tail_start)
+            if replace_last:
+                retained = retained[: last_start - tail_start] + encoded
+            else:
+                retained += encoded
+            keep = []
+            kept_bytes = 0
+            for line in reversed(retained.splitlines(keepends=True)):
+                if keep and kept_bytes + len(line) > MAX_EVENT_LOG_BYTES // 2:
+                    break
+                keep.append(line)
+                kept_bytes += len(line)
+            handle.truncate(tail_start)
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"".join(reversed(keep)))
         else:
             if replace_last:
                 handle.truncate(last_start)

@@ -70,9 +70,10 @@ Dispatcher artifacts live under:
 - `State/session_autobridge/events/wake/<session-id>.jsonl` — Pi wake-only stream
 - `State/session_autobridge/prompts/<session-id>/...`
 
-Diagnostic event JSONL files are capped at 1 MiB. The writer reserves room for
-and appends an in-band `event_log_truncated` record before it stops retaining
-events, so inspection cannot mistake a capped file for complete history.
+Diagnostic event JSONL growth is bounded as a head plus a rolling recent tail,
+each at most 1 MiB. An in-band `event_log_truncated` record separates them, so
+inspection cannot mistake the omitted middle for complete history. Existing
+oversized logs remain an untouched legacy head; only their new tail is bounded.
 Consecutive reason records for the same event and message are one
 `repeat_compacted` record: its first event detail and `first_seen_at_utc` stay
 fixed while `repeat_count` and `last_seen_at_utc` advance; a reason transition
