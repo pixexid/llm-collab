@@ -412,20 +412,24 @@ Use the mandatory one-pass GitHub Codex gate:
   **That reaction is itself the automatic pass's clean artifact.** The connector
   emits nothing else when it has no suggestions, so there is no separate proof that
   the pass ran, and requiring one would make this model unsatisfiable — the exact
-  deadlock it exists to remove. Verify all four: the actor is the connector, the
-  reaction post-dates the push of the current head, no push or force-push occurred
-  between that push and the `+1`, and **every other artifact class is empty** — no
+  deadlock it exists to remove. Verify all three: the actor is the connector, no
+  ordinary push and no `head_ref_force_pushed` event occurred between the PR's
+  `createdAt` and the `+1`, and **every other artifact class is empty** — no
   review object, no top-level comment, no inline thread. That last condition is the
   safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
   what keeps this model from reading a pass over unresolved threads
   (llm-collab#317). Any head change voids it, and it grants no second bot pass —
   locally prove the amended head or remain blocked. A PR-level reaction carries no
-  SHA, so bind the interval to the current head with durable commit/push timestamps
-  and retained `head_ref_force_pushed` events; a branch that has only ever had one
-  commit and no force-push is unambiguous by construction.
-  If that durable record cannot prove the interval, the `+1` is a prior-head signal
-  — route it through the prior-OID path below and locally prove every amendment,
-  never as a terminal clean pass for the current head. A clean automatic `+1`
+  SHA, so anchor the interval at the PR's `createdAt`, not at the current head's
+  push. Establish it from durable, queryable data: the PR's `createdAt`, every
+  commit reachable from the current PR head, and retained
+  `head_ref_force_pushed` events. GitHub exposes each commit's `committedDate`, not
+  push time, so require every such `committedDate` to be at or before the PR's
+  `createdAt` and no retained force-push event inside the interval. If a push
+  occurred inside that interval or the durable record cannot prove otherwise, the
+  `+1` is a prior-head signal — route it through the prior-OID path below and
+  locally prove every amendment, never as a terminal clean pass for the current
+  head. A clean automatic `+1`
   never justifies a second review request. The old guard required an existing
   `eyes` pickup artifact, but the connector swaps `eyes` for `+1`, so it was never
   satisfiable at merge time. Merged PRs #603, #605, #607, #608, and #615 each
@@ -661,14 +665,15 @@ Codex review gate as complete when any of these holds:
   approximately five-minute post-clean settle and full re-read as a text verdict,
   or
 - a connector-authored `+1` sits **at PR level** with no manual request comment in
-  existence, the reaction post-dates the push of the current head, no push or
-  force-push occurred between that push and the `+1`, and **every other artifact
-  class is empty** — no review object, no top-level comment, no inline thread.
-  Bind that interval with durable commit/push timestamps and retained
-  `head_ref_force_pushed` events; a branch that has only ever had one commit and no
-  force-push is unambiguous by construction. If the durable record is ambiguous or
-  binds the `+1` to a prior head, it is not terminal here — fall back to the
-  prior-OID clause below with local proof of every amendment. The reaction is
+  existence, no ordinary push and no `head_ref_force_pushed` event occurred between
+  the PR's `createdAt` and the `+1`, and **every other artifact class is empty** — no
+  review object, no top-level comment, no inline thread. Use only queryable durable
+  data: the PR's `createdAt`, each current-head commit's `committedDate`, and
+  retained `head_ref_force_pushed` events. GitHub exposes `committedDate`, not push
+  time; every current-head commit must be dated at or before `createdAt`, with no
+  retained force-push event inside the interval. If a push occurred inside that
+  interval or the durable record is ambiguous, the `+1` is not terminal here — fall
+  back to the prior-OID clause below with local proof of every amendment. The reaction is
   itself the automatic pass's clean artifact; do not look for a separate proof that the
   pass ran. A `+1` alongside any
   finding artifact is not terminal. This is the automatic first pass's clean shape: the

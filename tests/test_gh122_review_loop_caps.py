@@ -481,11 +481,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "at PR level, with no manual request comment in existence",
                 sources["review_policy"],
             )
-            self.assertIn("Verify all four", sources["review_policy"])
+            self.assertIn("Verify all three", sources["review_policy"])
             for condition in (
                 "the actor is the connector",
-                "the reaction post-dates the push of the current head",
-                "no push or force-push occurred between that push and the `+1`",
+                "no ordinary push and no `head_ref_force_pushed` event occurred "
+                "between the PR's `createdAt` and the `+1`",
                 "every other artifact class is empty",
             ):
                 self.assertIn(condition, sources["review_policy"])
@@ -1876,19 +1876,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("compact_wait_gate", check)
 
     def test_automatic_plus_one_fails_closed_on_a_mid_pass_push(self):
-        """GH-616: a PR-level +1 carries no SHA, so durable push history must bind
-        it to the reviewed head. The reaction must post-date the current-head push,
-        with no intervening push or force-push; an ambiguous record fails closed
-        through the prior-OID local-proof path."""
+        """GH-616: a PR-level +1 carries no SHA, so PR creation must start the
+        durable no-push interval. An in-interval or ambiguous push record fails
+        closed through the prior-OID local-proof path."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "bind the interval to the current head with durable commit/push timestamps "
-            "and retained `head_ref_force_pushed` events",
+            "anchor the interval at the PR's `createdAt`, not at the current head's "
+            "push",
             text,
         )
         self.assertIn(
-            "no push or force-push occurred between that push and the `+1`", text
+            "GitHub exposes each commit's `committedDate`, not push time", text
         )
+        self.assertIn("no retained force-push event inside the interval", text)
         self.assertIn(
             "route it through the prior-OID path below and locally prove every amendment",
             text,
@@ -1896,18 +1896,23 @@ class ReviewLoopCapContractTest(unittest.TestCase):
 
     def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
         """GH-616 (canonical list): the merge-driving automatic PR-level +1 bullet
-        must carry the same durable push-history binding as the review-policy
+        must carry the same PR-creation-anchored binding as the review-policy
         enumeration and route an ambiguous/prior-head +1 through local proof."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "Bind that interval with durable commit/push timestamps and retained "
-            "`head_ref_force_pushed` events",
+            "no ordinary push and no `head_ref_force_pushed` event occurred between "
+            "the PR's `createdAt` and the `+1`",
             text,
         )
         self.assertIn(
-            "If the durable record is ambiguous or binds the `+1` to a prior head, it "
-            "is not terminal here — fall back to the prior-OID clause below with local "
-            "proof of every amendment",
+            "Use only queryable durable data: the PR's `createdAt`, each current-head "
+            "commit's `committedDate`, and retained `head_ref_force_pushed` events",
+            text,
+        )
+        self.assertIn(
+            "If a push occurred inside that interval or the durable record is "
+            "ambiguous, the `+1` is not terminal here — fall back to the prior-OID "
+            "clause below with local proof of every amendment",
             text,
         )
 
