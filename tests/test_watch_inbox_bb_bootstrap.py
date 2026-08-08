@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 import json
+import io
+import threading
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -458,7 +460,8 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         ), patch.object(
             watch_inbox.LedgerStore, "open_writer", return_value=nullcontext(store)
         ), patch(
-            "llm_collab.bb_continuation.client_from_project", return_value=object()
+            "llm_collab.bb_continuation.client_from_project",
+            return_value=SimpleNamespace(_transport=lambda *_args: None),
         ), patch(
             "llm_collab.bb_continuation.observe_bb_thread", return_value=result
         ) as observe, patch.object(watch_inbox, "emit"):
@@ -591,6 +594,256 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             ),
             (recorded, native_calls),
         )
+
+
+class BbWatcherBreakerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        watch_inbox._bb_timeout_streaks.clear()
+
+    def tearDown(self) -> None:
+        watch_inbox._bb_timeout_streaks.clear()
+
+    @staticmethod
+    def session(session_id: str = "bb-session-one") -> dict:
+        return {
+            "session_id": session_id,
+            "project_id": "project-one",
+            "runtime": {"family": "bb", "session_id": "thread-one"},
+        }
+
+    @staticmethod
+    def observation(state: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            detail=state,
+            state=state,
+            last_event_seq=0,
+            processed_events=0,
+            receipt_id=None,
+        )
+
+    def observation_patches(self, clients, emitted, observe):
+        return (
+            patch.object(watch_inbox, "bb_bootstrap_enabled", return_value=True),
+            patch.object(watch_inbox, "config_get", return_value="workspace-one"),
+            patch.object(watch_inbox, "project_state_root", return_value=Path("/tmp/state")),
+            patch.object(
+                watch_inbox,
+                "get_project",
+                return_value={"id": "project-one", "bb": {"enabled": True}},
+            ),
+            patch.object(watch_inbox.LedgerPaths, "derive", return_value=object()),
+            patch.object(
+                watch_inbox.LedgerStore,
+                "open_writer",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "llm_collab.bb_continuation.client_from_project",
+                side_effect=clients,
+            ),
+            patch("llm_collab.bb_continuation.observe_bb_thread", side_effect=observe),
+            patch.object(watch_inbox, "emit", side_effect=lambda event, _json: emitted.append(event)),
+        )
+
+    def test_tripped_breaker_blocks_concurrent_popen_entries(self) -> None:
+        from llm_collab.bb_client import BbTransportTimeout, subprocess_transport
+        import llm_collab.bb_client as bb_client
+
+        entries: list[int] = []
+        release = threading.Event()
+
+        class StalledPopen:
+            def __init__(self, *_args, **_kwargs):
+                entries.append(threading.get_ident())
+                release.wait()
+                self.stdout = io.StringIO("{}")
+                self.stderr = io.StringIO("")
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        transport = subprocess_transport(["fake-bb"])
+        clients = [SimpleNamespace(_transport=transport) for _ in range(10)]
+        emitted: list[dict] = []
+
+        def observe(_store, *, client, **_kwargs):
+            try:
+                client._transport(["thread", "log"], 0.02)
+            except BbTransportTimeout:
+                return self.observation("ambiguous")
+            return self.observation("idle")
+
+        patches = self.observation_patches(clients, emitted, observe)
+        before_threads = set(threading.enumerate())
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patch.object(
+                bb_client.subprocess, "Popen", StalledPopen
+            ):
+                self.assertFalse(watch_inbox._observe_bb_session(self.session(), False))
+                watch_inbox._observe_bb_session(self.session(), False)
+                entries_at_trip = len(entries)
+
+                barrier = threading.Barrier(9)
+                results: list[bool] = []
+                errors: list[BaseException] = []
+
+                def poll() -> None:
+                    try:
+                        barrier.wait()
+                        results.append(watch_inbox._observe_bb_session(self.session(), False))
+                    except BaseException as error:
+                        errors.append(error)
+
+                threads = [threading.Thread(target=poll) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                barrier.wait()
+                for thread in threads:
+                    thread.join(timeout=1)
+
+                self.assertEqual([], errors)
+                self.assertEqual(8, len(results))
+                self.assertEqual(
+                    entries_at_trip,
+                    len(entries),
+                    "failures=gh597_tripped_breaker_entered_popen",
+                )
+                self.assertEqual(
+                    1,
+                    sum(event.get("event") == "bb_breaker_open" for event in emitted),
+                    "one trip emitted more than one bb_breaker_open event",
+                )
+        finally:
+            release.set()
+            for thread in threading.enumerate():
+                if thread not in before_threads and thread.name == "bb-subprocess-launch":
+                    thread.join(timeout=1)
+
+    def test_inflight_success_after_trip_resets_and_isolated_timeout_does_not_trip(self) -> None:
+        from llm_collab.bb_client import BbTransportResult, BbTransportTimeout
+
+        success_started = threading.Event()
+        release_success = threading.Event()
+        emitted: list[dict] = []
+
+        def late_success(_argv, _timeout):
+            success_started.set()
+            release_success.wait()
+            return BbTransportResult(0, "", "")
+
+        def timeout(_argv, _timeout):
+            raise BbTransportTimeout("stalled")
+
+        clients = [
+            SimpleNamespace(_transport=late_success),
+            SimpleNamespace(_transport=timeout),
+            SimpleNamespace(_transport=timeout),
+            SimpleNamespace(_transport=timeout),
+            SimpleNamespace(_transport=timeout),
+        ]
+
+        def observe(_store, *, client, **_kwargs):
+            try:
+                client._transport(["thread", "log"], 1)
+            except BbTransportTimeout:
+                return self.observation("ambiguous")
+            return self.observation("idle")
+
+        patches = self.observation_patches(clients, emitted, observe)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+            success_result: list[bool] = []
+            success_thread = threading.Thread(
+                target=lambda: success_result.append(
+                    watch_inbox._observe_bb_session(self.session(), False)
+                )
+            )
+            success_thread.start()
+            self.assertTrue(success_started.wait(timeout=1))
+            self.assertFalse(watch_inbox._observe_bb_session(self.session(), False))
+            self.assertTrue(watch_inbox._observe_bb_session(self.session(), False))
+            release_success.set()
+            success_thread.join(timeout=1)
+
+            self.assertEqual([False], success_result)
+            self.assertNotIn("bb-session-one", watch_inbox._bb_timeout_streaks)
+            self.assertFalse(watch_inbox._observe_bb_session(self.session(), False))
+            self.assertFalse(
+                watch_inbox._observe_bb_session(self.session("bb-session-two"), False)
+            )
+            self.assertEqual(1, watch_inbox._bb_timeout_streaks["bb-session-one"])
+            self.assertEqual(1, watch_inbox._bb_timeout_streaks["bb-session-two"])
+            self.assertEqual(
+                1,
+                sum(event.get("event") == "bb_breaker_open" for event in emitted),
+            )
+
+    def test_keyboard_interrupt_passes_through_unchanged(self) -> None:
+        from llm_collab.bb_client import subprocess_transport
+        import llm_collab.bb_client as bb_client
+
+        interrupt = KeyboardInterrupt("operator interrupt")
+        entries: list[int] = []
+
+        class InterruptedPopen:
+            def __init__(self, *_args, **_kwargs):
+                entries.append(threading.get_ident())
+                raise interrupt
+
+        transport = subprocess_transport(["fake-bb"])
+        emitted: list[dict] = []
+
+        def observe(_store, *, client, **_kwargs):
+            client._transport(["thread", "log"], 1)
+            return self.observation("idle")
+
+        patches = self.observation_patches(
+            [SimpleNamespace(_transport=transport)], emitted, observe
+        )
+        try:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patch.object(
+                bb_client.subprocess, "Popen", InterruptedPopen
+            ):
+                watch_inbox._observe_bb_session(self.session(), False)
+        except BaseException as error:
+            self.assertIs(interrupt, error)
+        else:
+            self.fail("KeyboardInterrupt did not pass through the breaker")
+        self.assertEqual(1, len(entries))
+        self.assertEqual({}, watch_inbox._bb_timeout_streaks)
+
+    def test_open_breaker_leaves_durable_delivery_state_untouched(self) -> None:
+        session = self.session()
+        watch_inbox._bb_timeout_streaks[session["session_id"]] = 2
+        with patch.object(
+            watch_inbox, "_bootstrap_bb_before_dispatch", return_value=[]
+        ), patch.object(
+            watch_inbox, "bb_bootstrap_enabled", return_value=True
+        ), patch.object(
+            watch_inbox, "config_get", return_value="workspace-one"
+        ), patch.object(
+            watch_inbox, "autobridge_session_ids", return_value=[session["session_id"]]
+        ), patch.object(
+            watch_inbox, "load_session", return_value=session
+        ), patch.object(
+            watch_inbox, "session_has_exact_canonical_binding", return_value=True
+        ), patch.object(
+            watch_inbox.LedgerStore, "open_writer"
+        ) as ledger_write, patch.object(
+            watch_inbox, "dispatch_session"
+        ) as dispatch, patch.object(
+            watch_inbox, "mark_messages_read"
+        ) as mark_read, patch.object(watch_inbox, "emit"):
+            consumed = watch_inbox.dispatch_autobridge(
+                "glmpi", False, project_id="project-one"
+            )
+
+        self.assertEqual([], consumed)
+        ledger_write.assert_not_called()
+        dispatch.assert_not_called()
+        mark_read.assert_not_called()
 
 
 if __name__ == "__main__":
