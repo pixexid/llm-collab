@@ -84,7 +84,12 @@ from llm_collab.bb_bootstrap import (
     plan_bootstrap,
     resolve_bootstrap_repo_id,
 )
+from llm_collab.bb_client import BbEventPage, BbTransportTimeout
 from llm_collab.ledger import LedgerPaths, LedgerStore
+
+
+_BB_BREAKER_TIMEOUTS = 2
+_bb_timeout_streaks: dict[str, int] = {}
 
 
 def parse_args():
@@ -710,27 +715,70 @@ def _bootstrap_bb_before_dispatch(
     return consumed
 
 
-def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> None:
+def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> bool:
     """Replay one bound bb thread without writing a foreground session event."""
     if runtime_metadata(dict(session)).get("family") != "bb" or not bb_bootstrap_enabled():
-        return
+        return False
     project_id = session.get("project_id")
     if not isinstance(project_id, str) or not project_id:
-        return
+        return False
     workspace_id = config_get("workspace_id")
     if not isinstance(workspace_id, str) or not workspace_id:
-        return
+        return False
+    session_id = session.get("session_id")
+    if (
+        isinstance(session_id, str)
+        and _bb_timeout_streaks.get(session_id, 0) >= _BB_BREAKER_TIMEOUTS
+    ):
+        return True
+    observation_succeeded = False
     try:
         from llm_collab.bb_continuation import client_from_project, observe_bb_thread
 
+        client = client_from_project(get_project(project_id))
+        if isinstance(session_id, str):
+            transport = client._transport
+
+            def breaker_transport(argv, timeout_seconds):
+                try:
+                    result = transport(argv, timeout_seconds)
+                except BbTransportTimeout:
+                    streak = _bb_timeout_streaks.get(session_id, 0) + 1
+                    _bb_timeout_streaks[session_id] = streak
+                    if streak == _BB_BREAKER_TIMEOUTS:
+                        emit(
+                            {
+                                "ts": utc_now_str(),
+                                "event": "bb_breaker_open",
+                                "detail": f"{streak} consecutive bb transport timeouts",
+                                "project_id": project_id,
+                                "session_id": session_id,
+                            },
+                            json_output,
+                        )
+                    raise
+                return result
+
+            client._transport = breaker_transport
+            events_after = client.events_after
+
+            def breaker_events_after(*args, **kwargs):
+                nonlocal observation_succeeded
+                page = events_after(*args, **kwargs)
+                observation_succeeded = isinstance(page, BbEventPage)
+                return page
+
+            client.events_after = breaker_events_after
         paths = LedgerPaths.derive(project_state_root(), workspace_id)
         with LedgerStore.open_writer(paths) as store:
             result = observe_bb_thread(
                 store,
-                client=client_from_project(get_project(project_id)),
+                client=client,
                 session=session,
                 observed_at_utc=utc_now_str(),
             )
+        if observation_succeeded:
+            _bb_timeout_streaks.pop(session_id, None)
     except Exception as error:
         emit(
             {
@@ -742,7 +790,10 @@ def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> None:
             },
             json_output,
         )
-        return
+        return bool(
+            isinstance(session_id, str)
+            and _bb_timeout_streaks.get(session_id, 0) >= _BB_BREAKER_TIMEOUTS
+        )
     emit(
         {
             "ts": utc_now_str(),
@@ -756,6 +807,10 @@ def _observe_bb_session(session: Mapping[str, Any], json_output: bool) -> None:
             "receipt_id": result.receipt_id,
         },
         json_output,
+    )
+    return bool(
+        isinstance(session_id, str)
+        and _bb_timeout_streaks.get(session_id, 0) >= _BB_BREAKER_TIMEOUTS
     )
 
 
@@ -851,7 +906,8 @@ def dispatch_autobridge(
                 json_output,
             )
             continue
-        _observe_bb_session(session, json_output)
+        if _observe_bb_session(session, json_output) is True:
+            continue
         try:
             try:
                 session_scope = (load_session(session_id) or {}).get("repo_targets")
