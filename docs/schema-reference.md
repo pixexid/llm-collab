@@ -1779,6 +1779,10 @@ Notes:
   An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
   reports `ax_attended_recovery_required` with the Codex-attended recovery
   instruction (GH-1547); no routine ring command is ever printed for it.
+- **Current BB routing status for the `codex -> codex` route below: dormant,
+  retained in place.** This is a Codex-app-era mechanism, not a current worker
+  surface. The mechanics below remain for that dormant route. Use
+  [`bb-workers.md`](workflows/bb-workers.md) for current BB operations.
 - `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a
