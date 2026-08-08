@@ -181,8 +181,10 @@ own the watch. Before creating one, clear any stale monitor for the same target.
 Keep one monitor per purpose, and delete or update it as soon as the purpose is
 served.
 
-For BB lanes, the orchestrator owns monitoring through BB read surfaces per
-`bb-workers.md`; this section governs enrolled first-class participants.
+For BB lanes, the orchestrator uses BB read surfaces only for worker completion
+and stall inspection per `bb-workers.md`; GitHub review status and bot-review
+comments remain on GitHub, and this section governs enrolled first-class
+participants.
 
 ## Claude Desktop Rule
 
