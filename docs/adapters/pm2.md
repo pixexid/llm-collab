@@ -37,6 +37,22 @@ Before enabling any watcher, follow the canonical
 owns the archive-before-install gate, configuration, watcher start, retention,
 and two-store verification.
 
+## Platform support
+
+The `bin/` PM2 tooling (`pm2_watchers.py`, `deploy_runtime.py`) is **POSIX-only
+(Linux/macOS)**. The bounded `_pm2_run_bounded` runner selects over the PM2
+subprocess stdout pipe with `selectors.DefaultSelector`, which uses `kqueue` on
+macOS and `epoll` on Linux; on Windows it falls back to `select()`, which does
+not accept file descriptors backed by subprocess pipes and raises `OSError` at
+the first selection. No Windows support is claimed or intended for this
+adapter. This is a deliberate, documented stance rather than a silent omission:
+the library's native-code paths make the platform branch explicit where they
+have one (`llm_collab/ledger/store.py` and `llm_collab/daemon/observe.py` both
+fail closed with a typed error on unsupported platforms), and `bin/` records
+the same boundary here in prose. A Windows port would need a transport other
+than `DefaultSelector` over pipes (e.g. a reader thread) and is out of scope.
+Related GH-682.
+
 ---
 
 ## How it works

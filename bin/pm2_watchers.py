@@ -188,9 +188,21 @@ def enabled_sidecar_ids() -> list[str]:
 NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs"})
 
 
-def sidecar_is_pm2_registered(agent_id: str) -> bool:
-    """True when PM2 actually knows this app, so cleanup can reach an orphan."""
+def sidecar_is_pm2_registered(agent_id: str, *, snapshot=None) -> bool:
+    """True when PM2 actually knows this app, so cleanup can reach an orphan.
+
+    When a jlist snapshot is available (the status command reads one bounded
+    snapshot for the whole run), answer from it: `pm2 describe` is a separate,
+    unbounded read, and running it before the snapshot would let a large response
+    exhaust memory before the jlist bound applies (GH-682). Without a snapshot
+    (start/restart/etc.) it falls back to describe -- the GH-684 residual.
+    """
     name = app_name(agent_id)
+    if snapshot is not None:
+        result, entries = snapshot
+        if not isinstance(entries, list):
+            return False
+        return any(isinstance(entry, dict) and entry.get("name") == name for entry in entries)
     result = pm2_run(["describe", name], capture_output=True)
     text = f"{getattr(result, 'stdout', '') or ''}{getattr(result, 'stderr', '') or ''}".lower()
     if "doesn't exist" in text or "not found" in text:
@@ -198,7 +210,7 @@ def sidecar_is_pm2_registered(agent_id: str) -> bool:
     return name.lower() in text
 
 
-def sidecar_ids_for_command(command: str) -> list[str]:
+def sidecar_ids_for_command(command: str, *, snapshot=None) -> list[str]:
     """Targets for one command.
 
     start/ensure use the security gate. Cleanup and inspection must additionally reach
@@ -211,7 +223,7 @@ def sidecar_ids_for_command(command: str) -> list[str]:
     enabled = set(enabled_sidecar_ids())
     return [
         name for name in SIDECAR_APP_IDS
-        if name in enabled or sidecar_is_pm2_registered(name)
+        if name in enabled or sidecar_is_pm2_registered(name, snapshot=snapshot)
     ]
 
 
@@ -284,6 +296,14 @@ def _pm2_run_bounded(
         timeout_seconds = pm2_timeout_seconds()
         deadline = time.monotonic() + timeout_seconds
         with selectors.DefaultSelector() as selector:
+            # POSIX-only. DefaultSelector selects over the subprocess stdout pipe
+            # via epoll/kqueue; on Windows it falls back to select(), which does
+            # not accept pipes and raises OSError at the first selection. bin/ PM2
+            # tooling is documented POSIX-only (see docs/adapters/pm2.md); this is
+            # the same pattern as bin/deploy_runtime.py. The library makes the
+            # platform branch explicit where it has one (ledger/store.py and
+            # daemon/observe.py fail closed on unsupported platforms); bin/ states
+            # it in the doc instead.
             selector.register(stream, selectors.EVENT_READ)
             while True:
                 remaining = deadline - time.monotonic()
@@ -305,6 +325,16 @@ def _pm2_run_bounded(
                     )
                     sys.exit(1)
         returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        # Post-EOF wait: PM2 closed stdout after emitting output then hung before
+        # exiting, so EOF broke the read loop and process.wait() raised. Route it
+        # through the same timeout diagnostic + exit 124 as the read-loop deadline,
+        # restoring parity with deploy_runtime.py's _pm2_run_bounded (which catches
+        # subprocess.SubprocessError, of which TimeoutExpired is a subclass). The
+        # bare `except OSError` here dropped this branch, so the wait-timeout was a
+        # traceback + exit 1 instead of the established timeout diagnostic.
+        print(f"[error] pm2 {label} timed out after {timeout_seconds}s", file=sys.stderr)
+        sys.exit(124)
     except OSError as error:
         print(f"[error] pm2 {label} failed: {error}", file=sys.stderr)
         sys.exit(1)
@@ -431,7 +461,44 @@ def verify_codex_sidecar_runtime_home(expected_runtime_home: str) -> None:
         sys.exit(result.returncode)
 
 
-def watcher_status(agent_id: str) -> tuple[subprocess.CompletedProcess, str | None]:
+def _read_jlist_snapshot() -> tuple[subprocess.CompletedProcess, object]:
+    """Read and parse `pm2 jlist` once with the size bound; the run's jlist budget.
+
+    `pm2 jlist` is the same process table for every target in a batch, so reading
+    it once per target multiplies untrusted parse work by N. Per-call bounding is
+    not cumulative across one run (AGENTS.md "Bounded work fails closed"); one
+    bounded read is, by construction -- one source, one bound, one parse. The bound
+    refuses to parse an oversized table rather than truncating it, because a
+    truncated jlist that still parses reports a real watcher as absent -- the
+    fail-open GH-678 closed. Malformed jlist fails closed (entries=None) rather
+    than fall back to matching rendered text.
+    """
+    result = pm2_run(["jlist"], capture_output=True, max_output_bytes=PM2_JLIST_MAX_BYTES)
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except ValueError:
+        return result, None
+    return result, entries
+
+
+def _status_from_snapshot(
+    result: subprocess.CompletedProcess, entries: object, agent_id: str
+) -> tuple[subprocess.CompletedProcess, str | None]:
+    """Structured pm2_env.status for one agent out of a shared jlist snapshot."""
+    name = app_name(agent_id)
+    if isinstance(entries, list):
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                env = entry.get("pm2_env")
+                if isinstance(env, dict):
+                    return result, env.get("status")
+                return result, None
+    return result, None
+
+
+def watcher_status(
+    agent_id: str, *, snapshot=None
+) -> tuple[subprocess.CompletedProcess, str | None]:
     """Read the watcher's PM2 status as a structured value from `pm2 jlist`.
 
     Returns (result, status) where status is the matched entry's pm2_env.status
@@ -450,21 +517,13 @@ def watcher_status(agent_id: str) -> tuple[subprocess.CompletedProcess, str | No
     not a token scan -- which removes the defect class instead of tightening the
     match a third time.
     """
-    result = pm2_run(["jlist"], capture_output=True, max_output_bytes=PM2_JLIST_MAX_BYTES)
-    name = app_name(agent_id)
-    try:
-        entries = json.loads(result.stdout or "[]")
-    except ValueError:
-        # Malformed jlist cannot answer the question; fail closed (not-online)
-        # rather than fall back to matching rendered text.
-        return result, None
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("name") == name:
-            env = entry.get("pm2_env")
-            if isinstance(env, dict):
-                return result, env.get("status")
-            return result, None
-    return result, None
+    # A status batch passes one snapshot so `status --all` reads jlist ONCE under
+    # a single cumulative bound for the whole run rather than N bounded reads of
+    # the same table (start/ensure/restart mutate between reads and stay fresh).
+    if snapshot is None:
+        snapshot = _read_jlist_snapshot()
+    result, entries = snapshot
+    return _status_from_snapshot(result, entries, agent_id)
 
 
 def start_agent(agent_id: str) -> None:
@@ -498,8 +557,8 @@ def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
             verify_codex_sidecar_runtime_home(runtime_home)
 
 
-def process_status_exit_code(agent_id: str) -> int:
-    result, status = watcher_status(agent_id)
+def process_status_exit_code(agent_id: str, *, snapshot=None) -> int:
+    result, status = watcher_status(agent_id, snapshot=snapshot)
     if result.returncode != 0:
         if result.stderr:
             print(
@@ -571,13 +630,31 @@ def main():
                 continue
             print(format_ax_status(probe_ax_trust(get_agent(agent_id)), agent_id=agent_id))
 
+    # Sidecar discovery has two halves ordered around the jlist snapshot. The
+    # token-gated half (enabled_sidecar_ids) needs no PM2 read, so for status a
+    # sidecar whose token is present is reported BEFORE the snapshot -- a PM2
+    # failure must not suppress its [sidecar] line (collaborator [ax] lines are
+    # already safe above). The registration half (a process left running after its
+    # token was removed, reachable by cleanup/inspection but never invented on a
+    # clean install) needs PM2 data, which for status comes from the one bounded
+    # jlist snapshot read below -- so no unbounded `pm2 describe` precedes the
+    # budget (AGENTS.md: begin at the earliest parse boundary AND stay cumulative).
+    # start/restart --all still discover via describe (GH-684).
+    token_sidecars = set(enabled_sidecar_ids()) if defer_sidecars else set()
+    if args.command == "status":
+        for name in token_sidecars:
+            print(f"[sidecar] target={name} (no AX surface)")
+
+    status_snapshot = _read_jlist_snapshot() if args.command == "status" else None
+
     if defer_sidecars:
         # safe now: every collaborator AX line is already on stdout
-        sidecars = sidecar_ids_for_command(args.command)
+        sidecars = sidecar_ids_for_command(args.command, snapshot=status_snapshot)
         targets.extend(sidecars)
         if args.command == "status":
             for name in sidecars:
-                print(f"[sidecar] target={name} (no AX surface)")
+                if name not in token_sidecars:
+                    print(f"[sidecar] target={name} (no AX surface)")
 
     status_exit_code = 0
     for agent_id in targets:
@@ -606,7 +683,7 @@ def main():
         elif args.command == "delete":
             pm2_run(["delete", name])
         elif args.command == "status":
-            result = process_status_exit_code(agent_id)
+            result = process_status_exit_code(agent_id, snapshot=status_snapshot)
             if result != 0 and status_exit_code == 0:
                 status_exit_code = result
         elif args.command == "logs":
