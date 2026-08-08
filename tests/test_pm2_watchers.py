@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -213,6 +215,105 @@ class PM2WatchersTest(unittest.TestCase):
                     ["-c", "import sys; sys.stdout.write('x' * 128)"],
                     max_output_bytes=16,
                 )
+
+    def test_pm2_run_bounded_post_eof_wait_timeout_routes_through_timeout_exit(self) -> None:
+        # Item 1 (GH-682). PM2 closes stdout after emitting output then hangs
+        # before exiting: EOF breaks the read loop, then process.wait() raises
+        # subprocess.TimeoutExpired. `except OSError` does not cover it
+        # (TimeoutExpired is a subprocess.SubprocessError, not an OSError), so
+        # without the dedicated branch this is a bare traceback + exit 1. It must
+        # route through the timeout diagnostic + exit 124, restoring parity with
+        # deploy_runtime.py's _pm2_run_bounded (which catches SubprocessError).
+        #
+        # MUTATION PROOF: delete the `except subprocess.TimeoutExpired` branch and
+        # process.wait()'s TimeoutExpired propagates out of _pm2_run_bounded
+        # instead of raising SystemExit; `assertRaises(SystemExit)` then sees a
+        # TimeoutExpired (not SystemExit) and the test ERRORS. exit code 124 and
+        # the "timed out" diagnostic both fail to appear.
+        buf = io.StringIO()
+        # Emit, close the stdout fd at the OS level (EOF to the parent), then
+        # outlive the 1s deadline without exiting.
+        script = (
+            "import sys,time,os; sys.stdout.write('ok'); sys.stdout.flush();"
+            " os.close(1); time.sleep(30)"
+        )
+        with patch.dict(pm2_watchers.os.environ, {"LLM_COLLAB_PM2_TIMEOUT_SECONDS": "1"}), \
+             patch.object(pm2_watchers, "resolve_pm2", return_value=sys.executable), \
+             contextlib.redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as ctx:
+                pm2_watchers.pm2_run(["-c", script], max_output_bytes=64)
+        self.assertEqual(124, ctx.exception.code)
+        self.assertIn("timed out", buf.getvalue())
+
+    def test_status_all_reads_one_bounded_jlist_snapshot_for_the_batch(self) -> None:
+        # Item 2 (GH-682). `status --all` must read `pm2 jlist` ONCE for the whole
+        # batch under a single cumulative bound, not once per target. Per-call
+        # bounding is not cumulative across one run (AGENTS.md "Bounded work fails
+        # closed").
+        #
+        # MUTATION PROOF (answers: could this pass if each agent got a fresh 16
+        # MiB?): NO. In that world `watcher_status` is called once per target and
+        # each call reads jlist, so jlist is invoked N times; this asserts exactly
+        # one call, so it fails for N>=2. The bound on that one call is also
+        # pinned, so a truncating/unbounded batch read cannot slip in here.
+        jlist_calls: list[int | None] = []
+
+        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
+            if args_list[0] == "jlist":
+                jlist_calls.append(max_output_bytes)
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout="[]", stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+
+        agents = [{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]
+        with patch.object(sys, "argv", ["pm2_watchers.py", "status", "--all"]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(pm2_watchers, "watcher_enabled_agents", return_value=agents), \
+                 patch.object(pm2_watchers, "agent_ids", return_value=["alpha", "beta", "gamma"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "is_sidecar", return_value=False), \
+                 patch.object(pm2_watchers, "sidecar_ids_for_command", return_value=[]), \
+                 patch.object(pm2_watchers, "format_ax_status", return_value=""), \
+                 patch.object(pm2_watchers, "probe_ax_trust", return_value=None), \
+                 patch.object(pm2_watchers, "get_agent", return_value={}), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+                with self.assertRaises(SystemExit):
+                    pm2_watchers.main()
+        self.assertEqual(1, len(jlist_calls))
+        self.assertEqual(pm2_watchers.PM2_JLIST_MAX_BYTES, jlist_calls[0])
+
+    def test_status_all_oversized_snapshot_raises_rather_than_truncating(self) -> None:
+        # Item 2 (GH-682). The batch's single bounded read must ABORT on exceed,
+        # never hand a truncated buffer to json.loads -- a truncated jlist that
+        # still parses reports a real watcher as absent (fail-open, GH-678).
+        #
+        # The jlist call is routed through the REAL _pm2_run_bounded on a
+        # subprocess that emits past the (tiny, patched) bound, so the abort is
+        # genuine, not a stub. Discriminator vs a truncating batch: the abort
+        # prints "exceeds" to stderr and prints NO status line (it raises before
+        # the target loop); a truncating impl would silently parse a partial
+        # table and print "not found".
+        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
+            if args_list[0] == "jlist":
+                return pm2_watchers._pm2_run_bounded(
+                    sys.executable, ["-c", "import sys; sys.stdout.write('x' * 128)"], 16
+                )
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["pm2_watchers.py", "status", "--agent", "codex"]), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "is_sidecar", return_value=False), \
+                 patch.object(pm2_watchers, "format_ax_status", return_value=""), \
+                 patch.object(pm2_watchers, "probe_ax_trust", return_value=None), \
+                 patch.object(pm2_watchers, "get_agent", return_value={}), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+                with self.assertRaises(SystemExit) as ctx:
+                    pm2_watchers.main()
+        self.assertNotEqual(0, ctx.exception.code)
+        self.assertIn("exceeds", err.getvalue())
+        self.assertNotIn("not found", out.getvalue())
 
 
 if __name__ == "__main__":
