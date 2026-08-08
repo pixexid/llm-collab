@@ -70,6 +70,18 @@ Dispatcher artifacts live under:
 - `State/session_autobridge/events/wake/<session-id>.jsonl` — Pi wake-only stream
 - `State/session_autobridge/prompts/<session-id>/...`
 
+Diagnostic event JSONL growth is bounded as a head plus a rolling recent tail,
+each at most 1 MiB. An in-band `event_log_truncated` record separates them, so
+inspection cannot mistake the omitted middle for complete history. Existing
+oversized logs remain an untouched legacy head; only their new tail is bounded.
+Consecutive records with the same semantic payload are one `repeat_compacted`
+record: its first event detail and `first_seen_at_utc` stay fixed while
+`repeat_count` and `last_seen_at_utc` advance. Any payload transition, including
+reason or runtime outcome, appends a new record at the transition timestamp.
+Legacy bytes are not rewritten,
+and existing oversized logs are not migrated. The Pi wake-only stream is an
+operational delivery surface and is not compacted by this diagnostic-log rule.
+
 Canonical runtime bindings live under:
 
 - `State/session_autobridge/bindings/<project-id>/<chat-id>/<agent-id>.json`

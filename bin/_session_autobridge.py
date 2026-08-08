@@ -69,6 +69,11 @@ MAX_SESSION_SCAN_BYTES = 16 * 1024 * 1024
 MAX_DISPATCH_INBOX_ENTRIES = 5_000
 MAX_DISPATCH_INBOX_BYTES = 16 * 1024 * 1024
 MAX_DISPATCH_PACKET_BYTES = 256 * 1024
+MAX_EVENT_LOG_BYTES = 1024 * 1024
+EVENT_LOG_TRUNCATION_RESERVE_BYTES = 256
+EVENT_COMPACTION_METADATA_KEYS = frozenset(
+    {"ts", "first_seen_at_utc", "last_seen_at_utc", "repeat_count"}
+)
 
 
 def bb_bootstrap_enabled(config_reader=None) -> bool:
@@ -1131,17 +1136,174 @@ def update_binding_from_session(
     return payload
 
 
-def _append_event_path(path: Path, event: dict[str, Any]) -> None:
+def _append_event_path(
+    path: Path,
+    event: dict[str, Any],
+    *,
+    compact_repeats: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    event_payload = {"ts": utc_iso(), **event}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event_payload, sort_keys=True) + "\n")
+    seen_at = utc_iso()
+    event_payload = {"ts": seen_at, **event}
+    if not compact_repeats:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event_payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return
+
+    reason = event_payload.get("reason")
+    if isinstance(reason, str) and reason:
+        event_payload.update(
+            {
+                "first_seen_at_utc": seen_at,
+                "last_seen_at_utc": seen_at,
+                "repeat_compacted": True,
+                "repeat_count": 1,
+            }
+        )
+
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        search_start = max(
+            0,
+            size - MAX_EVENT_LOG_BYTES - EVENT_LOG_TRUNCATION_RESERVE_BYTES,
+        )
+        handle.seek(search_start)
+        search_window = handle.read(size - search_start)
+        tail_start = 0
+        cursor = search_start
+        for raw_line in search_window.splitlines(keepends=True):
+            try:
+                candidate = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+                candidate = None
+            cursor += len(raw_line)
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("event") == "event_log_truncated"
+                and candidate.get("retention") == "bounded_head_and_tail"
+            ):
+                tail_start = cursor
+
+        last_start = size
+        last_event = None
+        if size:
+            last_read_start = max(tail_start, size - MAX_EVENT_LOG_BYTES)
+            handle.seek(last_read_start)
+            tail = handle.read(size - last_read_start).removesuffix(b"\n")
+            separator = tail.rfind(b"\n")
+            if separator >= 0 or last_read_start == tail_start:
+                last_start = last_read_start + separator + 1
+                try:
+                    last_event = json.loads(tail[separator + 1 :])
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+                    pass
+
+        replace_last = (
+            isinstance(last_event, dict)
+            and last_event.get("repeat_compacted") is True
+            and type(last_event.get("repeat_count")) is int
+            and {
+                key: value
+                for key, value in last_event.items()
+                if key not in EVENT_COMPACTION_METADATA_KEYS
+            }
+            == {
+                key: value
+                for key, value in event_payload.items()
+                if key not in EVENT_COMPACTION_METADATA_KEYS
+            }
+        )
+        if replace_last:
+            event_payload = {
+                **last_event,
+                "last_seen_at_utc": seen_at,
+                "repeat_count": last_event["repeat_count"] + 1,
+            }
+            encoded = (json.dumps(event_payload, sort_keys=True) + "\n").encode()
+            projected_size = last_start + len(encoded)
+        else:
+            encoded = (json.dumps(event_payload, sort_keys=True) + "\n").encode()
+            projected_size = size + len(encoded)
+
+        if len(encoded) > MAX_EVENT_LOG_BYTES:
+            encoded = (
+                json.dumps(
+                    {
+                        "event": "event_log_event_truncated",
+                        "message_path": event_payload.get("message_path"),
+                        "original_bytes": len(encoded),
+                        "original_event": event_payload.get("event"),
+                        "original_reason": event_payload.get("reason"),
+                        "truncated": True,
+                        "ts": seen_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            replace_last = False
+            projected_size = size + len(encoded)
+
+        region_limit = MAX_EVENT_LOG_BYTES - (
+            0 if tail_start else EVENT_LOG_TRUNCATION_RESERVE_BYTES
+        )
+        projected_region_size = projected_size - tail_start
+        if projected_region_size > region_limit and not tail_start:
+            head_retained_bytes = last_start if replace_last else size
+            marker = (
+                json.dumps(
+                    {
+                        "event": "event_log_truncated",
+                        "head_retained_bytes": head_retained_bytes,
+                        "retention": "bounded_head_and_tail",
+                        "tail_limit_bytes": MAX_EVENT_LOG_BYTES,
+                        "truncated": True,
+                        "ts": seen_at,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            handle.truncate(head_retained_bytes)
+            handle.seek(0, os.SEEK_END)
+            handle.write(marker)
+            handle.write(encoded)
+        elif projected_region_size > region_limit:
+            handle.seek(tail_start)
+            retained = handle.read(size - tail_start)
+            if replace_last:
+                retained = retained[: last_start - tail_start] + encoded
+            else:
+                retained += encoded
+            keep = []
+            kept_bytes = 0
+            for line in reversed(retained.splitlines(keepends=True)):
+                if keep and kept_bytes + len(line) > MAX_EVENT_LOG_BYTES // 2:
+                    break
+                keep.append(line)
+                kept_bytes += len(line)
+            handle.truncate(tail_start)
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"".join(reversed(keep)))
+        else:
+            if replace_last:
+                handle.truncate(last_start)
+            handle.seek(0, os.SEEK_END)
+            handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
 
 
 def append_event(session_id: str, event: dict[str, Any]) -> None:
-    _append_event_path(autobridge_event_log_path(session_id), event)
+    _append_event_path(
+        autobridge_event_log_path(session_id),
+        event,
+        compact_repeats=True,
+    )
 
 
 def append_wake_event(session_id: str, event: dict[str, Any]) -> None:

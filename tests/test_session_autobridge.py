@@ -137,6 +137,257 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_autobridge_lib.autobridge_wake_log_path("X"),
         )
 
+    def test_event_log_cap_is_declared_and_normal_write_is_unchanged(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(session_autobridge_lib, "MAX_EVENT_LOG_BYTES", 700):
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "normal", "detail": "kept"}
+            )
+            path = Path(tmp) / "SESSION-BOUND.jsonl"
+            normal = json.loads(path.read_text())
+            self.assertEqual(
+                {"detail": "kept", "event": "normal", "ts": normal["ts"]},
+                normal,
+            )
+
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "fills_head", "detail": "x" * 300}
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-BOUND", {"event": "recent", "detail": "y" * 150}
+            )
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertTrue(
+                any(event["event"] == "event_log_truncated" for event in events),
+                events,
+            )
+            marker_index = next(
+                index
+                for index, event in enumerate(events)
+                if event["event"] == "event_log_truncated"
+            )
+            self.assertEqual("bounded_head_and_tail", events[marker_index]["retention"])
+            self.assertIs(events[marker_index]["truncated"], True)
+            self.assertIn(
+                "recent",
+                [event["event"] for event in events[marker_index + 1 :]],
+            )
+
+            for index in range(20):
+                session_autobridge_lib.append_event(
+                    "SESSION-BOUND",
+                    {"event": f"tail-{index}", "detail": "z" * 100},
+                )
+            retained = [json.loads(line) for line in path.read_text().splitlines()]
+            marker_index = next(
+                index
+                for index, event in enumerate(retained)
+                if event["event"] == "event_log_truncated"
+            )
+            self.assertEqual("normal", retained[0]["event"])
+            self.assertEqual("tail-19", retained[-1]["event"])
+            tail_bytes = sum(
+                len((json.dumps(event, sort_keys=True) + "\n").encode())
+                for event in retained[marker_index + 1 :]
+            )
+            self.assertLessEqual(tail_bytes, 700)
+
+            legacy_path = Path(tmp) / "SESSION-LEGACY-BOUND.jsonl"
+            legacy = (
+                json.dumps({"event": "legacy", "detail": "a" * 700}) + "\n"
+            ).encode()
+            legacy_path.write_bytes(legacy)
+            session_autobridge_lib.append_event(
+                "SESSION-LEGACY-BOUND", {"event": "new_tail"}
+            )
+            self.assertTrue(legacy_path.read_bytes().startswith(legacy))
+            self.assertEqual(
+                "new_tail",
+                json.loads(legacy_path.read_text().splitlines()[-1])["event"],
+            )
+
+    def test_event_log_repeat_keeps_first_detail_and_reason_transition(self):
+        timestamps = [
+            "2026-08-08T01:00:00+00:00",
+            "2026-08-08T01:00:15+00:00",
+            "2026-08-08T01:00:30+00:00",
+        ]
+        legacy = b'{"event":"legacy","reason":"lease_expired"}\n'
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(session_autobridge_lib, "utc_iso", side_effect=timestamps):
+            path = Path(tmp) / "SESSION-DEDUPE.jsonl"
+            path.write_bytes(legacy)
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "lease_expired",
+                    "status": "parked",
+                    "detail": "first detail",
+                },
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "lease_expired",
+                    "status": "parked",
+                    "detail": "first detail",
+                },
+            )
+            session_autobridge_lib.append_event(
+                "SESSION-DEDUPE",
+                {
+                    "event": "session_skipped",
+                    "reason": "reader_runtime_family_unresolved",
+                    "status": "parked",
+                },
+            )
+
+            raw = path.read_bytes()
+            self.assertTrue(raw.startswith(legacy), "legacy log bytes must stay untouched")
+            events = [json.loads(line) for line in raw.splitlines()]
+            self.assertEqual(3, len(events))
+            repeated, transitioned = events[1:]
+            self.assertEqual(2, repeated["repeat_count"])
+            self.assertEqual("first detail", repeated["detail"])
+            self.assertEqual("parked", repeated["status"])
+            self.assertEqual(timestamps[0], repeated["first_seen_at_utc"])
+            self.assertEqual(timestamps[1], repeated["last_seen_at_utc"])
+            self.assertEqual("reader_runtime_family_unresolved", transitioned["reason"])
+            self.assertEqual(timestamps[2], transitioned["ts"])
+            self.assertEqual(1, transitioned["repeat_count"])
+
+    def test_event_log_first_rollover_moves_compacted_record_once(self):
+        def padded_line(event_name, size):
+            empty = (
+                json.dumps({"detail": "", "event": event_name}, sort_keys=True)
+                + "\n"
+            ).encode()
+            line = (
+                json.dumps(
+                    {"detail": "x" * (size - len(empty)), "event": event_name},
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            self.assertEqual(size, len(line))
+            return line
+
+        def assert_sequence_total(path, expected):
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            sequence = [
+                record for record in records if record["event"] == "session_skipped"
+            ]
+            self.assertEqual(
+                expected,
+                sum(record.get("repeat_count", 1) for record in sequence),
+                records,
+            )
+            self.assertEqual(1, len(sequence), records)
+            return records, sequence[0]
+
+        seen_at = "2026-08-08T01:00:00+00:00"
+        event = {
+            "event": "session_skipped",
+            "reason": "lease_expired",
+            "status": "parked",
+        }
+        compacted = {
+            "ts": seen_at,
+            **event,
+            "first_seen_at_utc": seen_at,
+            "last_seen_at_utc": seen_at,
+            "repeat_compacted": True,
+            "repeat_count": 9,
+        }
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(
+            session_autobridge_lib, "MAX_EVENT_LOG_BYTES", 700
+        ), patch.object(
+            session_autobridge_lib, "utc_iso", return_value=seen_at
+        ):
+            region_limit = (
+                session_autobridge_lib.MAX_EVENT_LOG_BYTES
+                - session_autobridge_lib.EVENT_LOG_TRUNCATION_RESERVE_BYTES
+            )
+            compacted_line = (json.dumps(compacted, sort_keys=True) + "\n").encode()
+            filler_size = region_limit - len(compacted_line)
+
+            path = Path(tmp) / "SESSION-ROLLOVER.jsonl"
+            path.write_bytes(padded_line("head", filler_size))
+            for _ in range(9):
+                session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            self.assertEqual(region_limit, path.stat().st_size)
+
+            session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            records, repeated = assert_sequence_total(path, 10)
+            self.assertEqual(10, repeated["repeat_count"])
+            marker = next(
+                record for record in records if record["event"] == "event_log_truncated"
+            )
+            self.assertEqual(filler_size, marker["head_retained_bytes"])
+
+            session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            assert_sequence_total(path, 11)
+
+            tail_marker = {**marker, "head_retained_bytes": 0}
+            marker_line = (json.dumps(tail_marker, sort_keys=True) + "\n").encode()
+            tail_filler_size = (
+                session_autobridge_lib.MAX_EVENT_LOG_BYTES - len(compacted_line)
+            )
+            tail_path = Path(tmp) / "SESSION-TAIL-ROLLOVER.jsonl"
+            tail_path.write_bytes(
+                marker_line + padded_line("tail", tail_filler_size) + compacted_line
+            )
+
+            session_autobridge_lib.append_event("SESSION-TAIL-ROLLOVER", event)
+            _, repeated = assert_sequence_total(tail_path, 10)
+            self.assertEqual(10, repeated["repeat_count"])
+
+    def test_event_log_unparseable_legacy_lines_do_not_block_append(self):
+        digit_limit = sys.get_int_max_str_digits()
+        self.assertGreater(digit_limit, 0)
+        bad_lines = [
+            (
+                "integer-limit",
+                b'{"event":"legacy","value":' + b"9" * (digit_limit + 1) + b"}\n",
+                ValueError,
+            ),
+            (
+                "nesting-limit",
+                b"[" * (sys.getrecursionlimit() + 100)
+                + b"0"
+                + b"]" * (sys.getrecursionlimit() + 100)
+                + b"\n",
+                RecursionError,
+            ),
+            ("invalid-utf8", b'{"event":"legacy","value":"\xff"}\n', UnicodeDecodeError),
+            ("invalid-json", b'{"event":"legacy"\n', json.JSONDecodeError),
+        ]
+        event = {"event": "session_skipped", "reason": "lease_expired"}
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ):
+            for name, bad_line, expected_error in bad_lines:
+                with self.assertRaises(expected_error):
+                    json.loads(bad_line)
+                path = Path(tmp) / f"SESSION-BAD-{name}.jsonl"
+                path.write_bytes(bad_line)
+                try:
+                    session_autobridge_lib.append_event(path.stem, event)
+                    session_autobridge_lib.append_event(path.stem, event)
+                except Exception as error:
+                    self.fail(f"{name} legacy line blocked append: {error!r}")
+
+                raw = path.read_bytes()
+                self.assertTrue(raw.startswith(bad_line))
+                appended = json.loads(raw.splitlines()[-1])
+                self.assertEqual(2, appended["repeat_count"])
+
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
         write(
@@ -11486,8 +11737,9 @@ class SessionAutobridgeTest(unittest.TestCase):
                     "payload = json.load(sys.stdin)",
                     "output_file = Path(sys.argv[1])",
                     "marker_file = Path(sys.argv[2])",
-                    "if not marker_file.exists():",
-                    "    marker_file.write_text('busy')",
+                    "attempts = int(marker_file.read_text()) if marker_file.exists() else 0",
+                    "marker_file.write_text(str(attempts + 1))",
+                    "if attempts < 2:",
                     "    sys.exit(7)",
                     "output_file.write_text(json.dumps(payload, indent=2))",
                 ]
@@ -11526,7 +11778,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 "--me",
                 "gemini",
                 "--max-polls",
-                "2",
+                "3",
                 "--poll-seconds",
                 "1",
                 "--json",
@@ -11555,6 +11807,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("Watcher retry", runtime_payload["message"]["title"])
         session_payload = self.run_cli(root, "show", "--session", "SESSION-WATCHER-RETRY")
         self.assertIn(message_rel, session_payload["processed_messages"])
+        event_log = root / "State" / "session_autobridge" / "events" / "SESSION-WATCHER-RETRY.jsonl"
+        dispatches = [
+            event
+            for line in event_log.read_text().splitlines()
+            for event in [json.loads(line)]
+            if event["event"] == "message_dispatched"
+        ]
+        self.assertEqual([7, 0], [event["runtime_result"]["returncode"] for event in dispatches])
+        self.assertEqual([2, 1], [event["repeat_count"] for event in dispatches])
 
 
 if __name__ == "__main__":
