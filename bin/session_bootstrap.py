@@ -681,7 +681,7 @@ def main():
     ax_result = probe_ax_trust(agent)
 
     # ── 2. Inbox ──
-    messages = get_unread_messages(args.agent)[: args.limit]
+    messages = get_unread_messages(args.agent, limit=args.limit)
     inbox_summary = {
         "unread_count": len(messages),
         "messages": [

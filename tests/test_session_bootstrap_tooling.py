@@ -303,7 +303,9 @@ class BindingDriftBannerTest(unittest.TestCase):
             ),
             patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
             patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
-            patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
+            patch.object(
+                session_bootstrap, "get_unread_messages", return_value=[]
+            ) as get_unread,
             patch.object(session_bootstrap, "queue_summaries", return_value=[]),
             patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
             patch.object(
@@ -320,6 +322,7 @@ class BindingDriftBannerTest(unittest.TestCase):
         self.assertIn("No self-service repair exists yet", text)
         self.assertNotIn("session_autobridge.py register", text)
         self.assertNotIn("--supersedes-session", text)
+        get_unread.assert_called_once_with("claude", limit=5)
 
     def test_matching_runtime_is_silent(self) -> None:
         with (

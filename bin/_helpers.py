@@ -73,12 +73,17 @@ TASK_FOLDERS = ("active", "backlog", "done")
 TASK_STATUSES = ("open", "in_progress", "blocked", "review", "done")
 TASK_PRIORITIES = ("low", "normal", "high", "urgent")
 MAX_CHAT_SCAN_ENTRIES = 2000
+MAX_MESSAGE_SCAN_ENTRIES = 5_000
 RELEASE_EVIDENCE_VERDICTS = (
     "success",
     "risk-accepted-followup",
     "non-production",
 )
 RELEASE_EVIDENCE_FIELDS = {"merge_sha", "verdict", "run_id", "note"}
+
+
+class InboxScanLimitExceeded(ValueError):
+    """The complete inbox listing cannot be proved within the scan bound."""
 
 
 def parse_release_evidence(raw: str | None) -> dict:
@@ -678,11 +683,19 @@ def mark_messages_read(agent_id: str, paths: list[str]) -> None:
         save_agent_inbox(agent_id, inbox)
 
 
-def get_unread_messages(agent_id: str) -> list[dict]:
-    """Return list of parsed message dicts for unread messages."""
+def get_unread_messages(agent_id: str, *, limit: int | None = None) -> list[dict]:
+    """Return every unread message, or an explicitly requested bounded slice."""
     inbox = load_agent_inbox(agent_id)
+    unread_paths = inbox["unread"]
+    if limit is None and len(unread_paths) > MAX_MESSAGE_SCAN_ENTRIES:
+        raise InboxScanLimitExceeded(
+            f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; "
+            "refusing an incomplete result"
+        )
+    if limit is not None:
+        unread_paths = unread_paths[: min(max(limit, 0), MAX_MESSAGE_SCAN_ENTRIES)]
     messages = []
-    for rel_path in inbox["unread"]:
+    for rel_path in unread_paths:
         abs_path = ROOT / rel_path
         if abs_path.exists():
             fm, body = parse_frontmatter(abs_path.read_text())
