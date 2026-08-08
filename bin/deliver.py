@@ -26,11 +26,10 @@ RECOVERY REQUIRED instruction routing control to Codex. Codex-to-Codex delivery 
 deliberate exception: the durable packet is preserved, but app activation is
 suppressed; managed Codex workers are inspected and steered through BB. Every
 non-Codex recipient needs a verified exact binding unless it is an explicit
-watcherless-human broadcast. An unroutable delivery is refused before any packet
-or inbox write. If the recipient
-has activation.type == "human_relay", prints
-a ready-to-paste handoff prompt for the human operator. Other unresolved
-activation types report an explicit unavailable state.
+watcherless-human broadcast or a supported attended-recovery target. An
+unroutable delivery is refused before any packet or inbox write. An admitted
+ordinary human-relay broadcast prints a ready-to-paste handoff prompt for the
+operator. Other unresolved activation types report an explicit unavailable state.
 
 Usage:
   bin/deliver.py --chat last --from orchestrator --to worker --project my-app --title "Implement feature X"
@@ -648,15 +647,26 @@ def main():
             sender_id=args.sender,
         )
     )
+    ax_attended_recovery_required = (
+        args.recipient != "operator"
+        and wake_fallback_allowed
+        and is_ax_attended_recovery_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
 
     if thread_coordination_required:
         args.routing_mode = "thread_coordination"
     elif args.target_session_id:
         args.routing_mode = "targeted"
+    elif ax_doorbell_required:
+        args.routing_mode = "ax_doorbell"
+    elif ax_attended_recovery_required:
+        args.routing_mode = "ax_attended_recovery"
     elif allows_unbound_broadcast(recipient_agent, args.recipient):
         args.routing_mode = "broadcast"
-    elif ax_doorbell_required:
-        args.routing_mode = "targeted"
     elif explicit_target_session_id is not None:
         refusal_reason = (
             explicit_target_refusal_reason
@@ -862,8 +872,8 @@ def main():
         },
     )
 
-    # (ax_doorbell_required and the activation ring were resolved pre-write;
-    # activation packets never get a generic/raw-file ring.)
+    # Both AX fallback routes were admitted pre-write; only their packet-specific
+    # prompts are built here. Activation packets never get a generic/raw-file ring.
     ax_doorbell_prompt = None
     if ax_doorbell_required:
         if args.activation:
@@ -872,15 +882,6 @@ def main():
             ax_doorbell_prompt = build_packet_ring_prompt(
                 args.sender, args.recipient, chat_id, to_path.name
             )
-    ax_attended_recovery_required = (
-        args.recipient != "operator"
-        and wake_fallback_allowed
-        and is_ax_attended_recovery_target(
-            recipient_agent,
-            args.recipient,
-            sender_id=args.sender,
-        )
-    )
     ax_attended_recovery_prompt = (
         f"[from {args.sender}] ATTENDED-RECOVERY needed for {args.recipient}: "
         f"read latest {args.recipient} packet in {chat_id}: {to_path.name} — "

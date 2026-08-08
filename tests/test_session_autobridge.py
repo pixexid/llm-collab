@@ -5821,12 +5821,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertTrue(result_payload["autobridge_ready"])
         self.assertIsNone(result_payload["autobridge_refusal_reason"])
         self.assertEqual("claude-bound-session-42", result_payload["resolved_target_session_id"])
+        self.assertEqual("targeted", result_payload["routing_mode"])
 
         delivered_candidates = sorted(chat_dir.glob("*_to-claude_*.md"))
         self.assertTrue(delivered_candidates)
         delivered_text = delivered_candidates[-1].read_text()
         self.assertIn("target_session_id: claude-bound-session-42", delivered_text)
         frontmatter, _ = parse_frontmatter(delivered_text)
+        self.assertEqual("targeted", frontmatter["routing_mode"])
         self.assertEqual("binding-canonical", frontmatter["target_binding_id"])
         self.assertEqual(7, frontmatter["target_binding_generation"])
 
@@ -6280,6 +6282,7 @@ class SessionAutobridgeTest(unittest.TestCase):
 
                 result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
                 self.assertTrue(result_payload["thread_coordination_required"])
+                self.assertEqual("thread_coordination", result_payload["routing_mode"])
                 self.assertEqual(
                     f"codex-self-{project_id}",
                     result_payload["resolved_target_session_id"],
@@ -6298,10 +6301,13 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertNotIn("CLAUDE DESKTOP BRIDGE REQUIRED", deliver_result.stdout)
                 delivered_candidates = sorted(chat_dir.glob("*_to-codex_*.md"))
                 self.assertTrue(delivered_candidates)
+                delivered_text = delivered_candidates[-1].read_text()
                 self.assertIn(
                     "Preserve this durable handoff without an app self-doorbell.",
-                    delivered_candidates[-1].read_text(),
+                    delivered_text,
                 )
+                frontmatter, _ = parse_frontmatter(delivered_text)
+                self.assertEqual("thread_coordination", frontmatter["routing_mode"])
 
     def test_external_workers_can_still_ring_codex_for_amiga_and_non_amiga(self):
         cases = (
@@ -6331,7 +6337,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                         },
                     },
                 )
-                self.create_chat(
+                chat_dir = self.create_chat(
                     root,
                     chat_dir_name=f"2026-07-12_external-to-codex__{chat_id}",
                     chat_id=chat_id,
@@ -6365,9 +6371,135 @@ class SessionAutobridgeTest(unittest.TestCase):
                 result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
                 self.assertFalse(result_payload["thread_coordination_required"])
                 self.assertTrue(result_payload["ax_doorbell_required"])
+                self.assertEqual("ax_doorbell", result_payload["routing_mode"])
+                self.assertIsNone(result_payload["resolved_target_session_id"])
                 self.assertIn(f"[from {sender_id}]", result_payload["ax_doorbell_prompt"])
                 self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
                 self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+                delivered = sorted(chat_dir.glob("*_to-codex_*.md"))[-1]
+                frontmatter, _ = parse_frontmatter(delivered.read_text())
+                self.assertEqual("ax_doorbell", frontmatter["routing_mode"])
+                self.assertIsNone(frontmatter["target_session_id"])
+
+    def test_zcode_attended_recovery_is_admitted_before_write(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "zcode",
+                "display_name": "ZCode",
+                "activation": {
+                    "type": "cli_session",
+                    "watcher_enabled": False,
+                    "ax_app": "ZCode",
+                    "ax_attended_only": True,
+                },
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-08-08_zcode-attended__CHAT-ZCODE-ATTENDED",
+            chat_id="CHAT-ZCODE-ATTENDED",
+            project_id="nuvyr",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat", "CHAT-ZCODE-ATTENDED",
+                "--from", "claude",
+                "--to", "zcode",
+                "--project", "nuvyr",
+                "--title", "ZCode attended recovery",
+                "--body-file", "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Preserve the packet and route control to attended recovery.",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, deliver_result.returncode, deliver_result.stderr)
+        payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual("ax_attended_recovery", payload["routing_mode"])
+        self.assertIsNone(payload["resolved_target_session_id"])
+        self.assertTrue(payload["ax_attended_recovery_required"])
+        self.assertFalse(payload["ax_doorbell_required"])
+        self.assertFalse(payload["operator_relay_required"])
+        self.assertIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout)
+        self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
+        delivered = sorted(chat_dir.glob("*_to-zcode_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(delivered.read_text())
+        self.assertEqual("ax_attended_recovery", frontmatter["routing_mode"])
+        self.assertIsNone(frontmatter["target_session_id"])
+
+    def test_no_app_attended_recovery_supersedes_human_broadcast(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "claude",
+                "display_name": "Claude",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "antigravity",
+                "display_name": "Antigravity",
+                "activation": {
+                    "type": "human_relay",
+                    "watcher_enabled": False,
+                    "ax_attended_only": True,
+                },
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-08-08_no-app-attended__CHAT-NO-APP-ATTENDED",
+            chat_id="CHAT-NO-APP-ATTENDED",
+            project_id="amiga",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat", "CHAT-NO-APP-ATTENDED",
+                "--from", "claude",
+                "--to", "antigravity",
+                "--project", "amiga",
+                "--title", "No app attended recovery",
+                "--body-file", "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Use attended recovery instead of the human broadcast route.",
+            capture_output=True,
+            check=True,
+        )
+
+        payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual("ax_attended_recovery", payload["routing_mode"])
+        self.assertTrue(payload["ax_attended_recovery_required"])
+        self.assertFalse(payload["operator_relay_required"])
+        self.assertNotEqual("broadcast", payload["routing_mode"])
+        self.assertIn("ATTENDED RECOVERY REQUIRED", deliver_result.stdout)
+        delivered = sorted(chat_dir.glob("*_to-antigravity_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(delivered.read_text())
+        self.assertEqual("ax_attended_recovery", frontmatter["routing_mode"])
+        self.assertIsNone(frontmatter["target_session_id"])
 
     def test_deliver_never_rings_a_claude_cli_session_without_a_binding(self):
         # The case the AX doorbell exists for -- no dispatchable autobridge -- is exactly
@@ -6950,6 +7082,58 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertTrue(delivered_candidates)
         frontmatter, _ = parse_frontmatter(delivered_candidates[-1].read_text())
+        self.assertEqual("broadcast", frontmatter["routing_mode"])
+        self.assertIsNone(frontmatter["target_session_id"])
+
+    def test_operator_broadcast_reports_itself_explicitly(self):
+        root = self.make_workspace()
+        self.add_agent(
+            root,
+            {
+                "id": "codex",
+                "display_name": "Codex",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+        )
+        self.add_agent(
+            root,
+            {
+                "id": "operator",
+                "display_name": "Operator",
+                "activation": {"type": "human", "watcher_enabled": False},
+            },
+        )
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name="2026-08-08_operator-broadcast__CHAT-OPERATOR-BROADCAST",
+            chat_id="CHAT-OPERATOR-BROADCAST",
+            project_id="amiga",
+        )
+
+        deliver_result = subprocess.run(
+            [
+                sys.executable,
+                str(DELIVER_SCRIPT),
+                "--chat", "CHAT-OPERATOR-BROADCAST",
+                "--from", "codex",
+                "--to", "operator",
+                "--project", "amiga",
+                "--title", "Operator broadcast",
+                "--body-file", "-",
+            ],
+            cwd=root,
+            text=True,
+            input="Write the explicit operator broadcast.",
+            capture_output=True,
+            check=True,
+        )
+
+        payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
+        self.assertEqual("broadcast", payload["routing_mode"])
+        self.assertIsNone(payload["resolved_target_session_id"])
+        delivered = sorted(chat_dir.glob("*_to-operator_*.md"))[-1]
+        frontmatter, _ = parse_frontmatter(delivered.read_text())
+        self.assertEqual("broadcast", frontmatter["routing_mode"])
         self.assertIsNone(frontmatter["target_session_id"])
 
     def test_deliver_refuses_thread_pair_as_dispatch_authority(self):

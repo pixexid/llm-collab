@@ -85,7 +85,7 @@ Agent roster. Created by `scripts/init.py`. Gitignored.
 |-------|------|----------|-------------|
 | `type` | string | yes | `"cli_session"`, `"human_relay"`, `"human"`, `"api_trigger"` |
 | `watcher_enabled` | bool | no | Whether the current PM2 ecosystem should instantiate a background watcher. The ecosystem checks this flag only; it does not filter by activation `type`. |
-| `ax_app` | string | no | Codex only: a localized Codex/ChatGPT app name or bundle ID. Other workers use their watcher or runtime binding. |
+| `ax_app` | string | no | Native app/profile name or bundle ID. Only a Codex/ChatGPT profile supports a routine AX doorbell; a supported opaque profile such as ZCode may identify an `ax_attended_only` recovery route but never a routine ring. |
 | `ax_attended_only` | bool | no | Set `true` when the target cannot be reached by a routine AX ring at all — its native composer cannot be resolved/driven as a send target. `deliver.py` routes such a target to ATTENDED RECOVERY REQUIRED (Codex-supervised) instead of a routine doorbell, superseding `human_relay` operator routing, in exactly two cases: a **no-app** target (no `ax_app`), or an `ax_app` that resolves to a **supported opaque profile** (Codex/ZCode-family). An `ax_app` that resolves to **no supported profile** (an unrecognized app) fails closed with `activation_unavailable` — it does NOT get attended recovery. **GH-470: this flag is NOT for a merely value-opaque or non-empty composer of a *resolvable* Codex composer — a routine ring clears and overrides that content and proceeds.** Codex is the only routine doorbell target; every non-Codex/unrecognized profile fails closed. See `bin/deliver.py` `is_ax_attended_recovery_target` and `tools/axbridge/send-resolution.swift` `routineRingDecision`. |
 | `base_model` | string | no | For `human_relay`: which LLM this maps to (informational) |
 | `identity_note` | string | no | For `human_relay`: shown in handoff prompt to disambiguate identity |
@@ -225,6 +225,7 @@ priority: high
 tags: []
 project_id: my-app
 related_task: TASK-ABC123
+target_session_id: worker-runtime-123
 routing_mode: targeted
 repo_targets: [app, api]
 path_targets: [src/routes/checkout.ts]
@@ -242,8 +243,8 @@ sent_utc: 2026-04-07T10:00:00+00:00
 | `tags` | string[] | Custom labels |
 | `project_id` | string | Registered project this message belongs to |
 | `related_task` | string or null | `TASK-{id}` cross-reference |
-| `target_session_id` | string or null | Exact recipient runtime session for `targeted` and dormant self-coordination packets; null only for explicit broadcasts |
-| `routing_mode` | string | `targeted`, `broadcast`, or `thread_coordination`; `broadcast` is the required explicit signal for an admitted unbound packet |
+| `target_session_id` | string or null | Exact recipient runtime session for `targeted` and dormant `thread_coordination` packets. Null for the explicitly labelled `broadcast`, `ax_doorbell`, and `ax_attended_recovery` routes; never null for `targeted`. |
+| `routing_mode` | string | `targeted` for an exact session, `ax_doorbell` for the routine Codex AX fallback, `ax_attended_recovery` for Codex-supervised recovery, `broadcast` for the documented unbound human/operator case, or `thread_coordination` for dormant Codex self-coordination. |
 | `activation` | bool (optional) | `true` marks a writer ACTIVATION packet. Emitted by `deliver.py --activation`, which atomically requires `related_task`, `worktree`, and `branch` (delivery fails otherwise); `worktree` must be absolute and is canonicalized before serialization. |
 | `worktree` | string (activation only) | Absolute canonical assigned worktree; part of the activation identity |
 | `branch` | string (activation only) | Assigned branch; part of the activation identity |
@@ -1775,18 +1776,20 @@ Notes:
   packet before marking awareness, so AX and runtime-dispatched workers receive
   the same setup contract as human-relay recipients
 - `deliver.py` admits a send only after resolving an exact target, selecting an
-  eligible Codex AX fallback, or identifying an explicit watcherless-human /
-  operator broadcast. Other unresolved routes exit 2 before every durable
-  mutation with `delivery_refused: true`, `durable_write: false`,
+  eligible Codex AX doorbell or attended-recovery fallback, or identifying an
+  explicit watcherless-human / operator broadcast. Other unresolved routes exit
+  2 before every durable mutation with `delivery_refused: true`, `durable_write: false`,
   `routing_mode: refused`, and a typed `routing_refusal_reason`.
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
-- Only the Codex `cli_session` configures a supported `activation.ax_app`
-  profile. For AX-readable Codex/ChatGPT sends, `deliver.py` reports
-  `ax_doorbell_required` and prints the exact command the sender should run.
+- Only a Codex/ChatGPT `activation.ax_app` profile supports a routine AX
+  doorbell. For those sends, `deliver.py` reports
+  `routing_mode: ax_doorbell` plus `ax_doorbell_required` and prints the exact
+  command the sender should run.
   An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
-  reports `ax_attended_recovery_required` with the Codex-attended recovery
-  instruction (GH-1547); no routine ring command is ever printed for it.
+  reports `routing_mode: ax_attended_recovery` plus
+  `ax_attended_recovery_required` with the Codex-attended recovery instruction
+  (GH-1547); no routine ring command is ever printed for it.
 - **Current BB routing status for the `codex -> codex` route below: dormant,
   retained in place.** This is a Codex-app-era mechanism, not a current worker
   surface. The mechanics below remain for that dormant route. Use

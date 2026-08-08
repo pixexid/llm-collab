@@ -293,10 +293,10 @@ For GitHub-backed projects:
 
 | Activation | Behavior |
 |---|---|
-| Dispatchable runtime session | Message can be routed to the bound runtime session |
-| Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT), **and `deliver.py` reports `ax_doorbell_required: true`** | `deliver.py` prints the only permitted AX doorbell command. The flag is the authority, not the absence of a binding: a dispatchable binding suppresses it, and so does a terminal unreadable/scope-refused state, which is a repair rather than a ring |
+| Dispatchable runtime session | Writes `routing_mode: targeted` with the exact `target_session_id` and routes to that bound session |
+| Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT), **and `deliver.py` reports `ax_doorbell_required: true`** | Writes `routing_mode: ax_doorbell` with no target session and prints the only permitted AX doorbell command. The flag is the authority, not the absence of a binding: a dispatchable binding suppresses it, and so does a terminal unreadable/scope-refused state, which is a repair rather than a ring |
 | Watcher-backed worker with an exact dispatchable binding, Codex included | Targeted packet is written; the worker's watcher owns pickup |
-| `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
+| `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Writes `routing_mode: ax_attended_recovery` with no target session and reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
 | Watcher-disabled `human` / `human_relay`, or `operator` | Writes an explicit `routing_mode: broadcast`; human relays also print the handoff prompt |
 | Missing transport | Refuses before write with a typed `routing_refusal_reason` |
