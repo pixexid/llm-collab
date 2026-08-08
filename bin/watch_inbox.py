@@ -45,6 +45,7 @@ from _helpers import (
     resolve_project_repo_path,
 )
 from _session_autobridge import (
+    MAX_DISPATCH_PACKET_BYTES,
     CanonicalBindingNativeMismatch,
     UnreadableFile,
     _repo_package_root,
@@ -54,6 +55,7 @@ from _session_autobridge import (
     dispatch_session,
     execute_bb_bootstrap_plan,
     read_regular_file_bounded,
+    read_regular_file_bounded_with_identity,
     iter_sessions,
     load_session,
     repo_scope_matches,
@@ -902,12 +904,15 @@ def dispatch_autobridge(
                 effective_repo_targets = repo_targets
                 message_path = ROOT / action["message_path"]
                 frontmatter: dict = {}
-                observed_mtime = _packet_mtime(action["message_path"])
+                observed_mtime = None
                 if effective_repo_targets is None:
                     repo_match, repo_reason = True, "unscoped"
                 else:
                     try:
-                        frontmatter, _ = parse_frontmatter(message_path.read_text())
+                        message_raw, observed_mtime = read_regular_file_bounded_with_identity(
+                            message_path, MAX_DISPATCH_PACKET_BYTES
+                        )
+                        frontmatter, _ = parse_frontmatter(message_raw.decode("utf-8"))
                         repo_match, repo_reason = repo_scope_matches(
                             effective_repo_targets,
                             frontmatter.get("repo_targets"),
