@@ -173,6 +173,38 @@ class DeployRuntimeTest(unittest.TestCase):
             pm2_run.call_args_list,
         )
 
+    def test_reconcile_propagates_ecosystem_restart_failure(self):
+        # Sibling of GH-678 in the same file: a non-zero startOrRestart must not
+        # be swallowed. deploy_runtime.py routes every pm2 call through pm2_run,
+        # which raises on a non-zero exit -- so unlike a raw subprocess call, the
+        # restart failure propagates out of reconcile_pm2 as a DeployError (and in
+        # deploy() reaches the try/except rollback, already covered by
+        # test_deploy_restores_previous_state_after_verification_failure). Real
+        # pm2_run is exercised: delete succeeds (exit 0), startOrRestart fails
+        # (exit 1).
+        def fake_run(cmd, **kwargs):
+            if "startOrRestart" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "", "ecosystem restart failed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with (
+            patch.object(deploy_runtime, "pm2_binary", return_value="/usr/bin/pm2"),
+            patch.object(deploy_runtime.subprocess, "run", side_effect=fake_run),
+            patch.object(
+                deploy_runtime,
+                "pm2_jlist",
+                side_effect=[[{"name": "fixture-old", "pm2_env": {"status": "stopped"}}], []],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                deploy_runtime.DeployError, r"startOrRestart.*ecosystem restart failed"
+            ):
+                deploy_runtime.reconcile_pm2(
+                    Path("/deployed/runtime"),
+                    frozenset({"fixture-old", "fixture-new"}),
+                    {"fixture-new": {"name": "fixture-new"}},
+                )
+
     def test_verify_checks_head_definition_and_log_probe(self):
         record = {
             "name": "fixture-new",
@@ -751,6 +783,29 @@ class DeployRuntimeTest(unittest.TestCase):
                 deploy_runtime.pm2_run(
                     ["-c", "import sys; sys.stdout.write('x' * 128)"],
                     max_output_bytes=16,
+                )
+
+    def test_pm2_run_raises_on_nonzero_exit(self):
+        # The defense for "a failed ecosystem restart is not swallowed": pm2_run
+        # converts ANY non-zero PM2 exit into a DeployError before returning, so
+        # the startOrRestart call in reconcile_pm2 cannot silently succeed. Both
+        # the unbounded path (subprocess.run) and the bounded path
+        # (_pm2_run_bounded) route through this one returncode check.
+        failing = subprocess.CompletedProcess(
+            ["pm2", "startOrRestart", "ecosystem.config.cjs", "--update-env"],
+            1,
+            "",
+            "ecosystem restart failed",
+        )
+        with (
+            patch.object(deploy_runtime, "pm2_binary", return_value="/usr/bin/pm2"),
+            patch.object(deploy_runtime.subprocess, "run", return_value=failing),
+        ):
+            with self.assertRaisesRegex(
+                deploy_runtime.DeployError, r"startOrRestart.*ecosystem restart failed"
+            ):
+                deploy_runtime.pm2_run(
+                    ["startOrRestart", "ecosystem.config.cjs", "--update-env"]
                 )
 
     def test_source_and_target_must_differ(self):
