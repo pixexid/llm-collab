@@ -132,7 +132,8 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
         "project_number": 1,
         "backlog": {
           "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
-          "require_any_label": []
+          "require_any_label": [],
+          "priority_labels": ["priority:urgent", "priority:high"]
         }
       }
     },

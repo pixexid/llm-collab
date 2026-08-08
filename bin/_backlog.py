@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -29,6 +29,8 @@ class BacklogIssue:
     title: str
     labels: tuple[str, ...]
     url: str | None = None
+    priority_label: str | None = None
+    priority_rank: int | None = None
 
 
 def project_backlog_config(project_id: str) -> dict[str, Any]:
@@ -48,12 +50,14 @@ def project_backlog_config(project_id: str) -> dict[str, Any]:
     backlog = raw_backlog if isinstance(raw_backlog, dict) else {}
     exclude_labels = backlog.get("exclude_labels", DEFAULT_EXCLUDE_LABELS)
     require_any_label = backlog.get("require_any_label", [])
+    priority_labels = backlog.get("priority_labels", [])
 
     return {
         "enabled": True,
         "repo": repo,
         "exclude_labels": _string_list(exclude_labels, default=DEFAULT_EXCLUDE_LABELS),
         "require_any_label": _string_list(require_any_label, default=()),
+        "priority_labels": _string_list(priority_labels, default=()),
     }
 
 
@@ -65,6 +69,8 @@ def eligible_open_issues(project_id: str) -> list[BacklogIssue]:
     raw_issues = load_open_github_issues(str(config["repo"]))
     exclude_patterns = tuple(str(label).lower() for label in config["exclude_labels"])
     require_patterns = tuple(str(label).lower() for label in config["require_any_label"])
+    priority_labels = tuple(str(label) for label in config["priority_labels"])
+    priority_patterns = tuple(label.lower() for label in priority_labels)
 
     eligible: list[BacklogIssue] = []
     for raw_issue in raw_issues:
@@ -76,9 +82,30 @@ def eligible_open_issues(project_id: str) -> list[BacklogIssue]:
             continue
         if require_patterns and not any(_matches_any(label, require_patterns) for label in label_names):
             continue
+        priority_index = next(
+            (
+                index
+                for index, pattern in enumerate(priority_patterns)
+                if pattern in label_names
+            ),
+            None,
+        )
+        if priority_index is not None:
+            issue = replace(
+                issue,
+                priority_label=priority_labels[priority_index],
+                priority_rank=priority_index + 1,
+            )
         eligible.append(issue)
 
-    return sorted(eligible, key=lambda issue: issue.number)
+    return sorted(
+        eligible,
+        key=lambda issue: (
+            issue.priority_rank is None,
+            issue.priority_rank or 0,
+            issue.number,
+        ),
+    )
 
 
 def load_open_github_issues(repo: str) -> list[dict[str, Any]]:

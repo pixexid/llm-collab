@@ -140,7 +140,8 @@ Project registry. Created by `scripts/init.py`. Gitignored.
         "project_number": 1,
         "backlog": {
           "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
-          "require_any_label": []
+          "require_any_label": [],
+          "priority_labels": ["priority:urgent", "priority:high"]
         }
       },
       "release_gate_agent": "orchestrator",
@@ -175,6 +176,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `github.project_number` | int | GitHub Projects board number |
 | `github.backlog.exclude_labels` | string[] | Open issue labels excluded from the executable backlog. Defaults include `type:epic`, terminal labels, and `status:deferred`. |
 | `github.backlog.require_any_label` | string[] | Optional label or wildcard patterns that an open issue must match to be backlog-eligible. Empty means every non-excluded open issue is eligible. |
+| `github.backlog.priority_labels` | string[] | Optional ordered label list used as the primary queue sort key. The first matching entry wins; equal matches use issue number ascending, and unmatched issues follow all matches. Missing or empty preserves issue-number order. |
 | `release_gate_agent` | string | Required, never-defaulted enabled agent ID that must equal `claim_task.py --released-by` for every new `review -> done` transition. `scripts/init.py` requires an explicit selection from collected enabled agents for new projects; existing registries require a manual local rollout. Missing or empty fails closed and must be repaired in that task project's `projects.json` entry. This is workflow deterrence and attribution, not authentication. |
 | `release_closure.workflow` | string | Deploy workflow name for the exact-merge-SHA release gate (`bin/deploy_release_watch.py`). Required for the gate; never defaulted. |
 | `release_closure.trigger_event` | string | The automatic event that runs the production deploy (`push` for Amiga; `workflow_run`/`merge_group` for projects triggered that way). Required; never defaulted — only runs with this event on `default_branch_base` count. |

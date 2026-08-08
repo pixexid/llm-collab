@@ -611,7 +611,13 @@ accepted_by: null
 ---
 """,
             )
-            issue = _backlog.BacklogIssue(number=784, title="Map", labels=())
+            issue = _backlog.BacklogIssue(
+                number=784,
+                title="Map",
+                labels=("area:livecraft",),
+                priority_label="area:livecraft",
+                priority_rank=1,
+            )
             previous = {
                 "project_id": "amiga",
                 "completed_recently": [
@@ -630,6 +636,8 @@ accepted_by: null
         self.assertEqual(lane["queue_state"], "ready")
         self.assertEqual(lane["blocked_by"], [])
         self.assertTrue(lane["needs_refinement"])
+        self.assertEqual(lane["priority_label"], "area:livecraft")
+        self.assertEqual(lane["priority_rank"], 1)
 
     def test_reconcile_dependency_requires_exact_project_done_snapshot(self) -> None:
         cases = (

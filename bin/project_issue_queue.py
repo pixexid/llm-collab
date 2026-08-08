@@ -543,7 +543,16 @@ def reconciliation_input_hash(project_id: str, issues: list[_backlog.BacklogIssu
             "project_id": project_id,
             "direct_app_only_configured": direct_app_configured,
             "direct_app_only": ui_ux.get("direct_app_only") if direct_app_configured else None,
-            "issues": [{"number": issue.number, "title": issue.title, "labels": issue.labels} for issue in issues],
+            "issues": [
+                {
+                    "number": issue.number,
+                    "title": issue.title,
+                    "labels": issue.labels,
+                    "priority_label": issue.priority_label,
+                    "priority_rank": issue.priority_rank,
+                }
+                for issue in issues
+            ],
             "tasks": task_inputs,
         },
         sort_keys=True,
@@ -641,6 +650,8 @@ def reconcile_queue(project_id: str) -> dict:
             {
                 "order": len(lanes) + 1,
                 "issue": issue.number,
+                "priority_label": issue.priority_label,
+                "priority_rank": issue.priority_rank,
                 "task_id": mirror["task_id"],
                 "owner": str(frontmatter.get("owner") or "unassigned"),
                 "task_status": task_status_value,
