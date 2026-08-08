@@ -496,8 +496,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 sources["review_policy"],
             )
             self.assertIn(
-                "Required local exact-head verification therefore binds the current "
-                "head and proves every amendment through the existing prior-OID path",
+                "Required local exact-head verification is therefore the direct "
+                "head-binding requirement for this reaction-only case",
                 sources["review_policy"],
             )
             self.assertNotIn(
@@ -1905,8 +1905,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "Required local exact-head verification therefore binds the current head "
-            "and proves every amendment through the existing prior-OID path",
+            "Required local exact-head verification is therefore the direct head-binding "
+            "requirement for this reaction-only case",
             text,
         )
         self.assertIn("GH-629", text)
@@ -1926,8 +1926,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "the required local exact-head verification supplies head binding through "
-            "the prior-OID path below and proves every amendment",
+            "the required local exact-head verification directly supplies head binding "
+            "for this reaction-only case",
             text,
         )
         self.assertNotIn("is independently terminal for head binding", text)

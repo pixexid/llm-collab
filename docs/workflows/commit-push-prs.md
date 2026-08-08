@@ -420,8 +420,8 @@ Use the mandatory one-pass GitHub Codex gate:
   what keeps this model from reading a pass over unresolved threads
   (llm-collab#317). A PR-level reaction carries no SHA, GitHub publishes no push
   time, and the timeline retains no connector pickup event, so no GitHub-side head
-  binding exists. Required local exact-head verification therefore binds the current
-  head and proves every amendment through the existing prior-OID path below.
+  binding exists. Required local exact-head verification is therefore the direct
+  head-binding requirement for this reaction-only case.
   GH-629 tracks the sender-side push observation that could restore reaction-only
   head binding. A clean automatic `+1` never justifies a second review request
 - the meaning of `+1` does **not** vary by tier. Tier A takes its strength from the
@@ -652,8 +652,8 @@ Codex review gate as complete when any of these holds:
   existence, the actor is the connector, and **every other artifact class is empty**
   — no review object, no top-level comment, no inline thread — satisfies the
   automatic first-pass bot requirement. It does not independently bind the reaction
-  to the current head; the required local exact-head verification supplies head
-  binding through the prior-OID path below and proves every amendment. The reaction
+  to the current head; the required local exact-head verification directly supplies
+  head binding for this reaction-only case. The reaction
   is itself the automatic pass's clean artifact; do not look for a separate proof
   that the pass ran. A `+1` alongside any
   finding artifact is not terminal. This is the automatic first pass's clean shape: the
