@@ -414,9 +414,12 @@ Use the mandatory one-pass GitHub Codex gate:
   the pass ran, and requiring one would make this model unsatisfiable — the exact
   deadlock it exists to remove. Verify all four: the actor is the connector, that
   the reaction post-dates the push of the current head, that the head has
-  not been amended since, and that **every other artifact class is empty** — no
-  review object, no top-level comment, no inline thread. That last condition is the
-  safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
+  not been amended since, and that **every other connector-authored artifact class
+  is empty** — no connector-authored review object, top-level comment, or inline
+  thread. Non-connector artifacts — operator comments, thread-linked adjudication
+  replies, and cross-references — say nothing about the connector pass. The
+  safeguard remains: a connector `+1` alongside any connector finding artifact is
+  **not** terminal, which is
   what keeps this model from reading a pass over unresolved threads
   (llm-collab#317). Any head change voids it, and it grants no second bot pass —
   locally prove the amended head or remain blocked. A PR-level reaction carries no
@@ -426,7 +429,12 @@ Use the mandatory one-pass GitHub Codex gate:
   connector pickup artifact (its `eyes` reaction) proves the pass started after
   the current head's push with no push between pickup and `+1`; otherwise the `+1`
   is a prior-head signal — route it through the prior-OID path below and locally
-  prove every amendment, never as a terminal clean pass for the current head. A
+  prove every amendment, never as a terminal clean pass for the current head.
+  **KNOWN-UNSATISFIABLE precondition:** the connector swaps `eyes` for `+1`, so the
+  pickup artifact is gone when the gate evaluates. [GH-629](https://github.com/pixexid/llm-collab/issues/629)
+  carries the two terminal options: complete base-to-head local proof for the
+  unbound case, or a durable reviewed OID from a sender-side push observation.
+  Do not replace the binding rule here. A
   clean automatic `+1` never justifies a second review request. The connector defines this protocol itself: if
   it has suggestions it comments, otherwise it reacts `+1`. This model exists
   because v9/v11 made the automatic pass primary while the two models above both
@@ -659,16 +667,23 @@ Codex review gate as complete when any of these holds:
   or
 - a connector-authored `+1` sits **at PR level** with no manual request comment in
   existence, the reaction post-dates the push of the
-  current head, the head has not been amended since, and **every other artifact class is
-  empty** — no review object, no top-level comment, no inline thread. A PR-level reaction
+  current head, the head has not been amended since, and **every other connector-authored
+  artifact class is empty** — no connector-authored review object, top-level comment, or
+  inline thread. Non-connector artifacts — operator comments, thread-linked adjudication
+  replies, and cross-references — say nothing about the connector pass. A PR-level reaction
   has no SHA, so those checks do not by themselves bind it to the reviewed head: the `+1`
   is terminal on this path only when a trustworthy existing connector pickup artifact
   (its `eyes` reaction) proves the pass started after the current head's push with no push
   between pickup and `+1`; an ambiguous or prior-head `+1` is not terminal here — fall
-  back to the prior-OID clause below with local proof of every amendment. The reaction is
+  back to the prior-OID clause below with local proof of every amendment.
+  **KNOWN-UNSATISFIABLE precondition:** the connector swaps `eyes` for `+1`,
+  so the pickup artifact is gone when the gate evaluates. [GH-629](https://github.com/pixexid/llm-collab/issues/629)
+  carries the two terminal options: complete base-to-head local proof for the unbound case,
+  or a durable reviewed OID from a sender-side push observation. Do not replace the
+  binding rule here. The reaction is
   itself the automatic pass's clean artifact; do not look for a separate proof that the
-  pass ran. A `+1` alongside any
-  finding artifact is not terminal. This is the automatic first pass's clean shape: the
+  pass ran. The safeguard remains: a connector `+1` alongside any connector finding
+  artifact is **not** terminal. This is the automatic first pass's clean shape: the
   connector comments when it has suggestions and reacts `+1` when it does not. It receives
   the same settle and full re-read as a text verdict, and grants no second bot pass,
   or

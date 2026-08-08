@@ -486,9 +486,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                 "the actor is the connector",
                 "that the reaction post-dates the push of the current head",
                 "that the head has not been amended since",
-                "every other artifact class is empty",
             ):
                 self.assertIn(condition, sources["review_policy"])
+            self.assertEqual(
+                sources["review_policy"].count(
+                    "every other connector-authored artifact class is empty"
+                ),
+                2,
+            )
             # The model must NOT require separate proof that the automatic pass
             # ran: on a clean pass the reaction is the only artifact the connector
             # emits, so such a condition is circular and unsatisfiable. The
@@ -519,9 +524,12 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             # The empty-findings clause is the whole safeguard against the #317
             # shape (clean-looking signal beside unresolved P1 threads), so pin the
             # consequence, not just the condition.
-            self.assertIn(
-                "a `+1` alongside any finding artifact is **not** terminal",
-                sources["review_policy"],
+            self.assertEqual(
+                sources["review_policy"].count(
+                "a connector `+1` alongside any connector finding artifact is "
+                "**not** terminal"
+                ),
+                2,
             )
             self.assertIn(
                 "A clean automatic `+1` never justifies a second review request",
@@ -1901,13 +1909,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text,
         )
 
-    def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
-        """GH-549 P1 (canonical list): the merge-driving automatic PR-level +1 bullet
-        must carry the same head-binding as the review-policy enumeration -- a PR-level
-        reaction has no SHA, so the four checks do not bind it to the reviewed head.
-        Require a trustworthy connector pickup artifact (eyes) proving the pass started
-        after the current head's push with no push in between, and route an
-        ambiguous/prior-head +1 through the prior-OID local proof."""
+    def test_automatic_plus_one_binding_clause_is_marked_known_unsatisfiable(self):
+        """GH-616 interim: retain the attempted eyes binding but mark it honestly
+        unsatisfiable and point both canonical statements at the GH-629 options."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
             "terminal on this path only when a trustworthy existing connector pickup "
@@ -1919,6 +1923,16 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "an ambiguous or prior-head `+1` is not terminal here — fall back to the "
             "prior-OID clause below with local proof of every amendment",
             text,
+        )
+        self.assertEqual(text.count("KNOWN-UNSATISFIABLE precondition"), 2)
+        self.assertEqual(
+            text.count(
+                "[GH-629](https://github.com/pixexid/llm-collab/issues/629) carries "
+                "the two terminal options: complete base-to-head local "
+                "proof for the unbound case, or a durable reviewed OID from a sender-side "
+                "push observation"
+            ),
+            2,
         )
 
 
