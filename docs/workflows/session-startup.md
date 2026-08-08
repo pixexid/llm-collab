@@ -181,6 +181,9 @@ own the watch. Before creating one, clear any stale monitor for the same target.
 Keep one monitor per purpose, and delete or update it as soon as the purpose is
 served.
 
+For BB lanes, the orchestrator owns monitoring through BB read surfaces per
+`bb-workers.md`; this section governs enrolled first-class participants.
+
 ## Claude Desktop Rule
 
 BB workers do not enter this path. The former use of the Codex app as a worker
@@ -228,7 +231,7 @@ Operational rule:
 
 Current Phase 1 routing gives a matching dispatchable session autobridge
 precedence. When `deliver.py` reports `autobridge_ready: true`, it intentionally
-suppresses both `ax_doorbell_required` and `desktop_bridge_required`; that packet
+suppresses `ax_doorbell_required`; that packet
 uses the separately documented session-autobridge path and its retry limitations.
 Do not describe AX as primary for that packet, and **never deactivate a working
 binding to obtain an AX wake** — that removes the routine dispatch v12 requires
