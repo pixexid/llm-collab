@@ -283,6 +283,27 @@ class WatcherReloadTest(unittest.TestCase):
 
         self.assertEqual("restart", run.call_args.args[0][2])
 
+    def test_start_watcher_reports_error_when_restart_exits_nonzero(self) -> None:
+        # The defect (GH-678): restart returned exit 0 for a dead watcher, so
+        # start_watcher returned ok and bootstrap printed [watcher] ok. A non-zero
+        # restart exit must surface as error, never ok.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watcher = root / "bin" / "pm2_watchers.py"
+            watcher.parent.mkdir()
+            watcher.touch()
+            with (
+                patch.object(session_bootstrap, "ROOT", root),
+                patch.object(
+                    session_bootstrap.subprocess,
+                    "run",
+                    return_value=completed(returncode=1, stdout=""),
+                ),
+            ):
+                result = session_bootstrap.start_watcher("claude")
+        self.assertEqual("error", result.get("status"))
+        self.assertNotIn(result.get("status"), ("ok", None))
+
 
 class BindingDriftBannerTest(unittest.TestCase):
     SESSION = {

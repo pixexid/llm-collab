@@ -26,8 +26,10 @@ from _python_runtime import require_python
 require_python()
 
 import argparse
+import json
 import os
 import re
+import selectors
 import shutil
 import subprocess
 import time
@@ -45,6 +47,10 @@ from _helpers import (
 )
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
+# Bound on `pm2 jlist` output, the same value bin/deploy_runtime.py uses. jlist is
+# an untrusted-size read of the whole process table; without a bound the timeout
+# does not prevent excessive memory before json.loads. See _pm2_run_bounded.
+PM2_JLIST_MAX_BYTES = 16 * 1024 * 1024
 SIDECAR_READINESS_TIMEOUT_SECONDS = 15
 SIDECAR_READINESS_POLL_SECONDS = 0.25
 SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS = 1
@@ -252,11 +258,77 @@ def pm2_timeout_seconds() -> int:
     return max(1, timeout_seconds)
 
 
-def pm2_run(args_list: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess:
+def _pm2_run_bounded(
+    pm2: str, args_list: list[str], max_output_bytes: int
+) -> subprocess.CompletedProcess:
+    """Read pm2 output with a size bound; abort on exceed, never truncate.
+
+    Mirrors bin/deploy_runtime.py's _pm2_run_bounded rather than a second style.
+    Used for untrusted-size reads -- `pm2 jlist` is the whole process table --
+    where subprocess.run would buffer the entire output before any size check, so
+    the timeout does not bound memory before json.loads. Reads in chunks and
+    refuses once output exceeds the bound: a truncated buffer that still parsed
+    JSON would drop a real watcher and read as absent, which is the fail-open
+    GH-678 is about. Abort (sys.exit) on exceed; never return a partial buffer.
+    """
+    command = [pm2] + args_list
+    label = " ".join(args_list)
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        stream = process.stdout
+        if stream is None:
+            print(f"[error] pm2 {label} returned no stdout pipe", file=sys.stderr)
+            sys.exit(1)
+        output = bytearray()
+        timeout_seconds = pm2_timeout_seconds()
+        deadline = time.monotonic() + timeout_seconds
+        with selectors.DefaultSelector() as selector:
+            selector.register(stream, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    print(f"[error] pm2 {label} timed out after {timeout_seconds}s", file=sys.stderr)
+                    sys.exit(124)
+                if not selector.select(remaining):
+                    print(f"[error] pm2 {label} timed out after {timeout_seconds}s", file=sys.stderr)
+                    sys.exit(124)
+                chunk = os.read(stream.fileno(), min(64 * 1024, max_output_bytes + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_output_bytes:
+                    print(
+                        f"[error] pm2 {label} output exceeds {max_output_bytes} bytes; "
+                        f"refusing to parse it",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+        returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except OSError as error:
+        print(f"[error] pm2 {label} failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+    return subprocess.CompletedProcess(command, returncode, bytes(output).decode(errors="replace"), "")
+
+
+def pm2_run(
+    args_list: list[str], *, capture_output: bool = False, max_output_bytes: int | None = None
+) -> subprocess.CompletedProcess:
     pm2 = resolve_pm2()
     if not pm2:
         print("[error] pm2 not found. Install: npm install -g pm2", file=sys.stderr)
         sys.exit(1)
+    if max_output_bytes is not None:
+        return _pm2_run_bounded(pm2, args_list, max_output_bytes)
     timeout_seconds = pm2_timeout_seconds()
     try:
         return subprocess.run(
@@ -359,6 +431,42 @@ def verify_codex_sidecar_runtime_home(expected_runtime_home: str) -> None:
         sys.exit(result.returncode)
 
 
+def watcher_status(agent_id: str) -> tuple[subprocess.CompletedProcess, str | None]:
+    """Read the watcher's PM2 status as a structured value from `pm2 jlist`.
+
+    Returns (result, status) where status is the matched entry's pm2_env.status
+    ("online", "stopped", "errored", ...) or None when PM2 does not list the app.
+
+    This is the one liveness authority for start, ensure, restart and status. It
+    reads a JSON field rather than scanning rendered text because a `pm2 describe`
+    table echoes operator-chosen strings -- the app name (agent id), script path,
+    script args (--me/--project/--repo-target), both log paths and exec cwd
+    (runtime home) -- and any of them can contain "status" or "online". Every
+    text-matching form tried here (a substring, then a row/field regex) was
+    satisfiable by those fields while the real status was errored, so a dead
+    watcher read as live; the regex's colon alternative even matched the literal
+    "status: online" appearing in any field. `pm2 jlist` returns status as a
+    structured field, so liveness is a value comparison (`status == "online"`),
+    not a token scan -- which removes the defect class instead of tightening the
+    match a third time.
+    """
+    result = pm2_run(["jlist"], capture_output=True, max_output_bytes=PM2_JLIST_MAX_BYTES)
+    name = app_name(agent_id)
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except ValueError:
+        # Malformed jlist cannot answer the question; fail closed (not-online)
+        # rather than fall back to matching rendered text.
+        return result, None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            env = entry.get("pm2_env")
+            if isinstance(env, dict):
+                return result, env.get("status")
+            return result, None
+    return result, None
+
+
 def start_agent(agent_id: str) -> None:
     if not is_sidecar(agent_id):
         agent = get_agent(agent_id)
@@ -372,15 +480,15 @@ def start_agent(agent_id: str) -> None:
         print(f"[error] pm2 failed to start {name} (exit {started.returncode})", file=sys.stderr)
         sys.exit(started.returncode)
 
-    status = pm2_run(["describe", name], capture_output=True)
-    if status.returncode != 0 or "online" not in (status.stdout or "").lower():
+    result, status = watcher_status(agent_id)
+    if result.returncode != 0 or status != "online":
         print(f"[error] pm2 started {name} but it is not online", file=sys.stderr)
-        sys.exit(status.returncode or 1)
+        sys.exit(result.returncode or 1)
 
 
 def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
-    result = pm2_run(["describe", app_name(agent_id)], capture_output=True)
-    if "online" in result.stdout.lower():
+    _, status = watcher_status(agent_id)
+    if status == "online":
         print(f"[watcher] {agent_id} already running.")
     else:
         start_agent(agent_id)
@@ -391,22 +499,18 @@ def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
 
 
 def process_status_exit_code(agent_id: str) -> int:
-    result = pm2_run(["describe", app_name(agent_id)], capture_output=True)
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
-        print(
-            result.stderr,
-            end="" if result.stderr.endswith("\n") else "\n",
-            file=sys.stderr,
-        )
+    result, status = watcher_status(agent_id)
     if result.returncode != 0:
+        if result.stderr:
+            print(
+                result.stderr,
+                end="" if result.stderr.endswith("\n") else "\n",
+                file=sys.stderr,
+            )
         return result.returncode
-    return 0 if re.search(
-        r"(?:│|\b)status\s*(?:│|:)\s*online(?:\s*│|\b)",
-        result.stdout or "",
-        re.IGNORECASE,
-    ) is not None else 1
+    name = app_name(agent_id)
+    print(f"{name}: {status if status is not None else 'not found'}")
+    return 0 if status == "online" else 1
 
 
 def main():
@@ -482,8 +586,19 @@ def main():
             start_agent(agent_id)
         elif args.command == "restart":
             # Re-read the deployed ecosystem so the running process matches the
-            # definition that the current-runtime gate approved.
-            pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
+            # definition that the current-runtime gate approved. startOrRestart
+            # exits 0 while the process lands errored or stopped, so propagate its
+            # exit code and verify online afterwards -- exactly what start does.
+            # The return value used to be discarded, so start_watcher reported ok
+            # for a watcher that was not running (GH-678).
+            restarted = pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
+            if restarted.returncode != 0:
+                print(f"[error] pm2 failed to restart {name} (exit {restarted.returncode})", file=sys.stderr)
+                sys.exit(restarted.returncode)
+            result, status = watcher_status(agent_id)
+            if result.returncode != 0 or status != "online":
+                print(f"[error] pm2 restarted {name} but it is not online", file=sys.stderr)
+                sys.exit(result.returncode or 1)
         elif args.command == "ensure":
             ensure_agent(agent_id, runtime_home=args.runtime_home)
         elif args.command == "stop":
