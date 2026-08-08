@@ -37,6 +37,9 @@ from llm_collab.ledger import LedgerPaths, LedgerStore, SQLiteSafetyError, Write
 
 
 SAFE_VERSION = (3, 51, 3)
+PEER_CLOSED_ERRNOS = frozenset(
+    {errno.EPIPE, errno.ENOTCONN, errno.ECONNRESET}
+)
 ENABLED_ENV = {
     "THREAD_EVENT_RUNNER_ENABLED": "1",
     "THREAD_EVENT_RUNNER_OBSERVE": "1",
@@ -554,18 +557,24 @@ class DaemonTest(unittest.TestCase):
             try:
                 client.sendall(value)
             except OSError as exc:
-                if exc.errno not in {errno.EPIPE}:
+                if exc.errno not in PEER_CLOSED_ERRNOS:
                     raise
             try:
                 client.shutdown(socket.SHUT_WR)
             except OSError as exc:
                 # The daemon may authenticate/reject and close before the test
                 # half-closes; the response is still readable from the socket.
-                if exc.errno not in {errno.ENOTCONN, errno.EPIPE}:
+                if exc.errno not in PEER_CLOSED_ERRNOS:
                     raise
             return json.loads(client.recv(70_000).decode())
         finally:
             client.close()
+
+    def test_request_peer_closed_errno_class_cannot_narrow(self) -> None:
+        self.assertEqual(
+            PEER_CLOSED_ERRNOS,
+            frozenset({errno.EPIPE, errno.ENOTCONN, errno.ECONNRESET}),
+        )
 
     @contextlib.contextmanager
     def daemon(self, *, peer=None):
