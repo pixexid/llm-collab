@@ -79,6 +79,67 @@ class BacklogTest(unittest.TestCase):
 
         self.assertEqual([issue.number for issue in eligible], [20])
 
+    def test_amiga_priority_labels_rank_before_issue_number_with_stable_ties(self) -> None:
+        project = {
+            "id": "amiga",
+            "github": {
+                "enabled": True,
+                "repo": "pixexid/amiga",
+                "backlog": {
+                    "priority_labels": ["area:livecraft", "priority:high"],
+                },
+            },
+        }
+        issues = [
+            self.issue(10, "Unmatched", ["area:operations"]),
+            self.issue(50, "Later livecraft", ["area:livecraft"]),
+            self.issue(40, "High priority", ["priority:high"]),
+            self.issue(30, "Earlier livecraft", ["area:livecraft"]),
+            self.issue(
+                35,
+                "First configured match wins",
+                ["priority:high", "area:livecraft"],
+            ),
+        ]
+
+        with patch.object(_backlog, "get_project", return_value=project):
+            with patch.object(_backlog, "load_open_github_issues", return_value=issues):
+                eligible = _backlog.eligible_open_issues("amiga")
+
+        self.assertEqual([issue.number for issue in eligible], [30, 35, 50, 40, 10])
+        self.assertEqual(
+            [(issue.priority_label, issue.priority_rank) for issue in eligible],
+            [
+                ("area:livecraft", 1),
+                ("area:livecraft", 1),
+                ("area:livecraft", 1),
+                ("priority:high", 2),
+                (None, None),
+            ],
+        )
+
+    def test_non_amiga_absent_or_empty_priority_labels_preserve_issue_order(self) -> None:
+        issues = [
+            self.issue(9, "Later issue", ["priority:high"]),
+            self.issue(2, "Earlier issue", []),
+        ]
+        for backlog in ({}, {"priority_labels": []}):
+            with self.subTest(backlog=backlog):
+                project = {
+                    "id": "nuvyr",
+                    "github": {
+                        "enabled": True,
+                        "repo": "pixexid/nuvyr",
+                        "backlog": backlog,
+                    },
+                }
+                with patch.object(_backlog, "get_project", return_value=project):
+                    with patch.object(_backlog, "load_open_github_issues", return_value=issues):
+                        eligible = _backlog.eligible_open_issues("nuvyr")
+
+                self.assertEqual([issue.number for issue in eligible], [2, 9])
+                self.assertTrue(all(issue.priority_rank is None for issue in eligible))
+
     def test_disabled_github_project_has_empty_backlog(self) -> None:
         with patch.object(_backlog, "get_project", return_value={"id": "docs", "github": {"enabled": False}}):
             self.assertEqual(_backlog.eligible_open_issues("docs"), [])

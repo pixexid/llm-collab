@@ -619,6 +619,7 @@ def collect_projects(
                     "status:deferred",
                 ],
                 "require_any_label": [],
+                "priority_labels": [],
             }
 
         if release_mode == "production":

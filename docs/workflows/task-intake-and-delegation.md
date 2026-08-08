@@ -132,6 +132,7 @@ remaining issue-sized lanes.
 - keep the queue outside chat threads
 - read it during fresh-session recovery before selecting the next lane
 - update task mirrors and GitHub issue state, then run `python3 bin/project_issue_queue.py reconcile --project <project_id> --write` to refresh the runtime queue projection
+- configure any project-specific class ordering with the ordered `github.backlog.priority_labels` list in that project's `projects.json` entry; missing or empty keeps issue-number order, and reconciled lanes expose the matched label and rank
 - do not hand-edit queue state to clear blockers or materialize lanes unless repairing a reconcile failure with an explicit note
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
