@@ -585,13 +585,15 @@ def _bb_first_packets(
             "path": path,
             "body": message.get("body", ""),
             "repo_targets": frontmatter.get("repo_targets"),
-            # Carry the writer-lane identity so execute_bb_bootstrap_plan can
-            # fail closed on an authoring assignment before resolving the
-            # read-only SLICE_1A_PROFILE (GH-596). deliver.py --activation
-            # writes these atomically; their absence means read-only analysis.
-            "worktree": frontmatter.get("worktree"),
-            "branch": frontmatter.get("branch"),
         }
+        # Carry the activation markers preserving presence (key present iff the
+        # frontmatter has it) so classify_first_delivery_assignment can fail
+        # closed on a partial or malformed activation before the read-only launch
+        # (GH-596). deliver.py --activation writes these atomically; their
+        # absence means read-only analysis.
+        for _marker in ("activation", "worktree", "branch"):
+            if _marker in frontmatter:
+                packet[_marker] = frontmatter[_marker]
         previous = first.get(chat_id)
         if previous is None or path < previous["path"]:
             first[chat_id] = packet

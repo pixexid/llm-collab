@@ -45,36 +45,82 @@ TERMINAL_BINDING_STATES = frozenset(
     {"unreadable", "mismatch", "ambiguous", "scope_refused"}
 )
 
-# Frontmatter fields that bind a packet to a writer lane. ``deliver.py
-# --activation`` emits them atomically (each requires ``--related-task``,
-# ``--worktree`` and ``--branch`` together), and owning a branch to write to is
-# what makes a delegation an implementation/authoring assignment rather than a
-# read-only analysis one. Mirrors ``ACTIVATION_MARKER_FIELDS`` in
-# ``bin/_activation_identity.py``; kept independent here so the library decision
-# does not import from ``bin/``.
-WRITER_LANE_FIELDS = ("worktree", "branch")
+# Frontmatter fields whose presence marks a packet as activation-intent. A
+# packet carrying ANY of them is not an ordinary message: per
+# docs/schema-reference.md a partial or malformed activation marker must fail
+# closed before execution. Mirrors ``ACTIVATION_MARKER_FIELDS`` in
+# ``bin/_activation_identity.py``; kept independent here so the library
+# decision does not import from ``bin/``.
+ACTIVATION_MARKER_FIELDS = ("activation", "worktree", "branch")
+
+# A first delivery classifies into exactly one of these at the
+# profile-resolution seam (GH-596). read_only launches on SLICE_1A_PROFILE;
+# authoring and malformed_activation both refuse before any spawn, with distinct
+# reasons so a malformed packet is never misreported as a profile decision.
+ASSIGNMENT_READ_ONLY = "read_only"
+ASSIGNMENT_AUTHORING = "authoring"
+ASSIGNMENT_MALFORMED_ACTIVATION = "malformed_activation"
 
 
-def packet_is_authoring_assignment(packet: Mapping[str, Any] | None) -> bool:
-    """True iff the packet carries a writer-lane identity (an authoring assignment).
+def _worktree_is_lexical_canonical(value: Any) -> bool:
+    """The schema's lexical canonical form for an activation worktree.
 
-    The bb bootstrap's only measured profile (``SLICE_1A_PROFILE``) is read-only,
-    so a packet that owns a write lane must refuse as ``profile_unavailable``
-    (GH-596) rather than launch an analysis-only model on implementation work.
+    Pure string check (no filesystem access): the receiver must compare the
+    serialized value byte-exact, so a worktree that is not already in lexical
+    normal form is malformed. Existence is the activation authority's
+    strict-resolve lane, not this one. Rules from docs/schema-reference.md:
+    absolute, no double-leading slash, no dot/dotdot segments, no duplicate
+    separators, no non-root trailing separator.
+    """
+    if not isinstance(value, str):
+        return False
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if len(value) > 1 and value.endswith("/"):
+        return False
+    for index, segment in enumerate(value.split("/")):
+        if index == 0:
+            continue
+        if segment in ("", ".", ".."):
+            return False
+    return True
 
-    Detection keys on the lane artifacts (``worktree``/``branch``), not on the
-    packet body: a guard bound to how a caller phrased the prompt is the wrong
-    proxy, and a caller cannot grant a writer lane without these markers —
-    ``deliver.py --activation`` atomically requires them. A writing delegation
-    therefore cannot reach the read-only launch path, and a packet without them
-    has no branch to write to and is not an authoring assignment.
+
+def classify_first_delivery_assignment(packet: Mapping[str, Any] | None) -> str:
+    """Classify a first delivery for the profile-resolution seam (GH-596).
+
+    Returns ``ASSIGNMENT_READ_ONLY``, ``ASSIGNMENT_AUTHORING``, or
+    ``ASSIGNMENT_MALFORMED_ACTIVATION``. The work type is read from the
+    activation markers the packet carries, never from its body — a guard bound
+    to how a caller phrased the prompt is the wrong proxy.
+
+    A packet carrying ANY activation marker (``activation``/``worktree``/``branch``
+    present in the frontmatter) is NOT read-only: the schema marks a partial or
+    malformed marker malformed and requires consumers to fail closed before
+    execution, never treating it as an ordinary message. Only a packet with no
+    marker of any kind may take the read-only launch.
+
+    A complete, well-formed writer-lane identity — ``activation`` exactly boolean
+    ``True`` plus a canonical-absolute ``worktree`` and a non-blank ``branch`` —
+    is an authoring assignment (-> profile_unavailable: no profile is
+    authoring-qualified). Any other marker-bearing packet is
+    ``malformed_activation`` (-> a distinct refusal, so it is not misreported as
+    a profile decision). The ``to``-field/target-agent match is validated by the
+    activation authority lane, which holds the claiming-target context this
+    classifier does not; such a packet is still refused, never launched.
     """
     if not isinstance(packet, Mapping):
-        return False
-    return any(
-        isinstance(packet.get(field), str) and packet.get(field, "").strip()
-        for field in WRITER_LANE_FIELDS
-    )
+        return ASSIGNMENT_READ_ONLY
+    if not any(field in packet for field in ACTIVATION_MARKER_FIELDS):
+        return ASSIGNMENT_READ_ONLY
+    if (
+        packet.get("activation") is True
+        and _worktree_is_lexical_canonical(packet.get("worktree"))
+        and isinstance(packet.get("branch"), str)
+        and packet.get("branch").strip()
+    ):
+        return ASSIGNMENT_AUTHORING
+    return ASSIGNMENT_MALFORMED_ACTIVATION
 
 
 @dataclass(frozen=True)
@@ -230,6 +276,13 @@ BOOTSTRAP_FAILED = "bb_bootstrap_failed"
 # is the implemented fail-closed half of the prospective profile_unavailable
 # selector; a later authoring evaluation lifts it per model.
 BOOTSTRAP_PROFILE_UNAVAILABLE = "bb_bootstrap_profile_unavailable"
+# A first delivery carrying a partial or malformed activation marker (any of
+# activation/worktree/branch present without a complete, well-formed identity)
+# refuses here too — never launched — but as a distinct reason so it is not
+# misreported as a profile decision. Per docs/schema-reference.md a malformed
+# activation marker must fail closed before execution; it is never an ordinary
+# message.
+BOOTSTRAP_MALFORMED_ACTIVATION = "bb_bootstrap_malformed_activation"
 
 
 def execute_bootstrap(
