@@ -103,7 +103,9 @@ The table describes current PM2 materialization, not a recommendation to enable
 watchers for every type. Any entry with `watcher_enabled: true` is instantiated
 on ecosystem start/reload. Existing or PM2-saved processes can outlive later
 roster/config edits until explicitly reconciled and re-saved; see
-[PM2 Watcher Adapter](adapters/pm2.md).
+[PM2 Watcher Adapter](adapters/pm2.md). Before materializing a watcher for the
+first time, follow the canonical
+[PM2 Log Rotation workflow](workflows/pm2-log-rotation.md).
 
 ---
 

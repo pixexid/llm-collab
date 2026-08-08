@@ -32,6 +32,11 @@ For Codex, both PM2 and manual watcher runs default to:
 npm install -g pm2
 ```
 
+Before enabling any watcher, follow the canonical
+[PM2 Log Rotation workflow](../workflows/pm2-log-rotation.md) end to end. It
+owns the archive-before-install gate, configuration, watcher start, retention,
+and two-store verification.
+
 ---
 
 ## How it works
@@ -55,7 +60,9 @@ PM2 materializes this configuration when a process is started/reloaded; changing
 process. A PM2 process saved before an agent was disabled/removed can also return
 after reboot even though the current ecosystem would not create it.
 
-After roster/watcher changes, compare `<runtime_root>/bin/llm-collab pm2_watchers.py status --all`
+After initial enablement, roster maintenance is exempt from repeating the
+installation procedure: it reconciles already-configured watchers without
+changing rotation policy. Compare `<runtime_root>/bin/llm-collab pm2_watchers.py status --all`
 and `pm2 list` with current `watcher_enabled: true` entries. Stop/delete stale
 named processes (`<runtime_root>/bin/llm-collab pm2_watchers.py delete --agent <id>` while the ID
 remains in the roster, otherwise `pm2 delete <workspace>-<agent>`). Then apply
@@ -91,13 +98,10 @@ real PIDs.
 
 ## Commands
 
+Enable watchers through the canonical PM2 Log Rotation workflow linked above;
+this adapter keeps only non-creating watcher operations here.
+
 ```bash
-# Start all watchers
-<runtime_root>/bin/llm-collab pm2_watchers.py start --all
-
-# Ensure a specific watcher is running (start if not)
-<runtime_root>/bin/llm-collab pm2_watchers.py ensure --agent orchestrator
-
 # Check status
 <runtime_root>/bin/llm-collab pm2_watchers.py status --all
 <runtime_root>/bin/llm-collab pm2_watchers.py status --agent orchestrator
@@ -290,6 +294,9 @@ Useful inspection points:
 
 ## Survive system reboots
 
+This is post-enablement persistence for the already-configured process list,
+not an alternate watcher setup procedure.
+
 ```bash
 pm2 startup    # follow the printed instructions
 pm2 save       # save current process list
@@ -359,6 +366,10 @@ Overrides, all optional:
 The listener binds `127.0.0.1` only.
 
 ### Lifecycle
+
+The Codex app-server is a transport sidecar, not an inbox watcher. Its targeted
+lifecycle is exempt from the watcher-start procedure; the canonical rotation
+workflow still covers its PM2 logs when the sidecar is active.
 
 Addressed as `codex-appserver` through the normal manager, and included in
 `--all` whenever the token file and the Codex binary both exist:

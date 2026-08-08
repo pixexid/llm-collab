@@ -287,9 +287,10 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
             "#    but a raw second poller alongside the PM2 one would",
             "#    double-dispatch: both read processed_messages before invoking",
             "#    the runtime and record after, so each can issue turn/start for",
-            "#    the same unread packet. `ensure` is idempotent: it starts the",
-            "#    singleton only if missing.",
-            f"{LAUNCH} pm2_watchers.py ensure --agent {agent}",
+            "#    the same unread packet. If the managed singleton is not online,",
+            "#    enable it through the canonical archive/config/start procedure:",
+            f"#    {ROOT}/docs/workflows/pm2-log-rotation.md",
+            f"{LAUNCH} pm2_watchers.py status --agent {agent}",
         ]
     if channel == "watcher":
         return [

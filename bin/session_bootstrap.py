@@ -5,6 +5,9 @@ session_bootstrap.py — Initialize an agent session.
 Outputs the agent's identity.md FIRST so the LLM immediately knows
 who it is, then shows inbox, then starts the watcher if applicable.
 
+Before the first watcher-enabled run in a new workspace, follow
+docs/workflows/pm2-log-rotation.md.
+
 Usage:
   python bin/session_bootstrap.py --agent orchestrator
   python bin/session_bootstrap.py --agent worker --limit 5

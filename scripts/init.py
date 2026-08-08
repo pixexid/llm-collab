@@ -187,6 +187,9 @@ def build_identity_md(agent: dict, workspace_name: str, all_agent_ids: list[str]
         "",
         "## Session Bootstrap",
         "",
+        "Before the first watcher-enabled bootstrap, complete:",
+        f"`{ROOT}/docs/workflows/pm2-log-rotation.md`",
+        "",
         f"At the start of every session, run:",
         f"```",
         f"{RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {aid}",
@@ -782,17 +785,18 @@ def main(*, input_fn: Callable[[str], str] | None = None):
 
     divider()
     print("\n[Next steps]\n")
-    print("1. Bootstrap each agent session:")
+    print("1. PM2 log rotation (optional, before watcher-enabled bootstrap):")
+    print("   docs/workflows/pm2-log-rotation.md")
+    print()
+    print("2. Bootstrap each agent session:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
             print(f"   {RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {a['id']}")
     print()
-    print("2. Generate memory snippets for your LLM tools:")
+    print("3. Generate memory snippets for your LLM tools:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
             print(f"   bin/llm-collab init_agent_memory.py --agent {a['id']} --target generic")
-    print()
-    print("3. PM2 log rotation (optional): docs/workflows/pm2-log-rotation.md")
     print()
     print("4. Create your first chat:")
     print('   bin/llm-collab new_chat.py --title "..." --project <project_id>')

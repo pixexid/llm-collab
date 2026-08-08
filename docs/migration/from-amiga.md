@@ -184,7 +184,7 @@ Update CLAUDE.md to point to the new workspace bootstrap:
 <Project_Collaboration>
 Your collaboration workspace: /Users/pixexid/Projects/_collab
 
-Bootstrap: <runtime_root>/bin/llm-collab current_runtime.py --agent claude
+Bootstrap before PM2 cutover: <runtime_root>/bin/llm-collab current_runtime.py --agent claude --no-watcher
 
 If the user says "check your inbox":
   python3 /Users/pixexid/Projects/_collab/bin/inbox.py --me claude --project amiga --limit 5
@@ -197,7 +197,7 @@ If the user says "check your inbox":
 
 ```bash
 # Verify new workspace is operational
-<runtime_root>/bin/llm-collab current_runtime.py --agent codex
+<runtime_root>/bin/llm-collab current_runtime.py --agent codex --no-watcher
 python3 bin/task_board.py --project amiga
 python3 bin/inbox.py --me codex --project amiga
 
@@ -221,11 +221,14 @@ Legacy command compatibility in `llm-collab`:
 cd ~/Projects/amiga_house_cleaning_company_docs/.ai-collaboration
 pm2 stop all
 
-# Start new workspace watchers
+# Enable and start new workspace watchers through the canonical procedure
 cd ~/Projects/_collab
-<runtime_root>/bin/llm-collab pm2_watchers.py start --all
-<runtime_root>/bin/llm-collab pm2_watchers.py status --all
 ```
+
+From the new workspace, complete the canonical
+[PM2 Log Rotation workflow](../workflows/pm2-log-rotation.md). It owns the
+archive gate, configuration, start, and coverage verification for the new
+watchers.
 
 Old PM2 apps are named `amiga-collab-{agent}`. New apps are named `{workspace_name}-{agent}`. They can coexist during cutover.
 
@@ -274,7 +277,8 @@ python3 scripts/migrate_from_amiga.py \
 
 ## Rollback
 
-To roll back to the Amiga workspace:
+To roll back to the Amiga workspace (an explicit legacy recovery path, not a
+new `llm-collab` watcher setup):
 
 1. Stop new workspace watchers: `<runtime_root>/bin/llm-collab pm2_watchers.py stop --all`
 2. Restart old watchers: `cd {amiga}/.ai-collaboration && pm2 start pm2/ecosystem.config.cjs`

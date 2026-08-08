@@ -2,12 +2,14 @@
 """
 pm2_watchers.py — Manage PM2-based persistent inbox watchers.
 
+Enable watchers through docs/workflows/pm2-log-rotation.md so the archive and
+rotation gate precedes the first start. The manager implements that workflow;
+its usage examples below are non-creating operations only.
+
 PM2 app names use the pattern: {workspace_name}-{agent_id}
 (workspace_name from collab.config.json)
 
 Usage:
-  python bin/pm2_watchers.py start --agent orchestrator
-  python bin/pm2_watchers.py ensure --agent orchestrator   # start if not running
   python bin/pm2_watchers.py status --all
   python bin/pm2_watchers.py stop --agent orchestrator
   python bin/pm2_watchers.py logs --agent orchestrator --lines 50

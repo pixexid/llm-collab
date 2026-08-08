@@ -352,8 +352,11 @@ binding can still receive messages.
 
 PM2 watcher:
 
+If the managed watcher is not already online, enable it through the canonical
+[PM2 Log Rotation workflow](pm2-log-rotation.md) before continuing. This
+runbook does not carry a second start procedure.
+
 ```bash
-<runtime_root>/bin/llm-collab pm2_watchers.py ensure --agent codex
 <runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex
 <runtime_root>/bin/llm-collab pm2_watchers.py logs --agent codex --lines 100
 ```

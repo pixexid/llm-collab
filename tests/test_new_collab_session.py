@@ -71,13 +71,14 @@ class WakeChannelTest(unittest.TestCase):
 
 
 class CoworkerPromptTest(unittest.TestCase):
-    def test_codex_prompt_arms_the_watcher(self):
+    def test_codex_prompt_routes_watcher_start_through_canonical_workflow(self):
         # A Codex co-worker is onboarded onto routine dispatch, not polling.
         activation = {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}
         p = ncs.coworker_prompt("codex", ncs.wake_channel(activation),
                                 "llm-collab", "CHAT-ABCD1234", "app", "codex_app",
                                 ncs.needs_dispatch_wake(activation))
-        self.assertIn("pm2_watchers.py ensure --agent codex", p)
+        self.assertIn("docs/workflows/pm2-log-rotation.md", p)
+        self.assertIn("pm2_watchers.py status --agent codex", p)
         self.assertNotIn("NO native session watcher", p)
         # the register step still names the exact session; only the WATCHER is
         # agent-wide, because that is the one that dispatches.
@@ -90,7 +91,7 @@ class CoworkerPromptTest(unittest.TestCase):
         self.assertIn("--runtime-home <YOUR_HOME_FROM_STEP_1>", p)
         self.assertLess(
             p.index("session_autobridge.py register"),
-            p.rindex("pm2_watchers.py ensure --agent codex"),
+            p.rindex("pm2_watchers.py status --agent codex"),
         )
 
     def test_watcher_prompt_arms_watcher(self):
@@ -160,20 +161,21 @@ class PickupBlockTest(unittest.TestCase):
         # Assert on the COMMAND lines, not the block: the explanatory comment
         # legitimately contains the string "--session".
         command = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
-        # The MANAGED singleton, not a raw poller: pm2 already runs one watcher
+        # The MANAGED singleton, not a raw poller: PM2 owns one watcher
         # per watcher_enabled agent, and a second agent-wide poller would
         # double-dispatch, since dispatch_session reads processed_messages
         # before invoking the runtime and records the path after
         # (PR #559 r3725819269).
-        self.assertIn("pm2_watchers.py ensure --agent codex", command)
+        self.assertIn("pm2_watchers.py status --agent codex", command)
         self.assertNotIn("watch_inbox.py", command)
-        # Transport setup now precedes registration, so pickup only ensures the
-        # dispatching watcher and cannot repeat transport setup too late.
+        # Pickup reports status; a missing watcher routes through the canonical
+        # archive/config/start procedure named in the comment block.
+        self.assertIn("docs/workflows/pm2-log-rotation.md", block)
         cmds = [l.strip() for l in command.splitlines() if l.strip()]
         self.assertEqual(
-            [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
+            [f"{ncs.LAUNCH} pm2_watchers.py status --agent codex"],
             cmds,
-            "pickup must only ensure the watcher after transport and registration",
+            "pickup must inspect the watcher after transport and registration",
         )
         self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
@@ -257,7 +259,8 @@ class MainPathTest(unittest.TestCase):
         # initiator (codex) section is before the coworker section.
         initiator = out.split("SETUP PROMPT")[0]
         # The managed singleton, not a raw per-chat poller (r3725819269).
-        self.assertIn("pm2_watchers.py ensure --agent codex", initiator)
+        self.assertIn("docs/workflows/pm2-log-rotation.md", initiator)
+        self.assertIn("pm2_watchers.py status --agent codex", initiator)
         self.assertNotIn("NO native session watcher", initiator)
 
     def test_codex_initiator_ensures_transport_before_registration(self):

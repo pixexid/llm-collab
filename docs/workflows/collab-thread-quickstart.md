@@ -144,6 +144,10 @@ python bin/deliver.py --project demo-app --chat CHAT-2F8529C5   --from codex --t
 
 ## 1. Bootstrap
 
+For a workspace's first watcher-enabled bootstrap, complete the canonical
+[PM2 Log Rotation workflow](pm2-log-rotation.md) first. The command below may
+restart the agent's PM2 watcher.
+
 ```bash
 <runtime_root>/bin/llm-collab current_runtime.py --agent <agent_id>
 ```

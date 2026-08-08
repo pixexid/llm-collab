@@ -84,8 +84,11 @@ class InitWorkspaceIdTest(unittest.TestCase):
 
         workflow_path = "docs/workflows/pm2-log-rotation.md"
         self.assertIn(
-            f"3. PM2 log rotation (optional): {workflow_path}", output.splitlines()
+            "1. PM2 log rotation (optional, before watcher-enabled bootstrap):",
+            output.splitlines(),
         )
+        self.assertIn(f"   {workflow_path}", output.splitlines())
+        self.assertLess(output.index(workflow_path), output.index("2. Bootstrap each agent session:"))
         self.assertNotIn("pm2 install", output)
         self.assertNotIn("pm2 set", output)
         self.assertNotIn("pm2 trigger", output)
