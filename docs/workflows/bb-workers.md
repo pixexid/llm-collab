@@ -7,6 +7,11 @@ work isolated, exchanges results, and distinguishes completion from a stalled
 turn. Model selection is separate; use
 [`bb-worker-profiles.md`](bb-worker-profiles.md) for that policy.
 
+`bin/bb_spawn.py` is the only sanctioned assignment-spawn path; it implements
+the spawn gate for this workflow and records the resulting assignment. The
+native `bb thread spawn` examples below document the lifecycle shape only and
+must not be invoked as an alternate spawn path.
+
 ## What a BB worker is
 
 A BB worker is a provider-backed BB thread acting for the orchestrator on one

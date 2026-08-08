@@ -334,7 +334,15 @@ class BbClient:
     # ---- operations ----------------------------------------------------
 
     def spawn(
-        self, *, project_id: str, prompt: str, profile: BbProfile
+        self,
+        *,
+        project_id: str,
+        prompt: str,
+        profile: BbProfile,
+        environment: str | None = None,
+        base_sha: str | None = None,
+        permission_mode: str | None = None,
+        title: str | None = None,
     ) -> BbThread | BbRefusal:
         """Create one bb thread with an explicitly supplied profile.
 
@@ -353,6 +361,11 @@ class BbClient:
         refusal = self._gate()
         if refusal is not None:
             return refusal
+        if environment is not None and base_sha is not None:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                "spawn cannot attach an environment and create a worktree together",
+            )
         argv = [
             "thread",
             "spawn",
@@ -364,10 +377,16 @@ class BbClient:
             profile.model,
             "--reasoning-level",
             profile.reasoning_level,
-            "--prompt",
-            prompt,
-            "--json",
         ]
+        if base_sha is not None:
+            argv += ["--new-environment", "worktree", "--base-branch", base_sha]
+        elif environment is not None:
+            argv += ["--environment", environment]
+        if permission_mode is not None:
+            argv += ["--permission-mode", permission_mode]
+        if title is not None:
+            argv += ["--title", title]
+        argv += ["--prompt", prompt, "--json"]
         payload = self._task_json(argv)
         if isinstance(payload, BbRefusal):
             return payload
@@ -399,6 +418,12 @@ class BbClient:
             return orphan(
                 REFUSAL_IDENTITY_MISMATCH,
                 f"requested project {project_id!r}; bb reported {thread.project_id!r}",
+            )
+        if environment is not None and thread.environment_id != environment:
+            return orphan(
+                REFUSAL_IDENTITY_MISMATCH,
+                f"requested environment {environment!r}; "
+                f"bb reported {thread.environment_id!r}",
             )
         if thread.provider_id != profile.provider:
             return orphan(
