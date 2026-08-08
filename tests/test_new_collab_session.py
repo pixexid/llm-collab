@@ -371,15 +371,74 @@ class MainPathTest(unittest.TestCase):
                 ncs.main()
             sh.rmtree.assert_called_once()  # orphan chat rolled back
 
-    def test_transport_failure_rolls_back_the_chat_before_registration(self):
+    def test_pm2_start_must_succeed_and_be_online_before_registration(self):
+        import pm2_watchers
+
         argv = ["--project", "p", "--title", "t", "--me", "codex",
                 "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
                 "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
 
+        cases = {
+            "start failed": [
+                type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 7, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})(),
+            ],
+            "start returned zero but app stayed offline": [
+                type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "stopped", "stderr": ""})(),
+            ],
+        }
+        for label, pm2_results in cases.items():
+            with self.subTest(label):
+                results = iter(pm2_results)
+
+                def run(cmd, **kwargs):
+                    if cmd[1].endswith("new_chat.py"):
+                        return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+                    try:
+                        with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
+                             patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                             patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=["codex-appserver"]), \
+                             patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                             patch.object(pm2_watchers, "pm2_run", side_effect=results):
+                            pm2_watchers.main()
+                    except SystemExit as exc:
+                        return type("R", (), {"returncode": exc.code, "stdout": "", "stderr": "transport unavailable"})()
+                    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+                     patch.object(ncs, "ensure_project", return_value=None), \
+                     patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+                     patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+                     patch.object(ncs, "preflight_starter_binding", return_value=None), \
+                     patch.object(ncs, "register_session") as register, \
+                     patch.object(ncs, "shutil") as sh, \
+                     patch.object(ncs.subprocess, "run", side_effect=run):
+                    with self.assertRaisesRegex(SystemExit, "transport unavailable"):
+                        ncs.main()
+
+                register.assert_not_called()
+                sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+
+    def test_transport_timeout_rolls_back_instead_of_hanging(self):
+        import threading
+
+        argv = ["--project", "p", "--title", "t", "--me", "codex",
+                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+        seen_timeouts = []
+
         def run(cmd, **kwargs):
             if cmd[1].endswith("new_chat.py"):
                 return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
-            return type("R", (), {"returncode": 2, "stdout": "", "stderr": "sidecar unavailable"})()
+            timeout = kwargs.get("timeout")
+            seen_timeouts.append(timeout)
+            threading.Event().wait(0.01)  # fake a blocked token read without a real hung mount
+            if timeout is None:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
         with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
              patch.object(ncs, "ensure_project", return_value=None), \
@@ -389,9 +448,10 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "register_session") as register, \
              patch.object(ncs, "shutil") as sh, \
              patch.object(ncs.subprocess, "run", side_effect=run):
-            with self.assertRaisesRegex(SystemExit, "sidecar unavailable"):
+            with self.assertRaisesRegex(SystemExit, "timed out after 50s"):
                 ncs.main()
 
+        self.assertEqual([ncs.CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS], seen_timeouts)
         register.assert_not_called()
         sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
 

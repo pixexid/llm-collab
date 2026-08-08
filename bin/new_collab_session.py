@@ -186,12 +186,24 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
         raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
 
 
+CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 50
+
+
 def ensure_codex_transport() -> None:
-    r = subprocess.run(
-        [sys.executable, str(BIN / "pm2_watchers.py"), "ensure",
-         "--agent", "codex-appserver"],
-        capture_output=True, text=True,
-    )
+    cmd = [sys.executable, str(BIN / "pm2_watchers.py"), "ensure",
+           "--agent", "codex-appserver"]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "ensuring Codex app-server transport timed out after "
+            f"{CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"starting Codex app-server transport check failed: {exc}") from exc
     if r.returncode != 0:
         raise RuntimeError(
             f"ensuring Codex app-server transport failed:\n{r.stderr or r.stdout}"
