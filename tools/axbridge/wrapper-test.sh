@@ -69,6 +69,26 @@ line() { grep "^$1 " "$log" || true; }
 count() { grep -c "^$1 " "$log" || true; }
 assert() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1 (rc=$rc)"; fails=$((fails+1)); fi; }
 
+# Invalid polling overrides refuse before the non-idempotent ring. Checking the
+# stub log distinguishes a safe pre-submit refusal from a retry-unsafe failure.
+: > "$log"; : > "$tcount"
+set +e
+AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS=bad \
+  RING_EXIT=7 \
+  "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit >/dev/null 2>&1
+rc=$?
+set -e
+assert "malformed freshness attempts refuse before ring" '(( rc == 64 )) && [[ "$(count ring)" == "0" ]]'
+
+: > "$log"; : > "$tcount"
+set +e
+AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS=bad \
+  RING_EXIT=7 \
+  "$tmp/bin/axsend-ensure" ring --app ZCode --text tok --submit >/dev/null 2>&1
+rc=$?
+set -e
+assert "malformed freshness interval refuses before ring" '(( rc == 64 )) && [[ "$(count ring)" == "0" ]]'
+
 # R2: --window-index forwarding on a successful ring's follow-up confirm.
 run 0 0 0 ring --app Claude --text hi --submit --window-index 0
 assert "explicit --window-index 0 forwarded to confirm" '[[ "$(line confirm)" == *"--window-index 0"* ]]'
