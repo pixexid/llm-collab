@@ -571,10 +571,32 @@ class DaemonTest(unittest.TestCase):
             client.close()
 
     def test_request_peer_closed_errno_class_cannot_narrow(self) -> None:
+        expected = frozenset({errno.EPIPE, errno.ENOTCONN, errno.ECONNRESET})
         self.assertEqual(
             PEER_CLOSED_ERRNOS,
-            frozenset({errno.EPIPE, errno.ENOTCONN, errno.ECONNRESET}),
+            expected,
         )
+        for operation in ("sendall", "shutdown"):
+            for accepted_errno in expected:
+                client = MagicMock()
+                getattr(client, operation).side_effect = OSError(accepted_errno, "peer closed")
+                client.recv.return_value = b"{}"
+                with self.subTest(operation=operation, errno=accepted_errno), patch.object(
+                    socket, "socket", return_value=client
+                ):
+                    try:
+                        result = self.request(b"request")
+                    except OSError as exc:
+                        self.fail(f"{operation} propagated in-class errno {accepted_errno}: {exc}")
+                    self.assertEqual(result, {})
+
+            client = MagicMock()
+            getattr(client, operation).side_effect = OSError(errno.EINVAL, "outside class")
+            with self.subTest(operation=operation, errno=errno.EINVAL), patch.object(
+                socket, "socket", return_value=client
+            ), self.assertRaises(OSError) as caught:
+                self.request(b"request")
+            self.assertEqual(caught.exception.errno, errno.EINVAL)
 
     @contextlib.contextmanager
     def daemon(self, *, peer=None):
