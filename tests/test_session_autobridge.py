@@ -1617,6 +1617,49 @@ class SessionAutobridgeTest(unittest.TestCase):
                 mark_read.assert_not_called()
         self.assertEqual(expected, reported)
 
+    def test_settled_scope_refusal_reports_diagnostic_failure_in_text(self):
+        session, message, result, _, _, _ = self._settled_action_diagnostic_report(
+            "runtime_trigger",
+            runtime_result={"returncode": 0, "delivery_accepted": True},
+        )
+        text_output = StringIO()
+        with patch.object(
+            watch_inbox_lib,
+            "autobridge_session_ids",
+            return_value=[session["session_id"]],
+        ), patch.object(
+            watch_inbox_lib,
+            "load_session",
+            return_value=session,
+        ), patch.object(
+            watch_inbox_lib,
+            "session_has_exact_canonical_binding",
+            return_value=True,
+        ), patch.object(
+            watch_inbox_lib,
+            "dispatch_session",
+            return_value=result,
+        ), patch.object(watch_inbox_lib, "mark_messages_read") as mark_read, redirect_stdout(
+            text_output
+        ):
+            consumed = watch_inbox_lib.dispatch_autobridge(
+                "gemini",
+                json_output=False,
+                repo_targets=["app"],
+                refusal_progress={},
+                refusal_stats={},
+            )
+
+        self.assertEqual([], consumed)
+        mark_read.assert_not_called()
+        refusal_line = next(
+            line
+            for line in text_output.getvalue().splitlines()
+            if "autobridge_repo_scope_refused" in line
+        )
+        self.assertIn(f"{message['path']} diagnostic_errors=", refusal_line)
+        self.assertIn('"detail":"runtime_trigger event fsync failed"', refusal_line)
+
     def test_leased_dispatch_still_settles_before_event_failure(self):
         session = {
             "session_id": "SESSION-LEASED-EVENT-FAILURE",

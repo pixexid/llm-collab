@@ -928,82 +928,83 @@ def dispatch_autobridge(
                 "session_id": session_id,
                 "message_path": action["message_path"],
             }
-            runtime_result = action.get("runtime_result") or {}
-            runtime_ok = runtime_result.get("returncode") == 0
-            if (
-                action.get("effective_action") == "runtime_trigger"
-                and runtime_delivery_accepted(runtime_result)
-            ):
-                # Stored session scope was already checked by dispatch_session;
-                # an explicit watcher scope is rechecked at the read boundary.
-                effective_repo_targets = repo_targets
-                message_path = ROOT / action["message_path"]
-                frontmatter: dict = {}
-                observed_mtime = None
-                if effective_repo_targets is None:
-                    repo_match, repo_reason = True, "unscoped"
-                else:
-                    try:
-                        message_raw, observed_mtime = read_regular_file_bounded_with_identity(
-                            message_path, MAX_DISPATCH_PACKET_BYTES
-                        )
-                        frontmatter, _ = parse_frontmatter(message_raw.decode("utf-8"))
-                        repo_match, repo_reason = repo_scope_matches(
-                            effective_repo_targets,
-                            frontmatter.get("repo_targets"),
-                            subscriber_project=project_id,
+            try:
+                runtime_result = action.get("runtime_result") or {}
+                runtime_ok = runtime_result.get("returncode") == 0
+                if (
+                    action.get("effective_action") == "runtime_trigger"
+                    and runtime_delivery_accepted(runtime_result)
+                ):
+                    # Stored session scope was already checked by dispatch_session;
+                    # an explicit watcher scope is rechecked at the read boundary.
+                    effective_repo_targets = repo_targets
+                    message_path = ROOT / action["message_path"]
+                    frontmatter: dict = {}
+                    observed_mtime = None
+                    if effective_repo_targets is None:
+                        repo_match, repo_reason = True, "unscoped"
+                    else:
+                        try:
+                            message_raw, observed_mtime = read_regular_file_bounded_with_identity(
+                                message_path, MAX_DISPATCH_PACKET_BYTES
+                            )
+                            frontmatter, _ = parse_frontmatter(message_raw.decode("utf-8"))
+                            repo_match, repo_reason = repo_scope_matches(
+                                effective_repo_targets,
+                                frontmatter.get("repo_targets"),
+                                subscriber_project=project_id,
+                                packet_project=frontmatter.get("project_id"),
+                            )
+                        except Exception:
+                            repo_match, repo_reason = False, "route_ambiguous"
+                    if not repo_match:
+                        # Fail-closed is unconditional: the message is ALWAYS refused
+                        # here. Only whether we log it again is deduped.
+                        if record_refusal(
+                            action["message_path"],
+                            repo_reason,
+                            packet_repo_targets=frontmatter.get("repo_targets"),
                             packet_project=frontmatter.get("project_id"),
-                        )
-                    except Exception:
-                        repo_match, repo_reason = False, "route_ambiguous"
-                if not repo_match:
-                    # Fail-closed is unconditional: the message is ALWAYS refused
-                    # here. Only whether we log it again is deduped.
-                    if record_refusal(
-                        action["message_path"],
-                        repo_reason,
-                        packet_repo_targets=frontmatter.get("repo_targets"),
-                        packet_project=frontmatter.get("project_id"),
-                        session_scope=session_scope,
-                        packet_mtime=observed_mtime,
-                        track_packet_mtime=observed_mtime is not None,
-                    ):
-                        emit(
-                            {
-                                "ts": utc_now_str(),
-                                "event": "autobridge_repo_scope_refused",
-                                "detail": action["message_path"],
-                                "agent": agent_id,
-                                "session_id": session_id,
-                                "message_path": action["message_path"],
-                                "reason": repo_reason,
-                            },
-                            json_output,
-                        )
+                            session_scope=session_scope,
+                            packet_mtime=observed_mtime,
+                            track_packet_mtime=observed_mtime is not None,
+                        ):
+                            action_event.update(
+                                event="autobridge_repo_scope_refused",
+                                reason=repo_reason,
+                            )
+                        continue
+                    consumed_paths.append(action["message_path"])
+                    action_event["event"] = "autobridge_consumed"
+                elif (
+                    action.get("effective_action") == "runtime_trigger"
+                    and runtime_ok
+                    and not runtime_result.get("skipped")
+                ):
+                    action_event["event"] = "autobridge_wake_signaled"
+                elif action.get("effective_action") == "runtime_trigger":
+                    action_event.update(
+                        event="autobridge_failed",
+                        returncode=runtime_result.get("returncode"),
+                    )
+                elif action.get("diagnostic_errors"):
+                    action_event.update(
+                        event="autobridge_diagnostic_error",
+                        effective_action=action.get("effective_action"),
+                    )
+                else:
                     continue
-                consumed_paths.append(action["message_path"])
-                action_event["event"] = "autobridge_consumed"
-            elif (
-                action.get("effective_action") == "runtime_trigger"
-                and runtime_ok
-                and not runtime_result.get("skipped")
-            ):
-                action_event["event"] = "autobridge_wake_signaled"
-            elif action.get("effective_action") == "runtime_trigger":
-                action_event.update(
-                    event="autobridge_failed",
-                    returncode=runtime_result.get("returncode"),
-                )
-            elif action.get("diagnostic_errors"):
-                action_event.update(
-                    event="autobridge_diagnostic_error",
-                    effective_action=action.get("effective_action"),
-                )
-            else:
-                continue
-            if action.get("diagnostic_errors"):
-                action_event["diagnostic_errors"] = action["diagnostic_errors"]
-            emit(action_event, json_output)
+            finally:
+                # Every exit from action classification runs this reporting guard.
+                if action.get("diagnostic_errors"):
+                    if not action_event.get("event"):
+                        action_event.update(
+                            event="autobridge_diagnostic_error",
+                            effective_action=action.get("effective_action"),
+                        )
+                    action_event["diagnostic_errors"] = action["diagnostic_errors"]
+                if action_event.get("event"):
+                    emit(action_event, json_output)
     # Marking belongs OUTSIDE the per-session loop. Inside it, any session that
     # took an early `continue` -- which is exactly what a bootstrap-only delivery
     # does, because the session it just published already lists the packet in
