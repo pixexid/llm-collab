@@ -1583,14 +1583,31 @@ class SessionAutobridgeTest(unittest.TestCase):
                 },
                 json_output=False,
             )
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:03",
+                    "event": "autobridge_refusal_summary",
+                    "detail": "1 already-refused message(s) skipped",
+                    "agent": "codex",
+                    "suppressed_by_reason": {"repo_scope_mismatch": 1},
+                    "new_refusals": 0,
+                },
+                json_output=False,
+            )
 
+        expected = [
+            '[2026-08-08T12:00:00] future_event: ready data={"new_field":{"visible":true}}',
+            '[2026-08-08T12:00:01] new_message: Chats/CHAT-ONE/packet.md data={"agent":"codex"}',
+            "[2026-08-08T12:00:02] bb_observation: idle",
+            "[2026-08-08T12:00:03] autobridge_refusal_summary: 1 already-refused message(s) skipped",
+        ]
+        rendered = text_output.getvalue().splitlines()
+        self.assertEqual(len(expected[2]), len(rendered[2]))
+        self.assertEqual(len(expected[3]), len(rendered[3]))
+        self.assertEqual(expected, rendered)
         self.assertEqual(
-            [
-                '[2026-08-08T12:00:00] future_event: ready data={"new_field":{"visible":true}}',
-                '[2026-08-08T12:00:01] new_message: Chats/CHAT-ONE/packet.md data={"agent":"codex"}',
-                "[2026-08-08T12:00:02] bb_observation: idle",
-            ],
-            text_output.getvalue().splitlines(),
+            frozenset({"autobridge_refusal_summary", "bb_observation"}),
+            watch_inbox_lib.DETAIL_ONLY_TEXT_EVENTS,
         )
 
     def test_settled_wake_reports_diagnostic_failure(self):

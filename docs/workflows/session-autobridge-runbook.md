@@ -391,12 +391,13 @@ An `append_event` failure after packet settlement does not change the action
 outcome. Existing per-action events such as `autobridge_consumed` and
 `autobridge_wake_signaled` carry a `diagnostic_errors` list. The default text
 log keeps `ts`, `event`, and `detail` in its scan-friendly prefix, then appends
-every other event field in one compact `data={...}` JSON object. The healthy
-per-poll `bb_observation` event is the sole detail-only exception, avoiding a
-133-byte increment on every poll while GH-664 tracks bounding the PM2 log sink.
-This is an event-class gate, not a field allow-list: diagnostic and unknown
-events expose new structured fields by default. A settled relay, notify, or
-manual no-op has no ordinary per-action event, so it emits
+every other event field in one compact `data={...}` JSON object. Exactly two
+unchanged-state, per-poll events stay detail-only: `bb_observation` and
+`autobridge_refusal_summary`. This avoids their permanent payload increment
+while GH-664 tracks bounding the PM2 log sink. This is an event-class gate, not
+a field allow-list: action, refusal, error, diagnostic, and unknown events
+expose new structured fields by default. A settled relay, notify, or manual
+no-op has no ordinary per-action event, so it emits
 `autobridge_diagnostic_error` with `effective_action` and `diagnostic_errors`
 instead.
 
