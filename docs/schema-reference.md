@@ -1567,6 +1567,8 @@ chat/session turnover.
     {
       "order": 1,
       "issue": 101,
+      "priority_label": null,
+      "priority_rank": null,
       "task_id": "TASK-READY1",
       "title": "first ready implementation lane",
       "owner": "worker",
@@ -1601,6 +1603,8 @@ chat/session turnover.
 |-------|------|-------------|
 | `order` | int | Canonical queue order; contiguous starting at 1 |
 | `issue` | int | GitHub issue number |
+| `priority_label` | string or null | Always emitted. The first configured `github.backlog.priority_labels` entry matching the issue, preserving the configured spelling; null when no entry matches or `priority_labels` is absent or empty. |
+| `priority_rank` | int or null | Always emitted. One-based position of `priority_label` in the configured list; null when `priority_label` is null. |
 | `task_id` | string | Local task mirror id |
 | `title` | string | Short lane title |
 | `owner` | string | Assigned collaborator |
