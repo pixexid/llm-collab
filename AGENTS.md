@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 13 -->
+<!-- CONTRACT_VERSION: 14 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -45,21 +45,24 @@ workflows below.
 
 ### Recent contract changes
 
-GH-590 (2026-08-07) makes send-time routing admission fail closed before
-durability. A packet is admitted only when `deliver.py` resolves an exact target,
-selects the valid Codex AX fallback, or classifies the recipient as an explicit
-unbound broadcast (`operator`, or watcher-disabled `human`/`human_relay`). Every
-other unresolved route exits 2 with `delivery_refused: true`, `durable_write:
-false`, and a typed `routing_refusal_reason`; it writes no chat packet, sender
-copy, inbox pointer, awareness state, thread pair, or chat note. An admitted
-unbound broadcast reports `routing_mode: broadcast` — an unrouted success is
-never implicit.
+Contract v14 (2026-08-08) makes send-time routing admission fail closed before
+durability. `deliver.py` admits only an exact target, a valid Codex AX fallback,
+or the documented explicit broadcast; every other unresolved route refuses
+before any durable write. An admitted broadcast identifies itself, and
+exact-session readers remain exact rather than consuming null-targeted worker
+packets. Canonical route fields and refusal semantics live in
+[`Message file schema`](docs/schema-reference.md#message-file-schema); sender
+procedure and dispatch proof live in
+[`Send a packet`](docs/workflows/collab-thread-quickstart.md#4-send-a-packet).
 
-This is send admission, not watcher compatibility. Exact-session readers remain
-exact and never consume null-targeted worker packets. Contract v12's AX
-precedence and terminal-state predicate remain unchanged: unreadable bindings
-and scope refusals suppress AX, while an eligible Codex AX target is a route and
-therefore is not rejected merely for lacking a binding.
+The version bump makes the changed rule visible to cached workers. On 2026-08-05
+a Pi worker sent two packets to Claude: both were written durably, both reported
+success, and both carried `target_session_id: null`. They were found only by
+reading the chat directory by hand after the sender asked why there had been no
+reply, costing 35 minutes on a merge-blocking lane. The old contract explicitly
+taught silent unbound dispatch, so correcting its text without a version signal
+would repeat the stale-copy failure this marker exists to prevent. Related
+GH-590, GH-554, and GH-535.
 
 Contract v13 (2026-08-07) corrects the lane WIP cap to count **writing lanes
 only**. Read-only lanes — audits, probes, scoping, and reviews with no branch and
@@ -98,7 +101,7 @@ lane may wake a recipient whose authoritative record could not be read or whose
 scope forbids the packet. Those are repairs; do not try to ring through them.
 
 An unbound recipient may still take the Codex AX fallback when eligible. If no
-AX or explicit broadcast route exists, GH-590 refuses before the durable
+AX or explicit broadcast route exists, contract v14 refuses before the durable
 write instead of producing the former silent `exact_binding_required` dispatch
 failure.
 
