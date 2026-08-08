@@ -87,6 +87,7 @@ class CoworkerPromptTest(unittest.TestCase):
             p.index("pm2_watchers.py ensure --agent codex-appserver"),
             p.index("session_autobridge.py register"),
         )
+        self.assertIn("--runtime-home <YOUR_HOME_FROM_STEP_1>", p)
         self.assertLess(
             p.index("session_autobridge.py register"),
             p.rindex("pm2_watchers.py ensure --agent codex"),
@@ -425,27 +426,52 @@ class MainPathTest(unittest.TestCase):
     def test_documented_readyz_probe_fails_http_errors_and_uses_configured_port(self):
         import pm2_watchers
 
-        ready = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        ready = type("R", (), {"returncode": 0, "stdout": "200", "stderr": ""})()
         with patch.object(pm2_watchers.shutil, "which", return_value="/usr/bin/curl"), \
              patch.dict(pm2_watchers.os.environ, {"LLM_COLLAB_CODEX_APP_SERVER_PORT": "8791"}), \
              patch.object(pm2_watchers.subprocess, "run", return_value=ready) as run:
             self.assertTrue(pm2_watchers.codex_sidecar_is_ready())
 
         run.assert_called_once_with(
-            ["/usr/bin/curl", "--fail", "--silent", "http://127.0.0.1:8791/readyz"],
+            ["/usr/bin/curl", "--silent", "--output", "/dev/null", "--write-out",
+             "%{http_code}", "http://127.0.0.1:8791/readyz"],
             capture_output=True,
             text=True,
             timeout=pm2_watchers.SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS,
         )
 
-    def _run_codex_registration_with_readyz_statuses(self, statuses):
+        identity_result = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with patch.dict(pm2_watchers.os.environ, {"LLM_COLLAB_CODEX_APP_SERVER_PORT": "8791"}), \
+             patch.object(pm2_watchers.subprocess, "run", return_value=identity_result) as identity:
+            pm2_watchers.verify_codex_sidecar_runtime_home("/Users/test/.codex")
+
+        identity.assert_called_once_with(
+            [
+                sys.executable,
+                str(pm2_watchers.ROOT / "bin" / "codex_app_server_identity_probe.py"),
+                "--endpoint", "ws://127.0.0.1:8791",
+                "--expected-runtime-home", "/Users/test/.codex",
+                "--token-file", str(pm2_watchers.sidecar_token_file()),
+                "--timeout-seconds", str(pm2_watchers.SIDECAR_IDENTITY_TIMEOUT_SECONDS),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=pm2_watchers.SIDECAR_IDENTITY_PROCESS_TIMEOUT_SECONDS,
+        )
+
+    def _run_codex_registration_with_readyz_statuses(
+        self, statuses, *, served_home="/Users/test/.codex"
+    ):
         import contextlib
         import io
         import pm2_watchers
+        import codex_app_server_identity_probe as identity_probe
+        import llm_collab.codex_app_server_live_probe as live_probe
 
         self.assertTrue(statuses)
         argv = ["--project", "p", "--title", "t", "--me", "codex",
                 "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--my-runtime-home", "/Users/test/.codex",
                 "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
         pm2_results = iter([
             type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
@@ -455,6 +481,19 @@ class MainPathTest(unittest.TestCase):
         status_results = iter(statuses)
         last_status = statuses[-1]
         curl_commands = []
+
+        class IdentityTransport:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def exchange(self, frame):
+                return {"id": frame["id"], "result": {"codexHome": served_home}}
+
+            def notify(self, _frame):
+                return None
 
         def run(cmd, **kwargs):
             nonlocal last_status
@@ -467,11 +506,18 @@ class MainPathTest(unittest.TestCase):
                 except StopIteration:
                     pass
                 return type("R", (), {
-                    "returncode": 22 if last_status >= 400 and "--fail" in cmd else 0,
-                    "stdout": "", "stderr": f"HTTP {last_status}",
+                    "returncode": 0,
+                    "stdout": str(last_status), "stderr": f"HTTP {last_status}",
                 })()
+            if cmd[1].endswith("codex_app_server_identity_probe.py"):
+                with patch.object(sys, "argv", ["codex_app_server_identity_probe.py", *cmd[2:]]), \
+                     patch.object(identity_probe, "_codex_app_server_token", return_value="test-token"), \
+                     patch.object(live_probe, "_WebSocketJsonRpcTransport",
+                                  return_value=IdentityTransport()):
+                    returncode = identity_probe.main()
+                return type("R", (), {"returncode": returncode, "stdout": "", "stderr": ""})()
             try:
-                with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
+                with patch.object(sys, "argv", ["pm2_watchers.py", *cmd[2:]]), \
                      patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
                      patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=["codex-appserver"]), \
                      patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
@@ -517,6 +563,14 @@ class MainPathTest(unittest.TestCase):
         sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
         self.assertGreaterEqual(len(curl_commands), 1)
 
+    def test_readyz_302_prevents_registration_and_rolls_back(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([302])
+
+        self.assertIn("transport unavailable", str(error))
+        register.assert_not_called()
+        sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+        self.assertGreaterEqual(len(curl_commands), 1)
+
     def test_readyz_200_allows_registration(self):
         error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([200])
 
@@ -532,6 +586,16 @@ class MainPathTest(unittest.TestCase):
         register.assert_called_once()
         sh.rmtree.assert_not_called()
         self.assertEqual(2, len(curl_commands))
+
+    def test_readyz_200_with_different_runtime_home_rolls_back(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses(
+            [200], served_home="/Users/other/.codex"
+        )
+
+        self.assertIn("transport unavailable", str(error))
+        register.assert_not_called()
+        sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+        self.assertEqual(1, len(curl_commands))
 
     def test_transport_timeout_rolls_back_instead_of_hanging(self):
         import threading
@@ -559,7 +623,7 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "register_session") as register, \
              patch.object(ncs, "shutil") as sh, \
              patch.object(ncs.subprocess, "run", side_effect=run):
-            with self.assertRaisesRegex(SystemExit, "timed out after 65s"):
+            with self.assertRaisesRegex(SystemExit, "timed out after 70s"):
                 ncs.main()
 
         self.assertEqual([ncs.CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS], seen_timeouts)

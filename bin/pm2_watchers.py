@@ -41,12 +41,13 @@ from _helpers import (
     get_agent,
     watcher_enabled_agents,
 )
-
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
 SIDECAR_READINESS_TIMEOUT_SECONDS = 15
 SIDECAR_READINESS_POLL_SECONDS = 0.25
 SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS = 1
+SIDECAR_IDENTITY_TIMEOUT_SECONDS = 5
+SIDECAR_IDENTITY_PROCESS_TIMEOUT_SECONDS = 6
 
 # The blank set for token CONTENT, pinned explicitly because neither language's default
 # matches the CLI and the two defaults are inverted from each other. Python's str.strip()
@@ -69,6 +70,7 @@ def parse_args():
     g.add_argument("--agent", help="Agent ID")
     g.add_argument("--all", action="store_true", help="Apply to all watcher-enabled agents")
     p.add_argument("--lines", type=int, default=40, help="Lines for logs command")
+    p.add_argument("--runtime-home", help="Expected Codex app-server runtime home")
     return p.parse_args()
 
 
@@ -273,7 +275,9 @@ def ecosystem_path() -> Path:
     return RUNTIME_ROOT / "pm2" / "ecosystem.config.cjs"
 
 
-def codex_sidecar_is_ready() -> bool:
+def codex_sidecar_is_ready(
+    *, timeout_seconds: float = SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS
+) -> bool:
     curl = shutil.which("curl")
     if not curl:
         print("[error] curl not found; cannot probe Codex app-server readiness", file=sys.stderr)
@@ -281,20 +285,33 @@ def codex_sidecar_is_ready() -> bool:
     port = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_PORT", "8767")
     try:
         result = subprocess.run(
-            [curl, "--fail", "--silent", f"http://127.0.0.1:{port}/readyz"],
+            [
+                curl,
+                "--silent",
+                "--output",
+                os.devnull,
+                "--write-out",
+                "%{http_code}",
+                f"http://127.0.0.1:{port}/readyz",
+            ],
             capture_output=True,
             text=True,
-            timeout=SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0
+    return result.returncode == 0 and result.stdout == "200"
 
 
 def wait_for_codex_sidecar_readiness() -> None:
     deadline = time.monotonic() + SIDECAR_READINESS_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if codex_sidecar_is_ready():
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if codex_sidecar_is_ready(
+            timeout_seconds=min(SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS, remaining)
+        ):
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -306,6 +323,38 @@ def wait_for_codex_sidecar_readiness() -> None:
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+def verify_codex_sidecar_runtime_home(expected_runtime_home: str) -> None:
+    port = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_PORT", "8767")
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "bin" / "codex_app_server_identity_probe.py"),
+                "--endpoint",
+                f"ws://127.0.0.1:{port}",
+                "--expected-runtime-home",
+                expected_runtime_home,
+                "--token-file",
+                str(sidecar_token_file()),
+                "--timeout-seconds",
+                str(SIDECAR_IDENTITY_TIMEOUT_SECONDS),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SIDECAR_IDENTITY_PROCESS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[error] Codex app-server identity probe failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if result.returncode != 0:
+        print(
+            f"[error] Codex app-server identity probe failed: "
+            f"{result.stderr or result.stdout}",
+            file=sys.stderr,
+        )
+        sys.exit(result.returncode)
 
 
 def start_agent(agent_id: str) -> None:
@@ -327,7 +376,7 @@ def start_agent(agent_id: str) -> None:
         sys.exit(status.returncode or 1)
 
 
-def ensure_agent(agent_id: str) -> None:
+def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
     result = pm2_run(["describe", app_name(agent_id)], capture_output=True)
     if "online" in result.stdout.lower():
         print(f"[watcher] {agent_id} already running.")
@@ -335,6 +384,8 @@ def ensure_agent(agent_id: str) -> None:
         start_agent(agent_id)
     if is_sidecar(agent_id):
         wait_for_codex_sidecar_readiness()
+        if runtime_home is not None:
+            verify_codex_sidecar_runtime_home(runtime_home)
 
 
 def main():
@@ -413,7 +464,7 @@ def main():
             # definition that the current-runtime gate approved.
             pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
         elif args.command == "ensure":
-            ensure_agent(agent_id)
+            ensure_agent(agent_id, runtime_home=args.runtime_home)
         elif args.command == "stop":
             pm2_run(["stop", name])
         elif args.command == "delete":
