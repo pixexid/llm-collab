@@ -668,9 +668,23 @@ class RewriteBetweenReadAndRecordTest(unittest.TestCase):
 class PerActionRecheckIdentityTest(unittest.TestCase):
     PACKET = b"---\nproject_id: llm-collab\nrepo_targets: [other]\n---\nbody\n"
 
-    def _recorded_refusal(self, read_mtime: float, later_mtime: float):
+    def _recorded_refusal(
+        self,
+        read_mtime: float | None,
+        later_mtime: float,
+        *,
+        packet: bytes | None = None,
+        read_error: Exception | None = None,
+    ):
         import tempfile
         from unittest.mock import patch
+
+        packet = self.PACKET if packet is None else packet
+
+        def read_packet(*_args):
+            if read_error is not None:
+                raise read_error
+            return packet, read_mtime
 
         relative_path = "Chats/x/p.md"
         session = {"session_id": "SESSION-A", "repo_targets": ["app"]}
@@ -684,7 +698,7 @@ class PerActionRecheckIdentityTest(unittest.TestCase):
             root = Path(tmp)
             packet_path = root / relative_path
             packet_path.parent.mkdir(parents=True)
-            packet_path.write_bytes(self.PACKET)
+            packet_path.write_bytes(packet)
             with patch.object(
                 watch_inbox, "ROOT", root
             ), patch.object(
@@ -706,7 +720,7 @@ class PerActionRecheckIdentityTest(unittest.TestCase):
             ), patch.object(
                 watch_inbox,
                 "read_regular_file_bounded_with_identity",
-                return_value=(self.PACKET, read_mtime),
+                side_effect=read_packet,
             ), patch.object(
                 watch_inbox, "_packet_mtime", return_value=later_mtime
             ), patch.object(
@@ -746,3 +760,19 @@ class PerActionRecheckIdentityTest(unittest.TestCase):
 
         self.assertEqual(100.0, entry["mtime"])
         self.assertEqual({path}, terminal)
+
+    def test_read_failure_does_not_fallback_to_a_fresh_path_identity(self) -> None:
+        entry, terminal, _ = self._recorded_refusal(
+            None,
+            200.0,
+            read_error=watch_inbox.UnreadableFile("read failed"),
+        )
+
+        self.assertIsNone(entry["mtime"])
+        self.assertEqual(set(), terminal)
+
+    def test_parse_failure_keeps_the_read_descriptor_identity(self) -> None:
+        entry, terminal, _ = self._recorded_refusal(100.0, 200.0, packet=b"\xff")
+
+        self.assertEqual(100.0, entry["mtime"])
+        self.assertEqual(set(), terminal)

@@ -754,7 +754,15 @@ def dispatch_autobridge(
     progress = refusal_progress if refusal_progress is not None else {}
     stats = refusal_stats if refusal_stats is not None else {}
 
-    def record_refusal(path: str, reason: str, packet_repo_targets=None, packet_project=None, session_scope=None, packet_mtime=None) -> bool:
+    def record_refusal(
+        path: str,
+        reason: str,
+        packet_repo_targets=None,
+        packet_project=None,
+        session_scope=None,
+        packet_mtime=None,
+        track_packet_mtime=True,
+    ) -> bool:
         """True when this refusal is NEW and should be logged. A repeat of the same
         routing decision is counted for the aggregate summary and not re-logged."""
         return record_refusal_progress(
@@ -769,6 +777,7 @@ def dispatch_autobridge(
             packet_project=packet_project,
             session_scope=session_scope,
             packet_mtime=packet_mtime,
+            track_packet_mtime=track_packet_mtime,
         )
 
     bootstrap_consumed = _bootstrap_bb_before_dispatch(
@@ -931,6 +940,7 @@ def dispatch_autobridge(
                         packet_project=frontmatter.get("project_id"),
                         session_scope=session_scope,
                         packet_mtime=observed_mtime,
+                        track_packet_mtime=observed_mtime is not None,
                     ):
                         emit(
                             {
