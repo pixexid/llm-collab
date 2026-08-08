@@ -123,7 +123,11 @@ class PreflightRefusalTest(unittest.TestCase):
                         assignment_kind=assignment_kind, provider="pi", model=model
                     )
                     self.assertIsInstance(outcome, GateRefusal)
-                    self.assertEqual("excluded_writing_model", outcome.reason)
+                    self.assertEqual("excluded_model", outcome.reason)
+                    self.assertEqual(
+                        f"pi / {model} is excluded from {assignment_kind} assignments",
+                        outcome.detail,
+                    )
 
     def test_permitted_model_accepts_every_assignment_kind(self) -> None:
         for assignment_kind in ("read-only", "writing"):
