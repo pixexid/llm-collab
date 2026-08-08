@@ -36,6 +36,7 @@ import _helpers as helpers_lib
 import _activation_cleanup as activation_cleanup_lib
 import _activation_lease as activation_lease_lib
 import operator_digest as operator_digest_lib
+import inbox as inbox_lib
 import session_autobridge as session_autobridge_cli
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
@@ -10783,12 +10784,19 @@ class SessionAutobridgeTest(unittest.TestCase):
         ):
             watch_inbox_lib.main()
 
-    def test_exact_watcher_refuses_repository_scope_mismatch(self):
-        args = object()
+    def test_exact_watcher_refusal_only_is_distinguishable_from_empty(self):
+        args = SimpleNamespace(
+            me="claude",
+            session="SESSION-EXACT",
+            project="llm-collab",
+            repo_target=["llm-collab"],
+            json_output=True,
+        )
+        progress = {}
         with patch.object(
             watch_inbox_lib, "exact_read_session", return_value={}
         ), patch.object(
-            watch_inbox_lib,
+            inbox_lib,
             "exact_read_messages",
             return_value=(
                 [],
@@ -10800,20 +10808,34 @@ class SessionAutobridgeTest(unittest.TestCase):
                     }
                 ],
             ),
-        ):
+        ), patch.object(watch_inbox_lib, "save_refusal_progress") as save, patch.object(
+            watch_inbox_lib, "emit"
+        ) as emit:
             with self.assertRaisesRegex(
                 watch_inbox_lib.ExactWatcherAuthorityError,
-                "exact_session_repo_scope_refused",
+                "exact_session_refused",
             ):
-                watch_inbox_lib.exact_session_messages(args)
+                watch_inbox_lib.exact_session_messages(args, progress)
+
+        refusal = emit.call_args.args[0]
+        self.assertEqual("exact_session_refused", refusal["event"])
+        self.assertEqual("Chats/exact/wrong.md", refusal["message_path"])
+        self.assertEqual("binding_mismatch", refusal["reason"])
+        save.assert_called_once_with("claude", progress)
 
     def test_exact_watcher_skips_only_repository_scope_refusals(self):
-        args = object()
+        args = SimpleNamespace(
+            me="claude",
+            session="SESSION-EXACT",
+            project="llm-collab",
+            repo_target=["llm-collab"],
+            json_output=True,
+        )
         messages = [{"path": "Chats/exact/valid.md"}]
         with patch.object(
             watch_inbox_lib, "exact_read_session", return_value={}
         ), patch.object(
-            watch_inbox_lib,
+            inbox_lib,
             "exact_read_messages",
             return_value=(
                 messages,
@@ -10825,11 +10847,91 @@ class SessionAutobridgeTest(unittest.TestCase):
                     }
                 ],
             ),
+        ), patch.object(watch_inbox_lib, "save_refusal_progress"), patch.object(
+            watch_inbox_lib, "emit"
         ):
             self.assertEqual(
                 messages,
-                watch_inbox_lib.exact_session_messages(args),
+                watch_inbox_lib.exact_session_messages(args, {}),
             )
+
+    def test_exact_watcher_repeated_refusal_emits_once_until_reason_changes(self):
+        routable = {
+            "path": "Chats/exact/routable.md",
+            "frontmatter": {
+                "project_id": "llm-collab",
+                "repo_targets": ["llm-collab"],
+            },
+        }
+        refused_path = "Chats/exact/refused.md"
+        stdout = StringIO()
+        argv = [
+            "watch_inbox.py",
+            "--me",
+            "claude",
+            "--project",
+            "llm-collab",
+            "--chat",
+            "CHAT-EXACT",
+            "--session",
+            "SESSION-EXACT",
+            "--repo-target",
+            "llm-collab",
+            "--max-polls",
+            "3",
+            "--json",
+        ]
+        with patch.object(sys, "argv", argv), patch.object(
+            watch_inbox_lib, "config_get", return_value=1
+        ), patch.object(
+            watch_inbox_lib, "exact_read_session", return_value={}
+        ), patch.object(
+            inbox_lib,
+            "exact_read_messages",
+            side_effect=[
+                (
+                    [routable],
+                    [
+                        {
+                            "path": refused_path,
+                            "reason": reason,
+                            "repo_scope_only": False,
+                        }
+                    ],
+                )
+                for reason in (
+                    "route_ambiguous",
+                    "route_ambiguous",
+                    "binding_mismatch",
+                )
+            ],
+        ), patch.object(
+            watch_inbox_lib, "load_refusal_progress", return_value={}
+        ), patch.object(
+            watch_inbox_lib, "save_refusal_progress"
+        ) as save, patch.object(
+            watch_inbox_lib.time, "sleep"
+        ), patch.object(
+            watch_inbox_lib, "_packet_mtime", side_effect=AssertionError("packet stat")
+        ), patch.object(watch_inbox_lib, "mark_messages_read") as mark_read, redirect_stdout(
+            stdout
+        ):
+            watch_inbox_lib.main()
+
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(
+            ["exact_session_refused", "new_message", "exact_session_refused"],
+            [event["event"] for event in events],
+        )
+        self.assertEqual(refused_path, events[0]["message_path"])
+        self.assertEqual("route_ambiguous", events[0]["reason"])
+        self.assertEqual(routable["path"], events[1]["detail"])
+        self.assertNotEqual(refused_path, events[1]["detail"])
+        self.assertEqual(refused_path, events[2]["message_path"])
+        self.assertEqual("binding_mismatch", events[2]["reason"])
+        self.assertEqual(2, save.call_count)
+        self.assertNotIn("autobridge_consumed", [event["event"] for event in events])
+        mark_read.assert_not_called()
 
     def test_registration_inherits_processed_ledger_and_retires_predecessor(self):
         predecessor_path = "Chats/supersession/already-dispatched.md"
