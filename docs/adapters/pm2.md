@@ -377,9 +377,12 @@ pm2 save
 ### Verifying and using it
 
 ```bash
-curl -s http://127.0.0.1:8767/readyz
+curl --fail --silent http://127.0.0.1:8767/readyz
 <runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex-appserver
 ```
+
+`--fail` is required: an HTTP 404 or 503 means the endpoint is not ready and
+must make the probe fail rather than count mere reachability as readiness.
 
 Delivery itself is exercised by the autobridge dispatch path, which reports
 `adapter: codex_app_server` with `returncode: 0` once a session declares the

@@ -422,7 +422,7 @@ class MainPathTest(unittest.TestCase):
                 register.assert_not_called()
                 sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
 
-    def test_documented_readyz_probe_uses_configured_sidecar_port(self):
+    def test_documented_readyz_probe_fails_http_errors_and_uses_configured_port(self):
         import pm2_watchers
 
         ready = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -432,15 +432,18 @@ class MainPathTest(unittest.TestCase):
             self.assertTrue(pm2_watchers.codex_sidecar_is_ready())
 
         run.assert_called_once_with(
-            ["/usr/bin/curl", "-s", "http://127.0.0.1:8791/readyz"],
+            ["/usr/bin/curl", "--fail", "--silent", "http://127.0.0.1:8791/readyz"],
             capture_output=True,
             text=True,
             timeout=pm2_watchers.SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS,
         )
 
-    def test_sidecar_becoming_ready_after_delay_allows_registration(self):
+    def _run_codex_registration_with_readyz_statuses(self, statuses):
+        import contextlib
+        import io
         import pm2_watchers
 
+        self.assertTrue(statuses)
         argv = ["--project", "p", "--title", "t", "--me", "codex",
                 "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
                 "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
@@ -449,64 +452,35 @@ class MainPathTest(unittest.TestCase):
             type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
             type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})(),
         ])
+        status_results = iter(statuses)
+        last_status = statuses[-1]
+        curl_commands = []
 
         def run(cmd, **kwargs):
+            nonlocal last_status
             if cmd[1].endswith("new_chat.py"):
                 return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+            if cmd[0].endswith("curl"):
+                curl_commands.append(cmd)
+                try:
+                    last_status = next(status_results)
+                except StopIteration:
+                    pass
+                return type("R", (), {
+                    "returncode": 22 if last_status >= 400 and "--fail" in cmd else 0,
+                    "stdout": "", "stderr": f"HTTP {last_status}",
+                })()
             try:
                 with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
                      patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
                      patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=["codex-appserver"]), \
                      patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
                      patch.object(pm2_watchers, "pm2_run", side_effect=pm2_results), \
-                     patch.object(pm2_watchers, "codex_sidecar_is_ready", side_effect=[False, True]) as probe, \
-                     patch.object(pm2_watchers.time, "sleep"):
+                     patch.object(pm2_watchers.shutil, "which", return_value="/usr/bin/curl"), \
+                     patch.object(pm2_watchers, "SIDECAR_READINESS_TIMEOUT_SECONDS", 0.01), \
+                     patch.object(pm2_watchers, "SIDECAR_READINESS_POLL_SECONDS", 0.001):
                     pm2_watchers.main()
             except SystemExit as exc:
-                return type("R", (), {"returncode": exc.code, "stdout": "", "stderr": "transport unavailable"})()
-            self.assertEqual(2, probe.call_count)
-            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-
-        with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
-             patch.object(ncs, "ensure_project", return_value=None), \
-             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
-             patch.object(ncs, "load_agents", return_value=self.AGENTS), \
-             patch.object(ncs, "preflight_starter_binding", return_value=None), \
-             patch.object(ncs, "register_session") as register, \
-             patch.object(ncs, "shutil") as sh, \
-             patch.object(ncs.subprocess, "run", side_effect=run):
-            ncs.main()
-
-        register.assert_called_once()
-        sh.rmtree.assert_not_called()
-
-    def test_sidecar_never_ready_prevents_registration_and_rolls_back(self):
-        import pm2_watchers
-
-        argv = ["--project", "p", "--title", "t", "--me", "codex",
-                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
-                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
-        pm2_results = iter([
-            type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
-            type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-            type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})(),
-        ])
-
-        def run(cmd, **kwargs):
-            if cmd[1].endswith("new_chat.py"):
-                return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
-            try:
-                with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
-                     patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
-                     patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=["codex-appserver"]), \
-                     patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
-                     patch.object(pm2_watchers, "pm2_run", side_effect=pm2_results), \
-                     patch.object(pm2_watchers, "SIDECAR_READINESS_TIMEOUT_SECONDS", 0.003), \
-                     patch.object(pm2_watchers, "SIDECAR_READINESS_POLL_SECONDS", 0.001), \
-                     patch.object(pm2_watchers, "codex_sidecar_is_ready", return_value=False) as probe:
-                    pm2_watchers.main()
-            except SystemExit as exc:
-                self.assertGreaterEqual(probe.call_count, 1)
                 return type("R", (), {"returncode": exc.code, "stdout": "", "stderr": "transport unavailable"})()
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
@@ -517,12 +491,47 @@ class MainPathTest(unittest.TestCase):
              patch.object(ncs, "preflight_starter_binding", return_value=None), \
              patch.object(ncs, "register_session") as register, \
              patch.object(ncs, "shutil") as sh, \
-             patch.object(ncs.subprocess, "run", side_effect=run):
-            with self.assertRaisesRegex(SystemExit, "transport unavailable"):
+             patch.object(ncs.subprocess, "run", side_effect=run), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            error = None
+            try:
                 ncs.main()
+            except SystemExit as exc:
+                error = exc
+        return error, register, sh, curl_commands
 
+    def test_readyz_503_prevents_registration_and_rolls_back(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([503])
+
+        self.assertIn("transport unavailable", str(error))
         register.assert_not_called()
         sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+        self.assertGreaterEqual(len(curl_commands), 1)
+
+    def test_readyz_404_prevents_registration_and_rolls_back(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([404])
+
+        self.assertIn("transport unavailable", str(error))
+        register.assert_not_called()
+        sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+        self.assertGreaterEqual(len(curl_commands), 1)
+
+    def test_readyz_200_allows_registration(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([200])
+
+        self.assertIsNone(error)
+        register.assert_called_once()
+        sh.rmtree.assert_not_called()
+        self.assertEqual(1, len(curl_commands))
+
+    def test_readyz_503_then_200_allows_slow_healthy_registration(self):
+        error, register, sh, curl_commands = self._run_codex_registration_with_readyz_statuses([503, 200])
+
+        self.assertIsNone(error)
+        register.assert_called_once()
+        sh.rmtree.assert_not_called()
+        self.assertEqual(2, len(curl_commands))
 
     def test_transport_timeout_rolls_back_instead_of_hanging(self):
         import threading

@@ -281,7 +281,7 @@ def codex_sidecar_is_ready() -> bool:
     port = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_PORT", "8767")
     try:
         result = subprocess.run(
-            [curl, "-s", f"http://127.0.0.1:{port}/readyz"],
+            [curl, "--fail", "--silent", f"http://127.0.0.1:{port}/readyz"],
             capture_output=True,
             text=True,
             timeout=SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS,
