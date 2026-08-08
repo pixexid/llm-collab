@@ -529,12 +529,15 @@ class DeployRuntimeTest(unittest.TestCase):
     def test_refuse_blocks_watcher_behind_python_options(self):
         # GH-679 fail-open: `python3 -W ignore <watcher>` -- the old "skip leading
         # - tokens" rule made 'ignore' the program, so a live undeclared watcher
-        # PASSED conformance. Correct option arity (-W takes the next token as its
-        # value) must reach the watcher. -X opt and the -- terminator exercise the
-        # same parser paths.
+        # PASSED conformance. Correct option arity must reach the watcher. Covers
+        # the full value-option set enumerated from `python3.11 --help`: -W arg,
+        # -X opt, --check-hash-based-pycs mode (separate AND =value), plus the --
+        # terminator.
         for argv in (
             ["-W", "ignore", "/deployed/runtime/bin/watch_inbox.py", "--me", "x"],
             ["-X", "faulthandler", "/deployed/runtime/bin/watch_inbox.py"],
+            ["--check-hash-based-pycs", "default", "/deployed/runtime/bin/watch_inbox.py"],
+            ["--check-hash-based-pycs=always", "/deployed/runtime/bin/watch_inbox.py"],
             ["-u", "--", "/deployed/runtime/bin/watch_inbox.py"],
         ):
             record = {
@@ -558,18 +561,25 @@ class DeployRuntimeTest(unittest.TestCase):
 
     def test_python_program_operand_parser(self):
         # Direct unit proof of the option-arity walk for every Python 3.11 shape
-        # the discriminator must survive. -c/-m run no file; -W/-X consume their
-        # value; -- ends options; flags consume nothing.
+        # the discriminator must survive, with the value-option set enumerated
+        # from `python3.11 --help`. -c/-m run no file; -W/-X/
+        # --check-hash-based-pycs consume their value (separate, short-attached,
+        # or long-=value); -- ends options; flags consume nothing.
         operand = deploy_runtime._python_program_operand
         self.assertEqual(operand(["script.py"]), "script.py")
         self.assertEqual(operand(["-u", "script.py"]), "script.py")
         self.assertEqual(operand(["-W", "ignore", "script.py"]), "script.py")
         self.assertEqual(operand(["-Wignore", "script.py"]), "script.py")
         self.assertEqual(operand(["-X", "faulthandler", "script.py"]), "script.py")
+        self.assertEqual(operand(["--check-hash-based-pycs", "default", "script.py"]), "script.py")
+        self.assertEqual(operand(["--check-hash-based-pycs=never", "script.py"]), "script.py")
+        self.assertEqual(operand(["--help", "script.py"]), "script.py")
+        self.assertEqual(operand(["-bb", "-OO", "script.py"]), "script.py")
         self.assertEqual(operand(["--", "script.py"]), "script.py")
         self.assertEqual(operand(["--", "-W", "script.py"]), "-W")  # past terminator
         self.assertIsNone(operand(["-c", "print(1)"]))
         self.assertIsNone(operand(["-m", "package.module"]))
+        self.assertIsNone(operand(["--check-hash-based-pycs", "default"]))  # no program
         self.assertIsNone(operand(["-"]))
         self.assertIsNone(operand(["-W", "ignore"]))
 
@@ -756,6 +766,72 @@ class DeployRuntimeTest(unittest.TestCase):
         # was never invoked.
         self.assertEqual([], events)
 
+    def test_deploy_post_recheck_catches_watcher_appearing_after_preflight(self):
+        # GH-679 TOCTOU: a watcher that starts AFTER the preflight snapshot --
+        # while deploy fences/resets/restarts/polls readiness -- is invisible to
+        # verify_deployment, which sees only owned processes. A post-mutation
+        # recheck before pm2 save must catch it and reach rollback instead of
+        # persisting the shadow into the reboot dump. The preflight sees a clean
+        # roster; the recheck (after the mutations) sees the shadow.
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            target = Path(temp_dir) / "target"
+            source.mkdir()
+            target.mkdir()
+            (source / ".git").mkdir()
+            (target / ".git").mkdir()
+            resolved_target = target.resolve()
+            watch_script = str(resolved_target / "bin" / "watch_inbox.py")
+            shadow = {
+                "name": "collab-shadow",
+                "pm2_env": {
+                    "status": "online",
+                    "pm_cwd": str(resolved_target),
+                    "pm_exec_path": "/usr/bin/python3",
+                    "script": "python3",
+                    "args": [watch_script, "--me", "shadow"],
+                },
+            }
+            with (
+                patch.object(deploy_runtime, "source_head", return_value=("new-sha", "10")),
+                patch.object(deploy_runtime, "target_preflight", return_value="old-sha"),
+                patch.object(deploy_runtime, "pm2_binary", return_value="/usr/bin/pm2"),
+                patch.object(deploy_runtime, "ecosystem_definitions", return_value={}),
+                # Preflight sees a clean roster; the post-mutation recheck sees the shadow.
+                patch.object(deploy_runtime, "pm2_jlist", side_effect=[[], [shadow]]),
+                patch.object(
+                    deploy_runtime, "fence_watchers",
+                    side_effect=lambda *a, **k: events.append("fence"),
+                ),
+                patch.object(
+                    deploy_runtime, "reset_target",
+                    side_effect=lambda *a, **k: events.append("reset"),
+                ),
+                patch.object(
+                    deploy_runtime, "reconcile_pm2",
+                    side_effect=lambda *a, **k: events.append("reconcile"),
+                ),
+                patch.object(
+                    deploy_runtime, "verify_deployment",
+                    side_effect=lambda *a, **k: events.append("verify"),
+                ),
+                patch.object(
+                    deploy_runtime, "restore_previous_deployment",
+                    side_effect=lambda *a, **k: events.append("restore"),
+                ),
+                patch.object(deploy_runtime, "pm2_run") as pm2_run,
+            ):
+                with self.assertRaisesRegex(
+                    deploy_runtime.DeployError,
+                    r"undeclared PM2 process\(es\) are running the deployed runtime watcher",
+                ):
+                    deploy_runtime.deploy(source, target)
+        # The mutations ran (the shadow appeared mid-deploy), then the post-mutation
+        # recheck caught it and routed to rollback; pm2 save never ran, so the
+        # shadow was not persisted into the reboot dump.
+        self.assertEqual(["fence", "reset", "reconcile", "verify", "restore"], events)
+        pm2_run.assert_not_called()
 
     def test_managed_processes_does_not_match_related_workspace_names(self):
         records = [

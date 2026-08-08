@@ -361,10 +361,15 @@ def _record_status(record: dict) -> str | None:
 
 
 _PYTHON_INTERPRETER_RE = re.compile(r"^python(\d+(\.\d+)*)?$")
-# Python 3.11 interpreter options that consume the following token as their value.
-# -W arg and -X opt are the two the old "skip leading -" rule mishandled; -c/-m
-# also take a value but mean no file is executed (a command string / module name).
-_PYTHON_VALUE_OPTIONS = frozenset({"-W", "-X", "-c", "-m"})
+# Options that consume the following token as their value, enumerated from
+# `python3.11 --help`. Short: -c cmd, -m mod, -W arg, -X opt. Long:
+# --check-hash-based-pycs mode. Every other 3.11 option (-b -B -d -E -h -i -I -O
+# -OO -P -q -s -S -u -v -V -x --help --version --help-env --help-xoptions
+# --help-all) is a flag that consumes nothing. -c/-m terminate the option list
+# and run a command string / module, so they execute NO file.
+_PYTHON_SHORT_VALUE_OPTIONS = frozenset({"-c", "-m", "-W", "-X"})
+_PYTHON_LONG_VALUE_OPTIONS = frozenset({"--check-hash-based-pycs"})
+_PYTHON_NO_FILE_OPTIONS = frozenset({"-c", "-m"})
 
 
 def _is_python_interpreter(exec_path: object) -> bool:
@@ -388,18 +393,21 @@ def _is_python_interpreter(exec_path: object) -> bool:
 def _python_program_operand(args: list[str]) -> str | None:
     """The file a Python interpreter runs, or None when it runs no file.
 
-    Walks the interpreter argv the way CPython's own option parser does, so an
-    interpreter option with a SEPARATE value (``-W ignore``) cannot masquerade as
-    the program: the old "skip leading ``-`` tokens" rule turned ``ignore`` into
-    the program and a live undeclared watcher passed conformance (GH-679). Each
-    leading option consumes its value per Python 3.11's arity (``-W arg``, ``-X
-    opt``, ``-c cmd``, ``-m mod``); ``-c``/``-m`` run a command string or module,
-    never a file, so they mean no file is executed; ``--`` ends option processing
-    and the next token is the program; attached forms (``-Wignore``) are honoured.
-    Returns the first program token, or None for ``-`` (stdin), ``-c``/``-m``, or
-    no operand. Scoped to Python because the watcher is a Python file -- only a
-    Python interpreter can run it, so no other interpreter's option grammar
-    matters here.
+    Walks the interpreter argv per Python 3.11's option grammar, with every
+    value-taking option enumerated from `python3.11 --help`, so an option with a
+    SEPARATE value cannot masquerade as the program. `python3 --check-hash-based
+    -pycs default <watcher>` is the shape that broke the short-only list: a LONG
+    option whose value is the next token. Value options -c/-m run a command
+    string / module (no file); -W/-X/--check-hash-based-pycs consume their value
+    (separate, short-attached `-Wignore`, or long-`=` `--opt=value`) and continue
+    to the program. `--` ends option processing; `-` is stdin. Returns the first
+    program token, else None.
+
+    Residual (stated, not silent): the value-option set is fixed to Python 3.11.
+    Every 3.11 flag is self-consuming, so a flag is always safe; the only gap is
+    a FUTURE Python adding a value-taking option, which would fail OPEN the same
+    way --check-hash-based-pycs did. Re-derive from the installed interpreter if
+    the runtime moves off 3.11.
     """
     index = 0
     count = len(args)
@@ -408,18 +416,22 @@ def _python_program_operand(args: list[str]) -> str | None:
         if token == "--":
             return args[index + 1] if index + 1 < count else None
         if token == "-":
-            return None  # program is stdin; no file executed
+            return None  # program is stdin
+        if token.startswith("--"):
+            name = token.split("=", 1)[0]
+            if name in _PYTHON_LONG_VALUE_OPTIONS:
+                index += 1 if "=" in token else 2  # --opt=value vs --opt value
+                continue
+            index += 1  # long flag (--help, --version, --help-all, ...)
+            continue
         if token.startswith("-"):
             option = token[:2]
-            if option in _PYTHON_VALUE_OPTIONS:
-                if option in ("-c", "-m"):
-                    return None  # runs a command string / module, never a file
-                if len(token) > 2:
-                    index += 1  # attached value: -Wignore, -Xdev
-                else:
-                    index += 2  # separate value: -W ignore, -X faulthandler
+            if option in _PYTHON_SHORT_VALUE_OPTIONS:
+                if option in _PYTHON_NO_FILE_OPTIONS:
+                    return None  # -c cmd / -m mod run no file
+                index += 1 if len(token) > 2 else 2  # -Wignore vs -W ignore
                 continue
-            index += 1  # flag: -u, -O, -OO, -bb, --version, ...
+            index += 1  # short flag (-u, -O, -OO, -bb, ...)
             continue
         return token
     return None
@@ -676,6 +688,14 @@ def deploy(source: Path, target: Path | None = None) -> dict[str, str]:
         owned_names = previous_owned_names | frozenset(definitions)
         reconcile_pm2(target, owned_names, definitions)
         verify_deployment(target, head, owned_names, definitions)
+        # Recheck after the mutations (GH-679 TOCTOU): a watcher that started
+        # AFTER the preflight snapshot -- while we fenced, reset, restarted, or
+        # polled readiness -- is invisible to verify_deployment, which sees only
+        # owned processes. Inspect the live roster again before pm2 save so a
+        # mid-deploy shadow reaches rollback instead of being persisted into the
+        # reboot dump. The preflight gate above stays: it is what prevents code
+        # replacement under a live dispatcher.
+        refuse_undeclared_runtime_watchers(target, set(owned_names), pm2_jlist())
         pm2_run(["save"])
     except (OSError, subprocess.SubprocessError, DeployError) as error:
         try:
