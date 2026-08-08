@@ -310,9 +310,12 @@ These files are gitignored.
 
 ### Rotation and retention
 
-Use one `pm2-logrotate` instance for both locations. The module follows each
-active PM2 app's resolved output and error paths, including explicit ecosystem
-paths and PM2 defaults:
+Use one `pm2-logrotate` instance for both locations. Its
+[pinned upstream implementation](https://github.com/keymetrics/pm2-logrotate/blob/15f30dc0deb27d77b8095ee105af90a2f53d96b9/app.js#L184-L220)
+is expected to inspect each active PM2 app's `pm_out_log_path` and
+`pm_err_log_path`, which would include explicit ecosystem paths and PM2 defaults.
+Treat that source-derived expectation as unverified until the post-enable
+coverage check below passes on the host.
 
 ```bash
 pm2 install pm2-logrotate
@@ -322,6 +325,19 @@ pm2 set pm2-logrotate:compress true
 pm2 set pm2-logrotate:rotateInterval '0 0 * * *'
 ```
 
+Enabling is not complete until both path classes are verified. After waiting at
+least one pm2-logrotate worker interval (30 seconds by default), run its
+[read-only target-list action](https://github.com/keymetrics/pm2-logrotate/blob/15f30dc0deb27d77b8095ee105af90a2f53d96b9/app.js#L251-L258):
+
+```bash
+pm2 trigger pm2-logrotate 'list watched logs'
+```
+
+Require the returned map to contain at least one active log under
+`Logs/watchers/` and at least one under `~/.pm2/logs/`. If either class is
+missing, treat rotation coverage as failed and do not claim both stores are
+protected; diagnose the module/path mismatch or replace the mechanism.
+
 The retention policy is the current file plus seven gzip-compressed generations
 per PM2 log, with a 10 MiB size trigger and a daily rotation. Ordinary logs keep
 about one week of history; a noisy process may rotate sooner, deliberately
@@ -330,8 +346,8 @@ bounding a crash loop instead of guaranteeing seven days at any write rate.
 Existing logs need an operator-owned disposition before rotation is enabled.
 Archive any history needed for diagnosis, especially unique crash-loop evidence,
 outside the live PM2 paths; do not blindly delete or truncate it. The module
-follows active app paths, so separately inspect orphaned files left by deleted
-PM2 entries.
+target-list check covers active app paths only, so separately inspect orphaned
+files left by deleted PM2 entries.
 
 ## Codex app-server delivery sidecar
 
