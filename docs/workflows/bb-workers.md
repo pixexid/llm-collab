@@ -133,10 +133,10 @@ executable logic changes, and the connector pass—not a claimed property of the
 model. Until GH-596 lands, an explicitly selected writing lane operates under
 those controls even though the profile policy remains prospective.
 
-Known failure modes are hard exclusions for writing work. Do not assign
+Known failure modes are hard exclusions for every text-bearing assignment. Do
+not assign
 `pi / meta/muse-spark-1.2-contributor`, whose text output degenerated, or
-`pi / zai/glm-5.2`, whose source coordinates drifted. A corrupted glyph or
-wrong coordinate inside a patch is not safe merely because review may catch it.
+`pi / zai/glm-5.2`, whose source coordinates drifted.
 
 ## Communicate in both directions
 

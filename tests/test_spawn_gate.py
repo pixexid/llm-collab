@@ -115,12 +115,25 @@ class PreflightRefusalTest(unittest.TestCase):
                 self.assertIsInstance(outcome, GateRefusal)
                 self.assertEqual("incomplete_profile", outcome.reason)
 
-    def test_excluded_writing_models_refuse(self) -> None:
+    def test_excluded_models_refuse_every_assignment_kind(self) -> None:
         for model in ("meta/muse-spark-1.2-contributor", "zai/glm-5.2"):
-            with self.subTest(model=model):
-                outcome = planned(assignment_kind="writing", provider="pi", model=model)
-                self.assertIsInstance(outcome, GateRefusal)
-                self.assertEqual("excluded_writing_model", outcome.reason)
+            for assignment_kind in ("read-only", "writing"):
+                with self.subTest(model=model, assignment_kind=assignment_kind):
+                    outcome = planned(
+                        assignment_kind=assignment_kind, provider="pi", model=model
+                    )
+                    self.assertIsInstance(outcome, GateRefusal)
+                    self.assertEqual("excluded_model", outcome.reason)
+                    self.assertEqual(
+                        f"pi / {model} is excluded from {assignment_kind} assignments",
+                        outcome.detail,
+                    )
+
+    def test_permitted_model_accepts_every_assignment_kind(self) -> None:
+        for assignment_kind in ("read-only", "writing"):
+            with self.subTest(assignment_kind=assignment_kind):
+                outcome = planned(assignment_kind=assignment_kind)
+                self.assertIsInstance(outcome, SpawnPlan)
 
     def test_missing_worktree_isolation_refuses(self) -> None:
         outcome = planned(environment=None)

@@ -26,7 +26,7 @@ GIT_MAX_RESPONSE_CHARS = 64 * 1024
 GIT_TIMEOUT_SECONDS = 60.0
 _SHA_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 _CONSTRUCTOR_TOKEN = object()
-_EXCLUDED_WRITING_MODELS = frozenset({
+_EXCLUDED_MODELS = frozenset({
     ("pi", "meta/muse-spark-1.2-contributor"),
     ("pi", "zai/glm-5.2"),
 })
@@ -130,10 +130,10 @@ def plan_spawn(
         )
     if assignment_kind not in {"read-only", "writing"}:
         return GateRefusal("invalid_assignment_kind", f"unknown assignment kind {assignment_kind!r}")
-    if assignment_kind == "writing" and (provider, model) in _EXCLUDED_WRITING_MODELS:
+    if (provider, model) in _EXCLUDED_MODELS:
         return GateRefusal(
-            "excluded_writing_model",
-            f"{provider} / {model} is excluded from writing assignments",
+            "excluded_model",
+            f"{provider} / {model} is excluded from {assignment_kind} assignments",
         )
     if not isinstance(environment, (NewWorktree, Attached)):
         return GateRefusal(

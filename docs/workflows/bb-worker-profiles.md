@@ -1,6 +1,6 @@
 # BB Worker Profiles
 
-Status: Phase 2 routing policy, revision 1. This is not a runtime cutover or an
+Status: Phase 2 routing policy, revision 2. This is not a runtime cutover or an
 executable profile registry.
 
 ## Contract
@@ -50,8 +50,8 @@ pilot used one byte-identical, read-only source-audit task per model.
 |---|---|---|---|
 | Fast, exact source analysis | `codex / gpt-5.6-luna` | 136s; 7/7 citations exact; correct judgment; clean output | Authoring and reasoning-level-specific behavior are unmeasured. Analysis only; not a sole gate. |
 | Deep source analysis or a competing diagnosis | `pi / kimi-coding/k3` | 324s; about 15/15 citations exact; deepest analysis; alone caught a subtle wrong-fix direction and checked `agents.json` for empirical proof | Authoring and reasoning-level-specific behavior are unmeasured. Analysis only; not a sole gate. |
-| Substance-only second opinion | `pi / zai/glm-5.2` | 508s; reasoning and conclusions correct | Citation coordinates drifted by 150 and 11 lines. Re-locate every cited fact independently; never use it as the sole evidence or citation gate. |
-| No text-bearing work | `pi / meta/muse-spark-1.2-contributor` | About 120s; citations and judgment were initially correct | Output degenerated mid-answer: repetition, a corrupted glyph, emoji burst, and one unreadable item. Quarantined from authoring, review, gates, and durable messages. |
+| Hard-excluded | `pi / zai/glm-5.2` | 508s; reasoning and conclusions correct | Citation coordinates drifted by 150 and 11 lines; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
+| Hard-excluded | `pi / meta/muse-spark-1.2-contributor` | About 120s; citations and judgment were initially correct | Output degenerated mid-answer: repetition, a corrupted glyph, emoji burst, and one unreadable item; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
 
 The timings are provisional: single runs confound capability with capacity and
 usage limits. The observed failure modes are actionable—load does not explain a
@@ -59,18 +59,19 @@ usage limits. The observed failure modes are actionable—load does not explain 
 authoring, so it places no model on an implementation lane.
 
 Prospective policy: no unmeasured or text-unstable model may own a gate, money
-path, authority path, or implementation lane. This is not enforced today. BB
+path, authority path, or implementation lane. This broader policy is not
+enforced today; only the measured hard exclusions above are active. BB
 bootstrap currently passes every first packet body to the hard-coded
 `SLICE_1A_PROFILE` (`pi / kimi-coding/k3 / high`) regardless of work type; see
 `llm_collab/bb_client.py:120-122` and `bin/_session_autobridge.py:1700-1712`.
 An implementation delegation can therefore start the analysis-only K3 profile.
-The Phase 2 selector must enforce this policy; until then, the measured models'
-advisory-only status is intent, not an activation control.
+The Phase 2 selector must enforce this policy; until then, the non-excluded
+measured models' advisory-only status is intent, not an activation control.
 
 ## Named profile candidates
 
-The issue-approved Phase 2 names remain candidates. A live catalog match proves
-availability, not capability.
+Only non-excluded issue-approved Phase 2 names remain candidates. A live catalog
+match proves availability, not capability.
 
 | Profile revision | Frozen candidate triple | Current status |
 |---|---|---|
@@ -79,7 +80,6 @@ availability, not capability.
 | `engineer-sol-v1` | `codex / gpt-5.6-sol / high` | Unmeasured; no implementation assignment yet. |
 | `utility-luna-v1` | `codex / gpt-5.6-luna / medium` | Model measured for read-only analysis; reasoning-level-specific and authoring behavior unmeasured. |
 | `research-kimi-v1` | `pi / kimi-coding/k3 / high` | Model measured for read-only analysis; reasoning-level-specific and authoring behavior unmeasured. |
-| `verifier-glm-v1` | `pi / zai/glm-5.2 / high` | Analysis-only, with mandatory independent source-coordinate verification. |
 
 ## Live catalog snapshot
 
