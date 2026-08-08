@@ -13,11 +13,120 @@ import json
 import sys
 import unittest
 from contextlib import redirect_stderr
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 import watch_inbox  # noqa: E402
+
+
+class RefusalRecheckWindowTest(unittest.TestCase):
+    NOW = datetime(2026, 8, 8, 12, 0, 0)
+
+    def _entry(self, path: str, *, repo_targets=None, mtime=1.0) -> dict:
+        reason = "repo_mismatch"
+        packet_repo = ["other"]
+        project_id = "llm-collab"
+        return {
+            watch_inbox.progress_key(None, path): {
+                "path": path,
+                "fp": watch_inbox.refusal_fingerprint(
+                    reason,
+                    repo_targets,
+                    packet_repo,
+                    project_id,
+                    project_id,
+                ),
+                "mtime": mtime,
+                "reason": reason,
+                "packet_repo_targets": packet_repo,
+                "packet_project": project_id,
+                "session_id": None,
+                "session_repo_targets": repo_targets,
+            }
+        }
+
+    def test_backlog_over_window_avoids_rechecking_old_packet_identity(self) -> None:
+        from unittest.mock import patch
+
+        old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
+        recent = "Chats/x/2026-08-08T00-00-00_to-claude_recent.md"
+        progress = self._entry(old, repo_targets=["app"])
+        progress.update(self._entry(recent, repo_targets=["app"]))
+        with patch.object(watch_inbox, "_packet_mtime", return_value=1.0) as mtime:
+            skipped = watch_inbox.terminal_refusal_paths(
+                progress,
+                ["app"],
+                "llm-collab",
+                refusal_recheck_window_days=7,
+                now=self.NOW,
+            )
+
+        self.assertEqual({old, recent}, skipped)
+        mtime.assert_called_once_with(recent)
+
+    def test_new_arrival_is_considered_even_with_an_old_filename(self) -> None:
+        recorded = "Chats/x/2026-07-01T00-00-00_to-claude_recorded.md"
+        new = "Chats/x/2026-06-01T00-00-00_to-claude_new.md"
+        skipped = watch_inbox.terminal_refusal_paths(
+            self._entry(recorded, repo_targets=["app"], mtime=None),
+            ["app"],
+            "llm-collab",
+            refusal_recheck_window_days=7,
+            now=self.NOW,
+        )
+
+        self.assertEqual({recorded}, skipped)
+        self.assertNotIn(new, skipped)
+
+    def test_changed_fingerprint_escapes_even_with_an_old_filename(self) -> None:
+        from unittest.mock import patch
+
+        old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
+        progress = self._entry(old, repo_targets=["app"])
+        progress[watch_inbox.progress_key(None, old)]["fp"] = "stale-fingerprint"
+        with patch.object(
+            watch_inbox,
+            "_packet_mtime",
+            side_effect=AssertionError("changed routing must escape before age"),
+        ):
+            skipped = watch_inbox.terminal_refusal_paths(
+                progress,
+                ["app"],
+                "llm-collab",
+                refusal_recheck_window_days=7,
+                now=self.NOW,
+            )
+
+        self.assertEqual(set(), skipped)
+
+    def test_absent_invalid_or_unparseable_window_inputs_recheck(self) -> None:
+        from unittest.mock import patch
+
+        old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
+        malformed = "Chats/x/not-a-packet-timestamp_to-claude_old.md"
+        self.assertIsNone(watch_inbox.parse_refusal_recheck_window_days(None))
+        self.assertIsNone(watch_inbox.parse_refusal_recheck_window_days("invalid"))
+        with patch.object(watch_inbox, "_packet_mtime", return_value=2.0) as mtime:
+            no_window = watch_inbox.terminal_refusal_paths(
+                self._entry(old, repo_targets=["app"]),
+                ["app"],
+                "llm-collab",
+                refusal_recheck_window_days=None,
+                now=self.NOW,
+            )
+            malformed_packet = watch_inbox.terminal_refusal_paths(
+                self._entry(malformed, repo_targets=["app"]),
+                ["app"],
+                "llm-collab",
+                refusal_recheck_window_days=7,
+                now=self.NOW,
+            )
+
+        self.assertEqual(set(), no_window)
+        self.assertEqual(set(), malformed_packet)
+        self.assertEqual([old, malformed], [call.args[0] for call in mtime.call_args_list])
 
 
 class RefusalFingerprintTest(unittest.TestCase):

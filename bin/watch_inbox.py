@@ -26,7 +26,7 @@ import os
 import platform
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -98,6 +98,15 @@ def parse_args():
         help="Watch one exact llm-collab session; requires --project and --chat",
     )
     p.add_argument("--poll-seconds", type=int, default=None, help="Poll interval (default: from config)")
+    p.add_argument(
+        "--refusal-recheck-window-days",
+        type=parse_refusal_recheck_window_days,
+        default=None,
+        help=(
+            "Recheck already-recorded terminal refusals only for packets this "
+            "many days old; absent or invalid means recheck all"
+        ),
+    )
     p.add_argument("--max-polls", type=int, default=0, help="Stop after N polls; 0 = forever")
     p.add_argument("--notify", action="store_true", help="Send desktop notification on new messages")
     p.add_argument("--no-autobridge", action="store_true", help="Disable automatic session autobridge dispatch on new unread messages")
@@ -121,6 +130,15 @@ def parse_args():
             p.error("--session requires --project and --chat")
         args.packet = None
     return args
+
+
+def parse_refusal_recheck_window_days(value) -> int | None:
+    """Invalid or absent bounds do more work; they must never hide mail."""
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return None
+    return days if days >= 0 else None
 
 
 def send_notification(title: str, body: str) -> None:
@@ -375,11 +393,36 @@ def progress_key(session_id: str | None, path: str) -> str:
     return f"{session_id or ''}\u0000{path}"
 
 
-def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id: str | None = None, session_scope=None) -> set[str]:
+def _outside_refusal_recheck_window(
+    message_path: str,
+    window_days: int | None,
+    now: datetime | None = None,
+) -> bool:
+    if window_days is None:
+        return False
+    try:
+        stamp = datetime.strptime(
+            Path(message_path).name.split("_", 1)[0], "%Y-%m-%dT%H-%M-%S"
+        )
+    except ValueError:
+        return False
+    return stamp < (now or datetime.utcnow()) - timedelta(days=window_days)
+
+
+def terminal_refusal_paths(
+    progress: dict,
+    repo_targets,
+    project_id,
+    session_id: str | None = None,
+    session_scope=None,
+    refusal_recheck_window_days: int | None = None,
+    now: datetime | None = None,
+) -> set[str]:
     """Paths whose repo-scope refusal is already terminal under the CURRENT
-    subscriber decision AND whose packet file is unchanged. Either side moving
-    re-opens eligibility (AC4): a changed subscriber decision changes the
-    fingerprint, a rerouted packet changes its mtime."""
+    subscriber decision. A changed fingerprint always re-opens eligibility;
+    recent decisions additionally require unchanged packet identity. Only an
+    old decision with that same current fingerprint bypasses the identity
+    recheck."""
     skip: set[str] = set()
     for key, entry in progress.items():
         if entry.get("session_id") != session_id:
@@ -407,6 +450,11 @@ def terminal_refusal_paths(progress: dict, repo_targets, project_id, session_id:
             session_scope,
         )
         if entry.get("fp") != expected:
+            continue
+        if _outside_refusal_recheck_window(
+            path, refusal_recheck_window_days, now
+        ):
+            skip.add(path)
             continue
         if entry.get("mtime") != _packet_mtime(path):
             continue
@@ -768,6 +816,7 @@ def dispatch_autobridge(
     refusal_progress: dict | None = None,
     refusal_stats: dict | None = None,
     messages: Mapping[str, dict] | Sequence[dict] | None = None,
+    refusal_recheck_window_days: int | None = None,
 ) -> list[str]:
     consumed_paths: list[str] = []
     progress = refusal_progress if refusal_progress is not None else {}
@@ -861,8 +910,17 @@ def dispatch_autobridge(
                 session_id,
                 project_id=project_id,
                 repo_targets=repo_targets,
+                # GH-521 owns bounding unread ENUMERATION at the index seam in
+                # bin/_helpers.py. This only bounds RE-EVALUATION of terminal
+                # decisions already recorded by this watcher, so a path absent
+                # from progress still reaches that future bounded enumeration.
                 skip_paths=terminal_refusal_paths(
-                    progress, repo_targets, project_id, session_id, session_scope
+                    progress,
+                    repo_targets,
+                    project_id,
+                    session_id,
+                    session_scope,
+                    refusal_recheck_window_days,
                 ),
             )
         except Exception as error:
@@ -1137,6 +1195,7 @@ def main():
                     refusal_progress=refusal_progress,
                     refusal_stats=refusal_stats,
                     messages=messages,
+                    refusal_recheck_window_days=args.refusal_recheck_window_days,
                 )
                 if refusal_progress != before:
                     save_refusal_progress(args.me, refusal_progress)
