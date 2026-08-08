@@ -3,6 +3,16 @@
 # from any session/agent: `bin/axsend-ensure ring --app Codex --submit ...`.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
+freshness_poll_interval="${AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS:-2}"
+freshness_poll_attempts="${AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS:-4}"
+if ! [[ "$freshness_poll_attempts" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid AXSEND_ENSURE_FRESHNESS_POLL_ATTEMPTS: $freshness_poll_attempts" >&2
+  exit 64
+fi
+if ! [[ "$freshness_poll_interval" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "invalid AXSEND_ENSURE_FRESHNESS_POLL_INTERVAL_SECONDS: $freshness_poll_interval" >&2
+  exit 64
+fi
 bash "$root/tools/axbridge/build.sh" >/dev/null
 
 app=""
@@ -101,8 +111,8 @@ if (( status != 0 )); then
   # Genuine setup/arg failures (1/2/3/64) propagate as-is — with their one
   # retained outcome line, when the wrapped command emitted one (GH-98).
   if (( status == 7 && is_submit_ring == 1 )) && [[ -n "$baseline_turns" ]]; then
-    for _attempt in 1 2 3 4; do
-      sleep 2
+    for ((_attempt = 1; _attempt <= freshness_poll_attempts; _attempt++)); do
+      sleep "$freshness_poll_interval"
       after_turns="$(turn_count)"
       if [[ -n "$after_turns" ]] && (( after_turns > baseline_turns )); then
         echo "[axsend-ensure] ring exited 7 but a NEW conversation turn appeared (${baseline_turns} -> ${after_turns}) — promoting to success on independent fresh-turn proof (no resend)."
