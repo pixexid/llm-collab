@@ -36,8 +36,9 @@ post-turn checks below provide the proof. Resolve and record the requested base
 SHA before spawning:
 
 ```bash
-git fetch origin main
-base_sha=$(git rev-parse origin/main)
+base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
+git fetch origin "$base_branch"
+base_sha=$(git rev-parse "origin/$base_branch")
 bb thread spawn \
   --project <bb-project-id> \
   --new-environment worktree \
