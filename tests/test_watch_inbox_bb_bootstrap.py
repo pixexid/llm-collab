@@ -161,6 +161,122 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             )
         )
 
+    def test_oversized_index_swap_never_reaches_a_second_watcher_read(self) -> None:
+        real_get_unread = watch_inbox.get_unread_messages
+        real_load_inbox = watch_inbox.load_agent_inbox
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-swap-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text('{"unread": [], "read": []}')
+
+            def snapshot_then_swap(*args, **kwargs):
+                messages = real_get_unread(*args, **kwargs)
+                inbox_path.write_text(
+                    json.dumps(
+                        {
+                            "unread": [],
+                            "read": [],
+                            "padding": "x" * 128,
+                        }
+                    )
+                )
+                return messages
+
+            argv = [
+                "watch_inbox.py",
+                "--me",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--poll-seconds",
+                "1",
+                "--max-polls",
+                "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                watch_inbox, "require_current_runtime"
+            ), patch.object(
+                watch_inbox, "agent_ids", return_value=["glmpi"]
+            ), patch.object(
+                watch_inbox, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                helpers, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                session_autobridge, "MAX_DISPATCH_INBOX_BYTES", 64
+            ), patch.object(
+                watch_inbox,
+                "get_unread_messages",
+                side_effect=snapshot_then_swap,
+            ), patch.object(
+                watch_inbox,
+                "load_agent_inbox",
+                wraps=real_load_inbox,
+            ) as second_read, patch.object(
+                watch_inbox, "load_refusal_progress", return_value={}
+            ), patch.object(
+                watch_inbox, "dispatch_autobridge"
+            ) as dispatch, patch.object(watch_inbox, "emit"):
+                watch_inbox.main()
+            swapped_size = inbox_path.stat().st_size
+
+        self.assertGreater(swapped_size, 64)
+        second_read.assert_not_called()
+        self.assertEqual({}, dispatch.call_args.kwargs["messages"])
+
+    def test_acknowledgement_cannot_split_unread_snapshot_from_bb_messages(self) -> None:
+        packet = self.packet()
+        path = packet["path"]
+
+        def bounded_snapshot(_agent_id, *, snapshot_paths, **_kwargs):
+            snapshot_paths.add(path)
+            return [packet]
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-ack-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text(json.dumps({"unread": [path], "read": []}))
+            argv = [
+                "watch_inbox.py",
+                "--me",
+                "glmpi",
+                "--project",
+                "project-one",
+                "--poll-seconds",
+                "1",
+                "--max-polls",
+                "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                watch_inbox, "require_current_runtime"
+            ), patch.object(
+                watch_inbox, "agent_ids", return_value=["glmpi"]
+            ), patch.object(
+                watch_inbox, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                watch_inbox,
+                "get_unread_messages",
+                side_effect=bounded_snapshot,
+            ), patch.object(
+                watch_inbox,
+                "load_agent_inbox",
+                return_value={"unread": [], "read": [path]},
+            ) as acknowledged_second_read, patch.object(
+                watch_inbox, "load_refusal_progress", return_value={}
+            ), patch.object(
+                watch_inbox, "dispatch_autobridge"
+            ) as dispatch, patch.object(watch_inbox, "emit") as emit:
+                watch_inbox.main()
+
+        acknowledged_second_read.assert_not_called()
+        self.assertTrue(
+            any(
+                call.args[0].get("event") == "new_message"
+                and call.args[0].get("detail") == path
+                for call in emit.call_args_list
+            ),
+            "the watcher treated the packet as acknowledged while passing its older "
+            "message snapshot to task-bearing dispatch",
+        )
+        self.assertEqual({path: packet}, dispatch.call_args.kwargs["messages"])
+
     def test_a_foreign_repo_packet_is_not_a_bootstrap_candidate(self) -> None:
         """Bootstrap runs BEFORE dispatch_session's repo gate.
 

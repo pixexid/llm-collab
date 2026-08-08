@@ -693,7 +693,12 @@ def mark_messages_read(agent_id: str, paths: list[str]) -> None:
         save_agent_inbox(agent_id, inbox)
 
 
-def get_unread_messages(agent_id: str, *, limit: int | None = None) -> list[dict]:
+def get_unread_messages(
+    agent_id: str,
+    *,
+    limit: int | None = None,
+    snapshot_paths: set[str] | None = None,
+) -> list[dict]:
     """Return every unread message, or the requested number of live messages."""
     from _session_autobridge import (
         MAX_DISPATCH_INBOX_BYTES,
@@ -710,6 +715,8 @@ def get_unread_messages(agent_id: str, *, limit: int | None = None) -> list[dict
                     f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; "
                     "refusing an incomplete result"
                 )
+            if snapshot_paths is not None:
+                snapshot_paths.update(unread_paths)
             if limit is not None and limit > MAX_MESSAGE_SCAN_ENTRIES:
                 raise InboxScanLimitExceeded(
                     f"requested inbox limit {limit} exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries"

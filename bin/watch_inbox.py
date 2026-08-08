@@ -1131,9 +1131,15 @@ def main():
                     message["path"]: message for message in exact_messages
                 }
             elif inbox_path.exists():
-                messages = {message["path"]: message for message in get_unread_messages(args.me)}
-                data = load_agent_inbox(args.me)
-                unread = set(data.get("unread", []))
+                unread = set()
+                messages = {
+                    message["path"]: message
+                    for message in get_unread_messages(
+                        args.me,
+                        snapshot_paths=unread,
+                    )
+                }
+                unread.update(messages)
             else:
                 unread = set()
                 messages = {}
