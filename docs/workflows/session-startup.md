@@ -121,8 +121,13 @@ they do not change that role.
 
 This is a configuration contract, not a claim about live PM2 state. The deploy
 transaction above reads the current ecosystem and fails unless every managed
-process's live script and arguments match it. Use that check whenever current
-runtime conformance matters; do not derive or preserve a second invocation.
+process's live script and arguments match it, and also refuses when a process
+the ecosystem does not declare is running the deployed runtime's own
+`bin/watch_inbox.py` — so an undeclared watcher cannot report conformance green.
+The match is on the property (a process executing that script), never a PM2 name
+pattern, so unrelated entries on this host are not implicated. Use that check
+whenever current runtime conformance matters; do not derive or preserve a second
+invocation.
 
 Do not use these commands against a parked or dirty operator checkout:
 

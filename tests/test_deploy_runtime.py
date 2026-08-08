@@ -423,6 +423,265 @@ class DeployRuntimeTest(unittest.TestCase):
         pm2_jlist.assert_called_once_with()
         sleep.assert_not_called()
 
+    def test_verify_refuses_on_undeclared_process_running_runtime_watcher(self):
+        # GH-675: the declared-process checks verify declared -> live. This is the
+        # converse. An undeclared process executing the deployed runtime's own
+        # bin/watch_inbox.py is a live dispatcher outside the ecosystem; conformance
+        # must refuse, not report green. The orphan uses a RELATIVE script path
+        # resolved against its own pm_cwd, exactly the reported shape, so the test
+        # exercises property binding (the script it executes), not a name match.
+        declared = {
+            "fixture-new": {
+                "cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            }
+        }
+        declared_record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        orphan = {
+            "name": "collab-gh562-case5-disposable",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["bin/watch_inbox.py", "--me", "gh562-bb-case5-recipient"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[declared_record, orphan]),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            with self.assertRaisesRegex(
+                deploy_runtime.DeployError,
+                r"undeclared PM2 process\(es\) are running the deployed runtime watcher"
+                r".*collab-gh562-case5-disposable",
+            ):
+                deploy_runtime.verify_deployment(
+                    Path("/deployed/runtime"),
+                    "new-sha",
+                    frozenset({"fixture-new"}),
+                    declared,
+                )
+
+        # The declared watcher's log probe never runs: the orphan gate refuses first.
+        pm2_run.assert_not_called()
+
+    def test_verify_refuses_on_undeclared_watcher_with_interpreter_flags(self):
+        # An ACCEPT shape from the argv enumeration: the operand is the first
+        # NON-FLAG arg, so an interpreter flag before the watch script (python's
+        # -u) must not hide it. Guards the operand-skip logic in _first_operand.
+        declared = {
+            "fixture-new": {
+                "cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            }
+        }
+        declared_record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        orphan = {
+            "name": "collab-ghost",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3.11",
+                "args": ["-u", "/deployed/runtime/bin/watch_inbox.py", "--me", "ghost"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[declared_record, orphan]),
+            patch.object(deploy_runtime, "pm2_run"),
+        ):
+            with self.assertRaisesRegex(
+                deploy_runtime.DeployError,
+                r"undeclared PM2 process\(es\) are running the deployed runtime watcher",
+            ):
+                deploy_runtime.verify_deployment(
+                    Path("/deployed/runtime"),
+                    "new-sha",
+                    frozenset({"fixture-new"}),
+                    declared,
+                )
+
+    def test_verify_does_not_block_stopped_undeclared_watcher(self):
+        # HEAD-2 finding 1: a stopped process dispatches nothing and pm2 save
+        # resurrects it stopped, so it must not block a deploy. The orphan that
+        # motivated GH-675 was stopped (reversible), not deleted -- refusing on a
+        # stopped entry would have blocked every future deploy on this machine.
+        declared = {
+            "fixture-new": {
+                "cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            }
+        }
+        declared_record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        stopped_orphan = {
+            "name": "collab-gh562-case5-disposable",
+            "pm2_env": {
+                "status": "stopped",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "ghost"],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[declared_record, stopped_orphan]),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            deploy_runtime.verify_deployment(
+                Path("/deployed/runtime"),
+                "new-sha",
+                frozenset({"fixture-new"}),
+                declared,
+            )
+
+        pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
+
+    def test_verify_does_not_block_when_watch_path_is_only_a_data_argument(self):
+        # HEAD-2 finding 2: an unrelated app that merely RECEIVES the watcher path
+        # as data is not executing it. Only the script field or the interpreter's
+        # first operand counts; a path in a flag-value/later-argument position is
+        # data. The positive case (online undeclared watcher) still refuses, so
+        # this negative is what distinguishes "detect executing" from "flag any
+        # mention of the path".
+        declared = {
+            "fixture-new": {
+                "cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            }
+        }
+        declared_record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        data_arg_app = {
+            "name": "unrelated-ingest",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "node",
+                "args": [
+                    "/deployed/runtime/bin/server.js",
+                    "--input",
+                    "/deployed/runtime/bin/watch_inbox.py",
+                ],
+            },
+        }
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=[declared_record, data_arg_app]),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            deploy_runtime.verify_deployment(
+                Path("/deployed/runtime"),
+                "new-sha",
+                frozenset({"fixture-new"}),
+                declared,
+            )
+
+        pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
+
+    def test_verify_does_not_implicate_unrelated_pm2_entries(self):
+        # The other direction of GH-675: a check that flagged ANY unrecognized PM2
+        # entry would also "detect" the orphan, so detection alone cannot
+        # distinguish this fix from one that flags everything. These undeclared
+        # processes must NOT be implicated: an unrelated host app, a collab-named
+        # process running a different script, and a DIFFERENT runtime's
+        # watch_inbox.py. None execute THIS runtime's watcher, so conformance
+        # stays green and the declared log probe runs normally.
+        declared = {
+            "fixture-new": {
+                "cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            }
+        }
+        declared_record = {
+            "name": "fixture-new",
+            "pm2_env": {
+                "status": "online",
+                "pm_cwd": "/deployed/runtime",
+                "script": "python3",
+                "args": ["/deployed/runtime/bin/watch_inbox.py", "--me", "codex"],
+            },
+        }
+        unrelated = [
+            {
+                "name": "other-project-worker",
+                "pm2_env": {
+                    "status": "online",
+                    "pm_cwd": "/elsewhere",
+                    "script": "node",
+                    "args": ["/elsewhere/server.js"],
+                },
+            },
+            {
+                "name": "collab-lookalike",
+                "pm2_env": {
+                    "status": "online",
+                    "pm_cwd": "/deployed/runtime",
+                    "script": "node",
+                    "args": ["/deployed/runtime/bin/some_other_tool.js"],
+                },
+            },
+            {
+                "name": "stale-other-runtime",
+                "pm2_env": {
+                    "status": "online",
+                    "pm_cwd": "/other/runtime",
+                    "script": "python3",
+                    "args": ["/other/runtime/bin/watch_inbox.py", "--me", "ghost"],
+                },
+            },
+        ]
+        full_list = [declared_record, *unrelated]
+        with (
+            patch.object(deploy_runtime, "git", side_effect=["new-sha", ""]),
+            patch.object(deploy_runtime, "pm2_jlist", return_value=full_list),
+            patch.object(deploy_runtime, "pm2_run") as pm2_run,
+        ):
+            deploy_runtime.verify_deployment(
+                Path("/deployed/runtime"),
+                "new-sha",
+                frozenset({"fixture-new"}),
+                declared,
+            )
+
+        pm2_run.assert_called_once_with(["logs", "fixture-new", "--lines", "1", "--nostream"])
+
     def test_managed_processes_does_not_match_related_workspace_names(self):
         records = [
             {"name": "foo-worker"},

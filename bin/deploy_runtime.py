@@ -300,18 +300,26 @@ def _process_is_terminal_failure(record: dict) -> bool:
 def wait_for_managed_readiness(
     owned_names: frozenset[str],
     definitions: dict[str, dict],
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], list[dict]]:
+    """Wait for declared PM2 processes to be online with populated metadata.
+
+    Returns the owned managed processes and the FULL pm2 jlist snapshot from the
+    readiness poll, so a caller can run converse checks (an undeclared process
+    running this runtime's watcher) against the same process list rather than
+    re-reading pm2.
+    """
     deadline = time.monotonic() + PM2_READINESS_TIMEOUT_SECONDS
     expected = set(definitions)
     while True:
-        actual = managed_processes(pm2_jlist(), owned_names)
+        records = pm2_jlist()
+        actual = managed_processes(records, owned_names)
         if any(
             _process_is_terminal_failure(actual[name])
             for name in expected.intersection(actual)
         ):
-            return actual
+            return actual, records
         if expected.issubset(actual) and all(_process_is_ready(actual[name]) for name in expected):
-            return actual
+            return actual, records
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             details = []
@@ -345,6 +353,111 @@ def wait_for_managed_readiness(
         time.sleep(min(PM2_READINESS_POLL_SECONDS, remaining))
 
 
+def _record_status(record: dict) -> str | None:
+    """The PM2 status of a record, or None when it is not usable.
+
+    None (rather than raising) so the undeclared-watcher scan can skip records
+    that carry no status instead of aborting a deploy over an unrelated process.
+    """
+    environment = record.get("pm2_env")
+    if not isinstance(environment, dict):
+        return None
+    status = environment.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _first_operand(args: object) -> str | None:
+    """The program an interpreter runs: the first non-flag token in ``args``.
+
+    A leading ``-`` marks an interpreter flag (python's ``-u``), not the program,
+    so it is skipped. Everything after the operand belongs to that program, so a
+    path that appears only as a later positional or as a flag value is DATA, not
+    an executed script. Mirrors how an interpreter itself picks argv[0]. ``args``
+    is a list on this install; the string branch guards a representation change.
+    """
+    if isinstance(args, list):
+        tokens = [str(arg) for arg in args if isinstance(arg, (str, int, float))]
+    elif isinstance(args, str):
+        tokens = args.split()
+    else:
+        return None
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        return token
+    return None
+
+
+def _token_resolves_to(token: str, cwd: str | None, resolved_watch_script: str) -> bool:
+    """True when ``token`` refers to the runtime's watch script.
+
+    Absolute tokens compare normalized; relative tokens resolve against the
+    process ``pm_cwd`` first, which is exactly the GH-675 orphan shape (a process
+    that ran ``bin/watch_inbox.py`` from ``cwd = <runtime>``). Symlinks are
+    deliberately not resolved, matching the ecosystem config's convention.
+    """
+    candidate = Path(token)
+    if not candidate.is_absolute():
+        if cwd is None:
+            return False
+        candidate = Path(cwd) / token
+    return os.path.normpath(str(candidate)) == resolved_watch_script
+
+
+def _record_executes_watch_script(record: dict, resolved_watch_script: str) -> bool:
+    """True when a LIVE process is executing the runtime's watch script.
+
+    Two executable positions count and only those: the ``script`` field itself
+    (a directly-invoked watcher), or the first non-flag operand of ``args`` (the
+    program an interpreter runs). A path that appears only as a later argument or
+    a flag value is data, not an executed script, so it is not flagged (an
+    unrelated app that merely receives the watcher path as input is not a
+    dispatcher). Only a process in a live PM2 status can dispatch -- a stopped or
+    errored entry has no live process and ``pm2 save`` resurrects it stopped, not
+    live -- so it is not an offender even when its command line names the script.
+    """
+    if _record_status(record) not in PM2_LIVE_STATUSES:
+        return False
+    environment = record["pm2_env"]
+    cwd = environment.get("pm_cwd")
+    cwd_text = cwd if isinstance(cwd, str) else None
+    script = environment.get("script")
+    if isinstance(script, str) and _token_resolves_to(script, cwd_text, resolved_watch_script):
+        return True
+    operand = _first_operand(environment.get("args"))
+    return operand is not None and _token_resolves_to(operand, cwd_text, resolved_watch_script)
+
+
+def refuse_undeclared_runtime_watchers(
+    target: Path, declared_names: set[str], records: list[dict]
+) -> None:
+    """Refuse when a process the ecosystem does not declare runs the deployed
+    runtime's own watcher — the converse of the declared-process checks.
+
+    Without this, an undeclared PM2 entry executing ``<target>/bin/watch_inbox.py``
+    is a live dispatcher on the same inbox and log surfaces while conformance
+    reports green (GH-675). The predicate is the property — a process executing
+    that script — never a name pattern, so unrelated PM2 entries on this host are
+    not implicated and only THIS runtime's watcher is bound. Read-only: it inspects
+    the snapshot, never stop/start/delete/restart.
+    """
+    resolved_watch_script = os.path.normpath(str(target / "bin" / "watch_inbox.py"))
+    offenders = [
+        record["name"]
+        for record in records
+        if isinstance(record.get("name"), str)
+        and record["name"] not in declared_names
+        and _record_executes_watch_script(record, resolved_watch_script)
+    ]
+    if offenders:
+        raise DeployError(
+            "undeclared PM2 process(es) are running the deployed runtime watcher "
+            f"(bin/watch_inbox.py): {sorted(offenders)!r}; this is a live dispatcher "
+            "outside the ecosystem, so conformance cannot be established until it is "
+            "stopped or declared"
+        )
+
+
 def verify_deployment(
     target: Path,
     head: str,
@@ -355,12 +468,13 @@ def verify_deployment(
         raise DeployError(f"target head does not match deployed head {head}")
     if git(target, "status", "--porcelain=v1", "--untracked-files=no"):
         raise DeployError("deployed target has tracked changes after reset")
-    actual = wait_for_managed_readiness(owned_names, definitions)
+    actual, records = wait_for_managed_readiness(owned_names, definitions)
     expected = set(definitions)
     if set(actual) != expected:
         missing = sorted(expected - set(actual))
         extra = sorted(set(actual) - expected)
         raise DeployError(f"PM2 roster mismatch: missing={missing} extra={extra}")
+    refuse_undeclared_runtime_watchers(target, expected, records)
     for name, definition in definitions.items():
         record = actual[name]
         environment = record.get("pm2_env")
