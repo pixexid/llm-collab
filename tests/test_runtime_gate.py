@@ -191,6 +191,44 @@ class RuntimeGateTest(unittest.TestCase):
                     current_runtime.require_current_runtime("deliver", environ=env)
             self.assertEqual(current_runtime.RUNTIME_GATE_REFUSED, cm.exception.code)
 
+    def test_removed_cwd_reaches_controlled_runtime_refusal(self):
+        script = r"""
+import os
+import sys
+import tempfile
+
+repo = sys.argv[1]
+removed = tempfile.mkdtemp()
+os.chdir(removed)
+os.rmdir(removed)
+sys.path.insert(0, repo + "/bin")
+
+import current_runtime
+
+def controlled_refusal():
+    raise current_runtime.ToolingError("controlled refusal")
+
+current_runtime.current_tooling = controlled_refusal
+try:
+    current_runtime.require_current_runtime(
+        "deliver", environ={}, exit_on_refusal=False
+    )
+except current_runtime.ToolingError as error:
+    print(error)
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", script, str(REPO_ROOT)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual("controlled refusal", proc.stdout.strip())
+        self.assertIn("[runtime-gate] REFUSED 'deliver'", proc.stderr)
+
     def test_fifo_sentinel_fails_closed_without_hanging(self):
         # Force the old stat-then-open implementation past its type check. Its
         # blocking open then hangs on this writer-less FIFO; the descriptor-based

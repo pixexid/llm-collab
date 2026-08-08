@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from _session_autobridge import UnreadableFile, read_regular_file_bounded
+from _bounded_io import UnreadableFile, read_regular_file_bounded
 
 
 ROOT = Path(__file__).resolve().parent.parent

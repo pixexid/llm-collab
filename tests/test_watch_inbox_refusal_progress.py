@@ -608,7 +608,12 @@ class SkipBeforeReadTest(unittest.TestCase):
                 return b'{"unread": ["Chats/x/skipme.md", "Chats/x/keep.md"]}'
             return b"---\nproject_id: llm-collab\n---\n"
 
+        def fake_read_with_identity(path, limit):
+            return fake_read(path, limit), None
+
         with patch.object(sab, "read_regular_file_bounded", side_effect=fake_read), patch.object(
+            sab, "read_regular_file_bounded_with_identity", side_effect=fake_read_with_identity
+        ), patch.object(
             sab, "agent_inbox_path", return_value=Path("/tmp/inbox.json")
         ):
             sab.bounded_unread_messages("claude", skip_paths={"Chats/x/skipme.md"})
