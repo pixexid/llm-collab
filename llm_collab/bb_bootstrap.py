@@ -45,6 +45,37 @@ TERMINAL_BINDING_STATES = frozenset(
     {"unreadable", "mismatch", "ambiguous", "scope_refused"}
 )
 
+# Frontmatter fields that bind a packet to a writer lane. ``deliver.py
+# --activation`` emits them atomically (each requires ``--related-task``,
+# ``--worktree`` and ``--branch`` together), and owning a branch to write to is
+# what makes a delegation an implementation/authoring assignment rather than a
+# read-only analysis one. Mirrors ``ACTIVATION_MARKER_FIELDS`` in
+# ``bin/_activation_identity.py``; kept independent here so the library decision
+# does not import from ``bin/``.
+WRITER_LANE_FIELDS = ("worktree", "branch")
+
+
+def packet_is_authoring_assignment(packet: Mapping[str, Any] | None) -> bool:
+    """True iff the packet carries a writer-lane identity (an authoring assignment).
+
+    The bb bootstrap's only measured profile (``SLICE_1A_PROFILE``) is read-only,
+    so a packet that owns a write lane must refuse as ``profile_unavailable``
+    (GH-596) rather than launch an analysis-only model on implementation work.
+
+    Detection keys on the lane artifacts (``worktree``/``branch``), not on the
+    packet body: a guard bound to how a caller phrased the prompt is the wrong
+    proxy, and a caller cannot grant a writer lane without these markers —
+    ``deliver.py --activation`` atomically requires them. A writing delegation
+    therefore cannot reach the read-only launch path, and a packet without them
+    has no branch to write to and is not an authoring assignment.
+    """
+    if not isinstance(packet, Mapping):
+        return False
+    return any(
+        isinstance(packet.get(field), str) and packet.get(field, "").strip()
+        for field in WRITER_LANE_FIELDS
+    )
+
 
 @dataclass(frozen=True)
 class BootstrapRefusal:
@@ -193,6 +224,12 @@ BOOTSTRAP_DUPLICATE = "bb_bootstrap_duplicate_first_packet"
 BOOTSTRAP_AMBIGUOUS = "bb_bootstrap_ambiguous_start"
 BOOTSTRAP_ORPHANED = "bb_bootstrap_orphaned"
 BOOTSTRAP_FAILED = "bb_bootstrap_failed"
+# No authoring-qualified BB profile exists yet (GH-596): the only measured
+# profile (SLICE_1A_PROFILE) is read-only. A writer-lane first delivery refuses
+# here rather than launching an analysis-only model on implementation work. This
+# is the implemented fail-closed half of the prospective profile_unavailable
+# selector; a later authoring evaluation lifts it per model.
+BOOTSTRAP_PROFILE_UNAVAILABLE = "bb_bootstrap_profile_unavailable"
 
 
 def execute_bootstrap(

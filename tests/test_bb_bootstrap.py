@@ -18,12 +18,14 @@ from llm_collab.bb_bootstrap import (
     BOOTSTRAP_TERMINAL_BINDING,
     BOOTSTRAP_REPO_TARGET_AMBIGUOUS,
     BOOTSTRAP_REPO_TARGET_REQUIRED,
+    BOOTSTRAP_PROFILE_UNAVAILABLE,
     BootstrapPlan,
     BootstrapRefusal,
     plan_bootstrap,
     project_enables_bb,
     resolve_bootstrap_repo_id,
     execute_bootstrap,
+    packet_is_authoring_assignment,
     BOOTSTRAP_STARTED,
     BOOTSTRAP_DUPLICATE,
     BOOTSTRAP_AMBIGUOUS,
@@ -251,6 +253,52 @@ class ExecuteBootstrapTest(unittest.TestCase):
         outcome = self._run(start=start)
         self.assertEqual(BOOTSTRAP_ORPHANED, outcome.state)
         self.assertEqual("thr_both", outcome.native_thread_id)
+
+
+class AuthoringAssignmentTest(unittest.TestCase):
+    """GH-596: the bb bootstrap must refuse a writer-lane first delivery because
+    no profile is authoring-qualified. The work type is read from the lane
+    identity the packet carries, never from its body."""
+
+    def test_a_packet_with_a_worktree_is_an_authoring_assignment(self):
+        self.assertTrue(
+            packet_is_authoring_assignment(
+                {"worktree": "/repo/worktrees/lane", "branch": "feat/x"}
+            )
+        )
+
+    def test_a_packet_with_only_a_branch_is_an_authoring_assignment(self):
+        # A real activation carries both atomically; either lane artifact alone is
+        # already enough to identify a writer-lane packet and fail closed.
+        self.assertTrue(packet_is_authoring_assignment({"branch": "feat/x"}))
+
+    def test_a_read_only_analysis_packet_is_not_authoring(self):
+        self.assertFalse(
+            packet_is_authoring_assignment(
+                {"canonical_message_id": "cmid_1", "body": "audit the source"}
+            )
+        )
+
+    def test_blank_lane_fields_do_not_count(self):
+        self.assertFalse(packet_is_authoring_assignment({"worktree": "   "}))
+
+    def test_a_non_mapping_is_not_authoring(self):
+        self.assertFalse(packet_is_authoring_assignment(None))
+        self.assertFalse(packet_is_authoring_assignment("not a packet"))
+
+    def test_the_body_text_is_not_the_signal(self):
+        # A guard bound to how the caller phrased the prompt is the wrong proxy:
+        # an analysis packet whose body happens to say "implement" is still
+        # read-only because it carries no writer lane.
+        self.assertFalse(
+            packet_is_authoring_assignment({"body": "implement feature X now"})
+        )
+
+    def test_profile_unavailable_is_a_distinct_outcome_state(self):
+        self.assertEqual(
+            "bb_bootstrap_profile_unavailable", BOOTSTRAP_PROFILE_UNAVAILABLE
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

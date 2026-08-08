@@ -1854,6 +1854,21 @@ def execute_bb_bootstrap_plan(
     SessionLifecycleCore = lifecycle_module.SessionLifecycleCore
     TrustedProjectRoot = lifecycle_module.TrustedProjectRoot
 
+    # Fail closed at the profile-resolution seam, before any ledger write or
+    # native spawn: the only measured profile (SLICE_1A_PROFILE) is read-only, so
+    # a writer-lane first delivery cannot launch on it. This is the implemented
+    # profile_unavailable refusal (GH-596); it owns no second routing table, it
+    # only refuses the work type no measured profile supports.
+    if bootstrap_module.packet_is_authoring_assignment(packet):
+        return bootstrap_module.BootstrapOutcome(
+            bootstrap_module.BOOTSTRAP_PROFILE_UNAVAILABLE,
+            detail=(
+                "first packet carries a writer-lane identity (worktree/branch); "
+                "no BB profile is authoring-qualified, so it cannot launch on the "
+                "read-only SLICE_1A_PROFILE"
+            ),
+        )
+
     workspace_id = config_get("workspace_id")
     if not isinstance(workspace_id, str) or not workspace_id:
         raise ValueError("workspace_id is required for bb bootstrap")

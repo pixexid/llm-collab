@@ -585,6 +585,12 @@ def _bb_first_packets(
             "path": path,
             "body": message.get("body", ""),
             "repo_targets": frontmatter.get("repo_targets"),
+            # Carry the writer-lane identity so execute_bb_bootstrap_plan can
+            # fail closed on an authoring assignment before resolving the
+            # read-only SLICE_1A_PROFILE (GH-596). deliver.py --activation
+            # writes these atomically; their absence means read-only analysis.
+            "worktree": frontmatter.get("worktree"),
+            "branch": frontmatter.get("branch"),
         }
         previous = first.get(chat_id)
         if previous is None or path < previous["path"]:

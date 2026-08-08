@@ -37,9 +37,14 @@ execution host.
 
 A Phase 2 selector must require the exact `provider`, `model`, and
 `reasoning_level` to be present and refuse as `profile_unavailable` otherwise;
-it must not fall back. This refusal is policy intent, not a currently
-implemented selector. `pi` is a multi-vendor provider, so its model IDs retain
-their vendor prefix, such as `kimi-coding/k3` or `zai/glm-5.2`.
+it must not fall back. The fail-closed half is implemented: a writer-lane first
+delivery (a packet carrying the `worktree`/`branch` activation identity, i.e.
+an implementation/authoring assignment) refuses as `bb_bootstrap_profile_unavailable`
+in the bb bootstrap rather than launching on `SLICE_1A_PROFILE`, because no
+profile is authoring-qualified yet (GH-596). Work-type → profile *routing* and
+per-model authoring evaluation remain Phase 2; this refusal is what a later
+authoring measurement lifts per model. `pi` is a multi-vendor provider, so its
+model IDs retain their vendor prefix, such as `kimi-coding/k3` or `zai/glm-5.2`.
 
 ## Routing tiers
 
@@ -59,14 +64,21 @@ usage limits. The observed failure modes are actionable—load does not explain 
 authoring, so it places no model on an implementation lane.
 
 Prospective policy: no unmeasured or text-unstable model may own a gate, money
-path, authority path, or implementation lane. This broader policy is not
-enforced today; only the measured hard exclusions above are active. BB
-bootstrap currently passes every first packet body to the hard-coded
-`SLICE_1A_PROFILE` (`pi / kimi-coding/k3 / high`) regardless of work type; see
-`llm_collab/bb_client.py:120-122` and `bin/_session_autobridge.py:1700-1712`.
-An implementation delegation can therefore start the analysis-only K3 profile.
-The Phase 2 selector must enforce this policy; until then, the non-excluded
-measured models' advisory-only status is intent, not an activation control.
+path, authority path, or implementation lane. The measured hard exclusions
+above are active, and the bb bootstrap now enforces the fail-closed half for
+implementation lanes (GH-596): `packet_is_authoring_assignment` in
+`llm_collab/bb_bootstrap.py` classifies a first delivery by its writer-lane
+identity (`worktree`/`branch`, atomically required by `deliver.py
+--activation`), and `execute_bb_bootstrap_plan` returns
+`bb_bootstrap_profile_unavailable` for it before resolving the read-only
+`SLICE_1A_PROFILE` (`pi / kimi-coding/k3 / high`). Read-only analysis first
+deliveries still launch on that profile. The classification keys on the lane
+artifacts, never the packet body: a guard bound to how a caller phrased the
+prompt is the wrong proxy, and a writing delegation cannot grant a lane without
+those markers. Work-type → profile routing and authoring evaluation remain
+Phase 2; until then, an explicitly selected writing lane (`bin/bb_spawn.py`)
+operates under the orchestrator review controls in
+[`bb-workers.md`](bb-workers.md), not a claimed property of the model.
 
 ## Named profile candidates
 
