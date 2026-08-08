@@ -74,7 +74,7 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 )
             self.assertEqual(config["workspace_id"], "ws_existing123")
 
-    def test_fresh_init_prints_bounded_pm2_log_rotation_setup(self) -> None:
+    def test_fresh_init_prints_ordered_pm2_rotation_setup_and_coverage_gate(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _, output = self.run_minimal_init(
@@ -82,14 +82,24 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 ["test", str(root / "repos"), str(root / "state"), "15", "n"],
             )
 
-        for command in (
+        expected_flow = (
+            "Configure PM2 log rotation, start watchers, then verify both log paths",
             "pm2 install pm2-logrotate",
             "pm2 set pm2-logrotate:max_size 10M",
             "pm2 set pm2-logrotate:retain 7",
             "pm2 set pm2-logrotate:compress true",
             "pm2 set pm2-logrotate:rotateInterval '0 0 * * *'",
-        ):
-            self.assertIn(command, output)
+            "bin/llm-collab pm2_watchers.py start --all",
+            "sleep 35",
+            "pm2 trigger pm2-logrotate 'list watched logs'",
+            "PASS only if the returned map includes Logs/watchers/ and ~/.pm2/logs/ paths.",
+            "If either path class is missing, stop; see docs/adapters/pm2.md.",
+        )
+        positions = []
+        for step in expected_flow:
+            self.assertIn(step, output)
+            positions.append(output.index(step))
+        self.assertEqual(sorted(positions), positions)
 
     def test_add_workspace_id_is_backup_protected_atomic_and_non_destructive(self) -> None:
         with TemporaryDirectory() as tmp:
