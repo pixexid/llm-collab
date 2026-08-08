@@ -9,12 +9,13 @@ Only `projects/_example/` is intended to be tracked in the open-source repo. Rea
 Recommended read order:
 
 1. `session-startup.md`
-2. `claude-code-desktop-computer-use-bridge.md` — the canonical agent-to-agent
-   comms reference (Codex-only Computer-Use doorbell + bidirectional `llm-collab`
-   mailbox); read whenever desktop-app agents need to notify each other
+2. `claude-code-desktop-computer-use-bridge.md` — dormant for BB routing; still
+   current for registered participants when `deliver.py` offers a doorbell;
+   BB workers should use `bb-workers.md` for current BB operations
 3. `session-autobridge-runbook.md` — routine exact-session dispatch, the primary
    wake for every watcher-backed recipient (contract v12); bounded
-   polling/heartbeat observation remains a safety-fuse only
+   polling/heartbeat observation remains a safety-fuse only (dormant for BB
+   workers; see its banner)
 4. `thread-event-runner-rfc.md` — Phase 1 architecture/threat contract for a
    planned durable event runner; no runner or exact-thread dispatcher is
    implemented by this RFC

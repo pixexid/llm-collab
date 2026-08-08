@@ -130,4 +130,6 @@ creation and wake delivery untouched and reports the recovery condition clearly.
 - [`session-autobridge-runbook.md`](session-autobridge-runbook.md) — binding activate /
   inspect / deactivate, and the minimum proof before relying on a watcher.
 - [`claude-code-desktop-computer-use-bridge.md`](claude-code-desktop-computer-use-bridge.md)
+  (dormant for BB routing; current for registered participants when `deliver.py`
+  offers a doorbell)
   — agent-to-agent wake/doorbell reference.

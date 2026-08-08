@@ -51,7 +51,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
+5. only then request worker activation through the approved mailbox path; routine wake is session-autobridge dispatch, and use a doorbell only when `deliver.py` prints one (see the contract v12 routing rule)
 
 ## Provisioning ownership
 
@@ -71,7 +71,7 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request worker activation by ringing/notifying the assigned worker through the approved mailbox + doorbell path
+5. only then request worker activation through the approved mailbox path; routine wake is session-autobridge dispatch, and use a doorbell only when `deliver.py` prints one (see the contract v12 routing rule)
 
 ## Required metadata
 
