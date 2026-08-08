@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _ax_trust import format_ax_status, probe_ax_trust
@@ -43,6 +44,9 @@ from _helpers import (
 
 COMMANDS = ("start", "restart", "ensure", "stop", "delete", "status", "logs")
 DEFAULT_PM2_TIMEOUT_SECONDS = 15
+SIDECAR_READINESS_TIMEOUT_SECONDS = 15
+SIDECAR_READINESS_POLL_SECONDS = 0.25
+SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS = 1
 
 # The blank set for token CONTENT, pinned explicitly because neither language's default
 # matches the CLI and the two defaults are inverted from each other. Python's str.strip()
@@ -269,6 +273,41 @@ def ecosystem_path() -> Path:
     return RUNTIME_ROOT / "pm2" / "ecosystem.config.cjs"
 
 
+def codex_sidecar_is_ready() -> bool:
+    curl = shutil.which("curl")
+    if not curl:
+        print("[error] curl not found; cannot probe Codex app-server readiness", file=sys.stderr)
+        sys.exit(1)
+    port = os.environ.get("LLM_COLLAB_CODEX_APP_SERVER_PORT", "8767")
+    try:
+        result = subprocess.run(
+            [curl, "-s", f"http://127.0.0.1:{port}/readyz"],
+            capture_output=True,
+            text=True,
+            timeout=SIDECAR_READINESS_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def wait_for_codex_sidecar_readiness() -> None:
+    deadline = time.monotonic() + SIDECAR_READINESS_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if codex_sidecar_is_ready():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(SIDECAR_READINESS_POLL_SECONDS, remaining))
+    print(
+        f"[error] Codex app-server /readyz did not succeed within "
+        f"{SIDECAR_READINESS_TIMEOUT_SECONDS}s",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def start_agent(agent_id: str) -> None:
     if not is_sidecar(agent_id):
         agent = get_agent(agent_id)
@@ -294,6 +333,8 @@ def ensure_agent(agent_id: str) -> None:
         print(f"[watcher] {agent_id} already running.")
     else:
         start_agent(agent_id)
+    if is_sidecar(agent_id):
+        wait_for_codex_sidecar_readiness()
 
 
 def main():

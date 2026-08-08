@@ -186,7 +186,7 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
         raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
 
 
-CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 50
+CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 65
 
 
 def ensure_codex_transport() -> None:
