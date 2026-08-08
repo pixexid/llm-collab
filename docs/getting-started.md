@@ -118,25 +118,37 @@ python bin/init_agent_memory.py --agent claude --target claude-md \
   --project-path ~/Projects/my-app --write
 ```
 
-## Step 4: Enable background watchers (optional)
+## Step 4: Background watchers and PM2 log rotation
 
-Before any watcher-enabled bootstrap, follow the canonical
+The bootstrap command in Step 5 starts a background watcher for `cli_session`
+agents, and an unrotated watcher is exactly the state this workspace avoids.
+Before any watcher-enabled bootstrap, complete the canonical
 [PM2 Log Rotation workflow](workflows/pm2-log-rotation.md) end to end. It owns
 the archive-before-install gate, configuration, watcher start, retention, and
 two-store verification; this guide intentionally does not copy those commands.
 
+If you are not completing rotation, decline the watcher too by passing
+`--no-watcher` to the bootstrap command in Step 5. Declining rotation and
+declining the watcher are the same choice: there is no documented path that
+starts a watcher while skipping rotation.
+
 ## Step 5: Bootstrap agent sessions
 
-At the start of **every LLM session**, run the bootstrap command:
+At the start of **every LLM session**, run the bootstrap command. Complete Step 4
+first if you want a background watcher; otherwise pass `--no-watcher` to start
+without one:
 
 ```bash
+# with a background watcher (Step 4 completed):
 ~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent <id>
+# without a watcher (rotation skipped):
+~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent <id> --no-watcher
 ```
 
 This:
 1. Prints your `identity.md` — the LLM immediately knows who it is
 2. Shows unread inbox
-3. Starts the background watcher (for `cli_session` agents)
+3. Starts the background watcher (for `cli_session` agents, unless `--no-watcher`)
 
 For `human_relay` agents: you paste the bootstrap command into the new LLM session. The system generates this command automatically when someone sends them a message.
 

@@ -785,13 +785,18 @@ def main(*, input_fn: Callable[[str], str] | None = None):
 
     divider()
     print("\n[Next steps]\n")
-    print("1. PM2 log rotation (optional, before watcher-enabled bootstrap):")
+    print("1. PM2 log rotation, required before any watcher-enabled bootstrap:")
     print("   docs/workflows/pm2-log-rotation.md")
+    print("   Declining it declines the watcher: bootstrap with --no-watcher.")
     print()
     print("2. Bootstrap each agent session:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
-            print(f"   {RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {a['id']}")
+            # An agent the operator did not enable a watcher for bootstraps with
+            # --no-watcher, so declining rotation and declining the watcher are
+            # one choice: no printed command can start an unrotated watcher.
+            suffix = "" if a.get("activation", {}).get("watcher_enabled") else " --no-watcher"
+            print(f"   {RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {a['id']}{suffix}")
     print()
     print("3. Generate memory snippets for your LLM tools:")
     for a in agents:

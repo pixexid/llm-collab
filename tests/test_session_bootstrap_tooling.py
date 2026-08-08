@@ -501,5 +501,75 @@ class BindingDriftBannerTest(unittest.TestCase):
         )
 
 
+class NoWatcherDeclineTest(unittest.TestCase):
+    """GH-673: the --no-watcher bootstrap is the genuinely-optional path.
+
+    The setup flow prints --no-watcher for any agent that declined a watcher, so
+    declining rotation and declining the watcher are one choice. That path must
+    still work — it bootstraps successfully and never starts a watcher — even for
+    an agent whose activation is watcher-enabled, where --no-watcher is the ONLY
+    thing preventing the watcher.
+    """
+
+    def _run_bootstrap(self, *, no_watcher: bool) -> tuple[object, str]:
+        argv = ["session_bootstrap.py", "--agent", "claude"]
+        if no_watcher:
+            argv.append("--no-watcher")
+        output = StringIO()
+        start_calls: list[str] = []
+        ax = SimpleNamespace(as_dict=lambda: {})
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
+            patch.object(
+                session_bootstrap,
+                "get_agent",
+                return_value={
+                    "id": "claude",
+                    "activation": {"type": "cli_session", "watcher_enabled": True},
+                },
+            ),
+            patch.object(
+                session_bootstrap,
+                "tooling_currency",
+                return_value={"state": "current", "head": "abc", "fetched": True},
+            ),
+            patch.object(session_bootstrap, "announce_tooling"),
+            patch.object(session_bootstrap, "dependency_report", return_value={}),
+            patch.object(session_bootstrap, "announce_dependencies"),
+            patch.object(session_bootstrap, "announce_contract"),
+            patch.object(
+                session_bootstrap,
+                "agent_identity_path",
+                return_value=Path("/definitely/missing/identity.md"),
+            ),
+            patch.object(session_bootstrap, "binding_drifts", return_value={"status": "clear"}),
+            patch.object(session_bootstrap, "announce_binding_drifts"),
+            patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
+            patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
+            patch.object(session_bootstrap, "get_unread_messages", return_value=[]),
+            patch.object(session_bootstrap, "queue_summaries", return_value=[]),
+            patch.object(
+                session_bootstrap,
+                "start_watcher",
+                side_effect=lambda agent_id: start_calls.append(agent_id) or {"status": "ok"},
+            ),
+            redirect_stdout(output),
+        ):
+            session_bootstrap.main()
+        return start_calls, output.getvalue()
+
+    def test_no_watcher_skips_start_even_for_a_watcher_enabled_agent(self) -> None:
+        start_calls, _ = self._run_bootstrap(no_watcher=True)
+        self.assertEqual([], start_calls, "--no-watcher must not start the watcher")
+
+    def test_without_no_watcher_the_watcher_starts(self) -> None:
+        # Discriminating complement: without --no-watcher the same watcher-enabled
+        # agent DOES start its watcher, so the skip above is owed to the flag and
+        # not to the activation or the mocks.
+        start_calls, _ = self._run_bootstrap(no_watcher=False)
+        self.assertEqual(["claude"], start_calls)
+
+
 if __name__ == "__main__":
     unittest.main()
