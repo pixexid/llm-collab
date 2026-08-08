@@ -47,12 +47,14 @@ proof.
 
 ### Restarted first-class sessions
 
-A restarted session owns its binding repair. At bootstrap, if the runtime id no
-longer matches the active canonical binding, the worker self-heals by running the
-exact `session_autobridge.py register --supersedes-session` command printed in the
-drift banner; the banner itself only detects and reports, and never mutates or
-refuses bootstrap. The named stale lease must be superseded by the worker that
-knows its new native runtime id.
+A restarted session owns reporting its binding drift because only it knows its
+new native runtime id. Bootstrap detects and reports an exact mismatch but never
+mutates or refuses; when several active scopes could be peers, it reports the
+ambiguity without naming a supersession target. There is currently no
+self-service repair command for a non-Pi canonical binding: ordinary
+`register --supersedes-session` updates the session and file binding but not the
+canonical ledger, so bootstrap deliberately does not print that ineffective and
+potentially destructive command.
 
 Rebinding does not recover packets already addressed to the dead runtime id.
 Those packets stay invisible to exact reads because the exact-read target filter

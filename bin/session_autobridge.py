@@ -657,7 +657,8 @@ def register_session(args) -> dict:
         runtime["session_id"] = args.runtime_session_id
     if args.runtime_session_source is not None:
         runtime["session_source"] = args.runtime_session_source
-    runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
+    explicit_runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
+    runtime_home = explicit_runtime_home
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
         # The derived fallback must pass through the SAME invariant as an explicit
         # --runtime-home. Stored raw, a relative or non-normalized source produced a home
@@ -693,8 +694,13 @@ def register_session(args) -> dict:
         project_path = resolve_project_repo_path(str(args.project), "app")
         evidence = "unprovable"
         if project_path is not None:
+            artifact_home = (
+                Path(explicit_runtime_home)
+                if explicit_runtime_home is not None
+                else claude_home()
+            )
             artifact = (
-                claude_home()
+                artifact_home
                 / "projects"
                 / str(claude_project_slug(str(project_path)))
                 / f"{args.runtime_session_id}.jsonl"

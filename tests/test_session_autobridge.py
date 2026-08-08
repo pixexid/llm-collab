@@ -4839,7 +4839,13 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         env = self.subprocess_env(root)
 
-        def register(project: str, chat: str, runtime_id: str):
+        def register(
+            project: str,
+            chat: str,
+            runtime_id: str,
+            *extra_args: str,
+            registration_env: dict[str, str] | None = None,
+        ):
             return subprocess.run(
                 [
                     sys.executable,
@@ -4863,10 +4869,11 @@ class SessionAutobridgeTest(unittest.TestCase):
                     runtime_id,
                     "--runtime-session-source",
                     "first_read",
+                    *extra_args,
                     "--json",
                 ],
                 cwd=root,
-                env=env,
+                env=registration_env or env,
                 text=True,
                 capture_output=True,
             )
@@ -4922,6 +4929,36 @@ class SessionAutobridgeTest(unittest.TestCase):
                 / "sessions"
                 / "SESSION-missing-artifact.json"
             ).exists()
+        )
+
+        custom_id = "custom-runtime-home"
+        custom_home = root / "custom-claude-home"
+        write_claude_session_jsonl(
+            custom_home / "projects" / amiga_slug / f"{custom_id}.jsonl",
+            cwd=amiga.resolve(),
+        )
+        custom_env = {**env, "CLAUDE_HOME": str(root / "wrong-claude-home")}
+        custom = register(
+            "amiga",
+            "CHAT-CUSTOM-HOME",
+            custom_id,
+            "--runtime-home",
+            str(custom_home),
+            registration_env=custom_env,
+        )
+        self.assertEqual(0, custom.returncode, custom.stderr)
+        stored = json.loads(
+            (
+                root
+                / "State"
+                / "session_autobridge"
+                / "sessions"
+                / f"SESSION-{custom_id}.json"
+            ).read_text()
+        )
+        self.assertEqual(
+            session_autobridge_cli.canonical_runtime_home(str(custom_home)),
+            stored["runtime"]["home"],
         )
 
     def test_claude_discovery_does_not_fall_back_to_other_projects_legacy_index(self):

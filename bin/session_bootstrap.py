@@ -23,7 +23,6 @@ require_python()
 import argparse
 import json
 import os
-import shlex
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -44,6 +43,7 @@ from _helpers import (
 )
 from _session_autobridge import (
     CanonicalBindingNativeMismatch,
+    UnreadableFile,
     iter_sessions,
     resolve_active_canonical_binding,
     session_is_dispatchable,
@@ -285,105 +285,103 @@ def announce_contract(agent_id: str) -> None:
     print()
 
 
-def binding_drifts(agent_id: str) -> list[dict]:
-    """Report active canonical scopes that do not own this native session.
-
-    A worker can have several active chat bindings. If any scope already resolves
-    to the current runtime, bootstrap is correctly bound and stays silent; when
-    none does, each mismatched scope gets an exact, non-mutating repair command.
-    Detection is advisory: unreadable state returns no result rather than making
-    bootstrap fail.
-    """
+def binding_drifts(agent_id: str) -> dict:
+    """Classify this runtime's canonical binding without mutating or guessing scope."""
     current_runtime_id = runtime_id_from_env()
     if not current_runtime_id:
-        return []
-    mismatches: list[dict] = []
+        return {"status": "not_applicable", "reason": "runtime_id_unavailable"}
     try:
-        sessions = iter_sessions(agent_id=agent_id)
-        for session in sessions:
-            if not session_is_dispatchable(session)[0]:
-                continue
-            project_id = session.get("project_id")
-            chat_id = session.get("chat_id")
-            runtime = session.get("runtime") or {}
-            if not project_id or not chat_id or not runtime.get("family"):
-                continue
-            try:
-                canonical = resolve_active_canonical_binding(
-                    str(project_id), str(chat_id), agent_id, current_runtime_id
-                )
-            except CanonicalBindingNativeMismatch as mismatch:
-                stale_session_id = str(session.get("session_id") or "")
-                safe_runtime = re.sub(r"[^A-Za-z0-9._-]", "-", current_runtime_id)
-                replacement_session_id = (
-                    f"{stale_session_id}-REBIND-{safe_runtime}"[:128]
-                )
-                command = [
-                    "python",
-                    "bin/session_autobridge.py",
-                    "register",
-                    "--session",
-                    replacement_session_id,
-                    "--agent",
-                    agent_id,
-                    "--project",
-                    str(project_id),
-                    "--chat",
-                    str(chat_id),
-                    "--mode",
-                    str(session.get("mode") or "notify"),
-                    "--status",
-                    "active",
-                    "--wake-strategy",
-                    str(session.get("wake_strategy") or "runtime_trigger"),
-                    "--runtime-family",
-                    str(runtime["family"]),
-                    "--runtime-session-id",
-                    current_runtime_id,
-                    "--runtime-session-source",
-                    "first_read",
-                    "--supersedes-session",
-                    stale_session_id,
-                ]
-                runtime_home = runtime.get("home")
-                if not runtime_home and runtime.get("family") == "claude_app":
-                    runtime_home = os.environ.get(
-                        "CLAUDE_HOME", str(Path.home() / ".claude")
-                    )
-                if runtime_home:
-                    command.extend(("--runtime-home", str(runtime_home)))
-                for repo_target in session.get("repo_targets") or []:
-                    command.extend(("--repo-target", str(repo_target)))
-                mismatches.append(
-                    {
-                        "project_id": str(project_id),
-                        "chat_id": str(chat_id),
-                        "session_id": stale_session_id,
-                        "bound_runtime_id": mismatch.canonical_native_session_id,
-                        "current_runtime_id": current_runtime_id,
-                        "repair_command": shlex.join(command),
-                    }
-                )
-                continue
-            if canonical is not None:
-                return []
-    except Exception:
-        return []
-    return mismatches
+        sessions = iter_sessions(agent_id=agent_id, strict=True)
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "reason": f"{type(error).__name__}: {error}",
+        }
+
+    scopes: dict[tuple[str, str], list[dict]] = {}
+    for session in sessions:
+        if not session_is_dispatchable(session)[0]:
+            continue
+        project_id = session.get("project_id")
+        chat_id = session.get("chat_id")
+        runtime = session.get("runtime") or {}
+        if not project_id or not chat_id or not runtime.get("family"):
+            continue
+        scopes.setdefault((str(project_id), str(chat_id)), []).append(session)
+
+    current_scopes = {
+        scope
+        for scope, records in scopes.items()
+        if any(
+            str((record.get("runtime") or {}).get("session_id") or "")
+            == current_runtime_id
+            for record in records
+        )
+    }
+    logical_session_id = os.environ.get("LLM_COLLAB_SESSION_ID", "").strip()
+    logical_scopes = {
+        scope
+        for scope, records in scopes.items()
+        if logical_session_id
+        and any(str(record.get("session_id") or "") == logical_session_id for record in records)
+    }
+    correlated_scopes = current_scopes or logical_scopes or set(scopes)
+    if len(correlated_scopes) > 1:
+        return {
+            "status": "ambiguous",
+            "current_runtime_id": current_runtime_id,
+            "candidate_scope_count": len(correlated_scopes),
+            "question": "Which project/chat owns this restarting session?",
+        }
+    if not correlated_scopes:
+        return {"status": "clear", "current_runtime_id": current_runtime_id}
+
+    project_id, chat_id = next(iter(correlated_scopes))
+    try:
+        canonical = resolve_active_canonical_binding(
+            project_id, chat_id, agent_id, current_runtime_id
+        )
+    except CanonicalBindingNativeMismatch as mismatch:
+        return {
+            "status": "detected",
+            "project_id": project_id,
+            "chat_id": chat_id,
+            "bound_runtime_id": mismatch.canonical_native_session_id,
+            "current_runtime_id": current_runtime_id,
+            "repair_available": False,
+        }
+    return {
+        "status": "clear",
+        "current_runtime_id": current_runtime_id,
+        "canonical_binding_resolved": canonical is not None,
+    }
 
 
-def announce_binding_drifts(drifts: list[dict]) -> None:
-    for drift in drifts:
+def announce_binding_drifts(report: dict) -> None:
+    status = report.get("status")
+    if status in {"clear", "not_applicable"}:
+        return
+    print("━" * 60)
+    if status == "unavailable":
+        print("⚠️  BINDING DRIFT CHECK UNAVAILABLE")
         print("━" * 60)
+        print(f"  {report.get('reason', 'session scan could not be completed')}")
+        print("  Bootstrap will continue, but no claim about binding drift was made.")
+    elif status == "ambiguous":
+        print("⚠️  BINDING DRIFT CHECK AMBIGUOUS")
+        print("━" * 60)
+        print(f"  {report['question']}")
+        print("  No repair command was generated; peer sessions were not targeted.")
+    else:
         print("⚠️  BINDING DRIFT — this native session is not the active binding")
         print("━" * 60)
-        print(f"  scope          {drift['project_id']}/{drift['chat_id']}")
-        print(f"  active binding {drift['bound_runtime_id']}")
-        print(f"  current runtime {drift['current_runtime_id']}")
-        print("  Repair your own stale lease (bootstrap did not mutate it):")
-        print(f"    {drift['repair_command']}")
-        print("━" * 60)
-        print()
+        print(f"  scope           {report['project_id']}/{report['chat_id']}")
+        print(f"  active binding  {report['bound_runtime_id']}")
+        print(f"  current runtime {report['current_runtime_id']}")
+        print("  No self-service repair exists yet: non-Pi registration does not")
+        print("  update the canonical binding. Bootstrap did not mutate any lease.")
+    print("━" * 60)
+    print()
 
 
 # (filename, test_critical). The file is the semantic boundary: requirements-dev

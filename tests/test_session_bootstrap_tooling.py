@@ -270,7 +270,7 @@ class BindingDriftBannerTest(unittest.TestCase):
         },
     }
 
-    def test_bootstrap_prints_exact_rebind_command_on_runtime_mismatch(self) -> None:
+    def test_bootstrap_diagnoses_mismatch_without_unsafe_repair_command(self) -> None:
         mismatch = session_bootstrap.CanonicalBindingNativeMismatch(
             canonical_native_session_id="runtime-old",
             requested_runtime_session_id="runtime-new",
@@ -316,9 +316,9 @@ class BindingDriftBannerTest(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("BINDING DRIFT", text)
-        self.assertIn("--runtime-session-id runtime-new", text)
-        self.assertIn("--supersedes-session SESSION-CLAUDE-OLD", text)
-        self.assertNotIn("<", text)
+        self.assertIn("No self-service repair exists yet", text)
+        self.assertNotIn("session_autobridge.py register", text)
+        self.assertNotIn("--supersedes-session", text)
 
     def test_matching_runtime_is_silent(self) -> None:
         with (
@@ -331,11 +331,92 @@ class BindingDriftBannerTest(unittest.TestCase):
             ),
         ):
             drifts = session_bootstrap.binding_drifts("claude")
-        self.assertEqual([], drifts)
+        self.assertEqual("clear", drifts["status"])
         output = StringIO()
         with redirect_stdout(output):
             session_bootstrap.announce_binding_drifts(drifts)
         self.assertEqual("", output.getvalue())
+
+    def test_multiple_peer_bindings_ask_for_scope_without_targeting_peers(self) -> None:
+        peer = {
+            **self.SESSION,
+            "session_id": "SESSION-CLAUDE-PEER",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PEER",
+            "runtime": {**self.SESSION["runtime"], "session_id": "runtime-peer"},
+        }
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION, peer]),
+            patch.object(session_bootstrap, "resolve_active_canonical_binding") as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("ambiguous", report["status"])
+        resolve.assert_not_called()
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        text = output.getvalue()
+        self.assertIn("Which project/chat owns this restarting session?", text)
+        self.assertNotIn("--supersedes-session", text)
+        self.assertNotIn("SESSION-CLAUDE-OLD", text)
+        self.assertNotIn("SESSION-CLAUDE-PEER", text)
+
+    def test_logical_session_correlates_one_scope_without_targeting_its_peer(self) -> None:
+        peer = {
+            **self.SESSION,
+            "session_id": "SESSION-CLAUDE-PEER",
+            "project_id": "amiga",
+            "chat_id": "CHAT-PEER",
+            "runtime": {**self.SESSION["runtime"], "session_id": "runtime-peer"},
+        }
+        mismatch = session_bootstrap.CanonicalBindingNativeMismatch(
+            canonical_native_session_id="runtime-old",
+            requested_runtime_session_id="runtime-new",
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CODE_SESSION_ID": "runtime-new",
+                    "LLM_COLLAB_SESSION_ID": "SESSION-CLAUDE-OLD",
+                },
+                clear=True,
+            ),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION, peer]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                side_effect=mismatch,
+            ) as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("detected", report["status"])
+        resolve.assert_called_once_with(
+            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new"
+        )
+        self.assertNotIn("SESSION-CLAUDE-PEER", json.dumps(report))
+        self.assertNotIn("repair_command", report)
+
+    def test_truncated_session_scan_is_explicitly_unavailable(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(
+                session_bootstrap,
+                "iter_sessions",
+                side_effect=session_bootstrap.UnreadableFile(
+                    "session records exceed the 5000 entry limit"
+                ),
+            ),
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("unavailable", report["status"])
+        self.assertIn("entry limit", report["reason"])
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        self.assertIn("CHECK UNAVAILABLE", output.getvalue())
+        self.assertNotEqual([], report)
 
 
 if __name__ == "__main__":
