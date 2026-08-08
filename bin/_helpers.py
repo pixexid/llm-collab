@@ -684,22 +684,28 @@ def mark_messages_read(agent_id: str, paths: list[str]) -> None:
 
 
 def get_unread_messages(agent_id: str, *, limit: int | None = None) -> list[dict]:
-    """Return every unread message, or an explicitly requested bounded slice."""
+    """Return every unread message, or the requested number of live messages."""
     inbox = load_agent_inbox(agent_id)
     unread_paths = inbox["unread"]
-    if limit is None and len(unread_paths) > MAX_MESSAGE_SCAN_ENTRIES:
+    if len(unread_paths) > MAX_MESSAGE_SCAN_ENTRIES:
         raise InboxScanLimitExceeded(
             f"inbox scan exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries; "
             "refusing an incomplete result"
         )
-    if limit is not None:
-        unread_paths = unread_paths[: min(max(limit, 0), MAX_MESSAGE_SCAN_ENTRIES)]
+    if limit is not None and limit > MAX_MESSAGE_SCAN_ENTRIES:
+        raise InboxScanLimitExceeded(
+            f"requested inbox limit {limit} exceeds {MAX_MESSAGE_SCAN_ENTRIES} entries"
+        )
+    if limit is not None and limit <= 0:
+        return []
     messages = []
     for rel_path in unread_paths:
         abs_path = ROOT / rel_path
         if abs_path.exists():
             fm, body = parse_frontmatter(abs_path.read_text())
             messages.append({"path": rel_path, "frontmatter": fm, "body": body})
+            if limit is not None and len(messages) == limit:
+                break
     return messages
 
 

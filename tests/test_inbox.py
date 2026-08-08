@@ -1148,6 +1148,70 @@ class InboxMarkAllReadTest(unittest.TestCase):
 
         exists.assert_not_called()
 
+    def test_bootstrap_limit_counts_live_messages_not_pointers(self) -> None:
+        dead_paths = [f"Chats/dead/{index}.md" for index in range(5)]
+        live_paths = [f"Chats/live/{index}.md" for index in range(5)]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={
+                "agent": "codex",
+                "unread": [*dead_paths, *live_paths],
+                "read": [],
+            },
+        ), patch.object(
+            Path,
+            "exists",
+            autospec=True,
+            side_effect=lambda path: path.parent.name == "live",
+        ), patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            side_effect=lambda path: path.name,
+        ), patch.object(
+            helpers_lib,
+            "parse_frontmatter",
+            side_effect=lambda title: ({"title": title}, "body"),
+        ):
+            messages = helpers_lib.get_unread_messages("codex", limit=5)
+
+        self.assertEqual(
+            live_paths,
+            [message["path"] for message in messages],
+            "bootstrap would report no unread messages while live packets wait",
+        )
+
+    def test_limited_unread_scan_refuses_oversized_index(self) -> None:
+        paths = [
+            f"Chats/scan/{index}.md"
+            for index in range(inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1)
+        ]
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": paths, "read": []},
+        ), patch.object(Path, "exists", autospec=True) as exists:
+            with self.assertRaises(inbox_lib.InboxScanLimitExceeded):
+                helpers_lib.get_unread_messages("codex", limit=5)
+
+        exists.assert_not_called()
+
+    def test_unread_scan_refuses_requested_limit_above_cap(self) -> None:
+        with patch.object(
+            helpers_lib,
+            "load_agent_inbox",
+            return_value={"agent": "codex", "unread": [], "read": []},
+        ):
+            with self.assertRaisesRegex(
+                inbox_lib.InboxScanLimitExceeded,
+                rf"requested inbox limit {inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1} "
+                rf"exceeds {inbox_lib.MAX_MESSAGE_SCAN_ENTRIES} entries",
+            ):
+                helpers_lib.get_unread_messages(
+                    "codex", limit=inbox_lib.MAX_MESSAGE_SCAN_ENTRIES + 1
+                )
+
     def test_default_unread_scan_returns_the_complete_at_cap_index(self) -> None:
         paths = [
             f"Chats/{'amiga' if index % 2 == 0 else 'nuvyr'}/{index}.md"
