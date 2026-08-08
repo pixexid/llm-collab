@@ -551,7 +551,11 @@ class DaemonTest(unittest.TestCase):
         try:
             client.settimeout(timeout)
             client.connect(os.fspath(self.paths.socket))
-            client.sendall(value)
+            try:
+                client.sendall(value)
+            except OSError as exc:
+                if exc.errno not in {errno.EPIPE}:
+                    raise
             try:
                 client.shutdown(socket.SHUT_WR)
             except OSError as exc:
@@ -1297,12 +1301,14 @@ class DaemonTest(unittest.TestCase):
 
     def test_peer_authentication_precedes_dispatch(self) -> None:
         server, thread = self.start(peer=lambda _connection: os.getuid() + 1)
-        with patch("llm_collab.daemon.server.parse_request") as parser:
-            result = self.request(b'{"version":1,"op":"shutdown"}')
-        self.assertIn("UID mismatch", result["error"])
-        parser.assert_not_called()
-        server._stopping = True
-        thread.join(2)
+        try:
+            with patch("llm_collab.daemon.server.parse_request") as parser:
+                result = self.request(b'{"version":1,"op":"shutdown"}')
+            self.assertIn("UID mismatch", result["error"])
+            parser.assert_not_called()
+        finally:
+            server._stopping = True
+            thread.join(2)
 
     def test_linux_and_darwin_peer_paths_fail_closed(self) -> None:
         fake = unittest.mock.Mock()
