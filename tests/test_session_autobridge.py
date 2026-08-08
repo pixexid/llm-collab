@@ -348,6 +348,46 @@ class SessionAutobridgeTest(unittest.TestCase):
             _, repeated = assert_sequence_total(tail_path, 10)
             self.assertEqual(10, repeated["repeat_count"])
 
+    def test_event_log_unparseable_legacy_lines_do_not_block_append(self):
+        digit_limit = sys.get_int_max_str_digits()
+        self.assertGreater(digit_limit, 0)
+        bad_lines = [
+            (
+                "integer-limit",
+                b'{"event":"legacy","value":' + b"9" * (digit_limit + 1) + b"}\n",
+                ValueError,
+            ),
+            (
+                "nesting-limit",
+                b"[" * (sys.getrecursionlimit() + 100)
+                + b"0"
+                + b"]" * (sys.getrecursionlimit() + 100)
+                + b"\n",
+                RecursionError,
+            ),
+            ("invalid-utf8", b'{"event":"legacy","value":"\xff"}\n', UnicodeDecodeError),
+            ("invalid-json", b'{"event":"legacy"\n', json.JSONDecodeError),
+        ]
+        event = {"event": "session_skipped", "reason": "lease_expired"}
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ):
+            for name, bad_line, expected_error in bad_lines:
+                with self.assertRaises(expected_error):
+                    json.loads(bad_line)
+                path = Path(tmp) / f"SESSION-BAD-{name}.jsonl"
+                path.write_bytes(bad_line)
+                try:
+                    session_autobridge_lib.append_event(path.stem, event)
+                    session_autobridge_lib.append_event(path.stem, event)
+                except Exception as error:
+                    self.fail(f"{name} legacy line blocked append: {error!r}")
+
+                raw = path.read_bytes()
+                self.assertTrue(raw.startswith(bad_line))
+                appended = json.loads(raw.splitlines()[-1])
+                self.assertEqual(2, appended["repeat_count"])
+
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
         write(

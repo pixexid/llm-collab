@@ -1178,7 +1178,7 @@ def _append_event_path(
         for raw_line in search_window.splitlines(keepends=True):
             try:
                 candidate = json.loads(raw_line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
                 candidate = None
             cursor += len(raw_line)
             if (
@@ -1199,7 +1199,7 @@ def _append_event_path(
                 last_start = last_read_start + separator + 1
                 try:
                     last_event = json.loads(tail[separator + 1 :])
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
                     pass
 
         replace_last = (
