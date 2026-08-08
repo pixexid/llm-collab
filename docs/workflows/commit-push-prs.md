@@ -412,22 +412,25 @@ Use the mandatory one-pass GitHub Codex gate:
   **That reaction is itself the automatic pass's clean artifact.** The connector
   emits nothing else when it has no suggestions, so there is no separate proof that
   the pass ran, and requiring one would make this model unsatisfiable — the exact
-  deadlock it exists to remove. Verify all four: the actor is the connector, that
-  the reaction post-dates the push of the current head, that the head has
-  not been amended since, and that **every other artifact class is empty** — no
+  deadlock it exists to remove. Verify all four: the actor is the connector, the
+  reaction post-dates the push of the current head, no push or force-push occurred
+  between that push and the `+1`, and **every other artifact class is empty** — no
   review object, no top-level comment, no inline thread. That last condition is the
   safeguard: a `+1` alongside any finding artifact is **not** terminal, which is
   what keeps this model from reading a pass over unresolved threads
   (llm-collab#317). Any head change voids it, and it grants no second bot pass —
   locally prove the amended head or remain blocked. A PR-level reaction carries no
-  SHA, so those four checks cannot by themselves bind the `+1` to the reviewed
-  head: a pass started on H1 that ends with a `+1` after an H2 push passes all
-  four for H2 though H1 was reviewed. Fail closed unless a trustworthy existing
-  connector pickup artifact (its `eyes` reaction) proves the pass started after
-  the current head's push with no push between pickup and `+1`; otherwise the `+1`
-  is a prior-head signal — route it through the prior-OID path below and locally
-  prove every amendment, never as a terminal clean pass for the current head. A
-  clean automatic `+1` never justifies a second review request. The connector defines this protocol itself: if
+  SHA, so bind the interval to the current head with durable commit/push timestamps
+  and retained `head_ref_force_pushed` events; a branch that has only ever had one
+  commit and no force-push is unambiguous by construction.
+  If that durable record cannot prove the interval, the `+1` is a prior-head signal
+  — route it through the prior-OID path below and locally prove every amendment,
+  never as a terminal clean pass for the current head. A clean automatic `+1`
+  never justifies a second review request. The old guard required an existing
+  `eyes` pickup artifact, but the connector swaps `eyes` for `+1`, so it was never
+  satisfiable at merge time. Merged PRs #603, #605, #607, #608, and #615 each
+  retain exactly one reaction and no `eyes`, providing the record for this
+  replacement. The connector defines this protocol itself: if
   it has suggestions it comments, otherwise it reacts `+1`. This model exists
   because v9/v11 made the automatic pass primary while the two models above both
   presuppose a manual request comment to carry the reaction; without it the
@@ -658,14 +661,14 @@ Codex review gate as complete when any of these holds:
   approximately five-minute post-clean settle and full re-read as a text verdict,
   or
 - a connector-authored `+1` sits **at PR level** with no manual request comment in
-  existence, the reaction post-dates the push of the
-  current head, the head has not been amended since, and **every other artifact class is
-  empty** — no review object, no top-level comment, no inline thread. A PR-level reaction
-  has no SHA, so those checks do not by themselves bind it to the reviewed head: the `+1`
-  is terminal on this path only when a trustworthy existing connector pickup artifact
-  (its `eyes` reaction) proves the pass started after the current head's push with no push
-  between pickup and `+1`; an ambiguous or prior-head `+1` is not terminal here — fall
-  back to the prior-OID clause below with local proof of every amendment. The reaction is
+  existence, the reaction post-dates the push of the current head, no push or
+  force-push occurred between that push and the `+1`, and **every other artifact
+  class is empty** — no review object, no top-level comment, no inline thread.
+  Bind that interval with durable commit/push timestamps and retained
+  `head_ref_force_pushed` events; a branch that has only ever had one commit and no
+  force-push is unambiguous by construction. If the durable record is ambiguous or
+  binds the `+1` to a prior head, it is not terminal here — fall back to the
+  prior-OID clause below with local proof of every amendment. The reaction is
   itself the automatic pass's clean artifact; do not look for a separate proof that the
   pass ran. A `+1` alongside any
   finding artifact is not terminal. This is the automatic first pass's clean shape: the
