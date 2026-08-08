@@ -131,6 +131,16 @@ remove it and rely on exact-session dispatch plus the mailbox-drain self-heal.
 
 From the collaboration repo:
 
+The Codex binding below is served by its managed agent-wide PM2 watcher. Before
+either activation command, require the status check below to succeed. If it
+fails, stop and complete the canonical
+[PM2 Log Rotation workflow](pm2-log-rotation.md); do not create the binding
+first.
+
+```bash
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex
+```
+
 ```bash
 python3 bin/session_autobridge.py publish-current \
   --session SESSION-codex-amiga-dispatch \

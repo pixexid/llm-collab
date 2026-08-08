@@ -418,6 +418,15 @@ required to verify this transport.)
 
 A session must declare the exact runtime home for delivery to resolve:
 
+Before registering the Codex session, require its managed dispatching watcher
+to be online. If this exits nonzero, stop and complete the canonical
+[PM2 Log Rotation workflow](../workflows/pm2-log-rotation.md); do not create a
+binding that has no watcher to serve it.
+
+```bash
+<runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex
+```
+
 ```bash
 python bin/session_autobridge.py register --session <id> --agent codex \
   --project <project> --chat <chat> --repo-target <repo> \

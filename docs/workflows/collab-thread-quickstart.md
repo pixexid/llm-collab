@@ -109,6 +109,10 @@ python bin/new_chat.py --project demo-app --title "Checkout refactor"
 python bin/session_autobridge.py discover-runtime --runtime-family codex_app --json
 #    -> {"session_id": "019f9452-...", "home": "/Users/you/.codex", ...}
 
+#    A managed PM2-backed worker must already have its dispatching watcher.
+#    STOP on failure and complete pm2-log-rotation.md before registering:
+python bin/pm2_watchers.py status --agent codex
+
 #    Then it registers that EXACT id:
 python bin/session_autobridge.py register   --session SESSION-CODEX-DEMO --agent codex   --project demo-app --chat CHAT-2F8529C5 --repo-target app   --mode auto-read --status active --wake-strategy runtime_trigger   --runtime-family codex_app   --runtime-session-id 019f9452-...   --runtime-home /Users/you/.codex   --runtime-session-source first_read
 ```

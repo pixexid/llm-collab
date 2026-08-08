@@ -48,6 +48,18 @@ class PM2WatchersTest(unittest.TestCase):
 
         self.assertEqual(calls, [["logs", "llm-collab-codex", "--lines", "7", "--nostream"]])
 
+    def test_process_status_preserves_failure_and_requires_online(self) -> None:
+        cases = (
+            ("missing", subprocess.CompletedProcess([], 9, "", "not found"), 9),
+            ("offline", subprocess.CompletedProcess([], 0, "│ status │ stopped │", ""), 1),
+            ("online", subprocess.CompletedProcess([], 0, "│ status │ online │", ""), 0),
+        )
+        for label, result, expected in cases:
+            with self.subTest(label):
+                with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                     patch.object(pm2_watchers, "pm2_run", return_value=result):
+                    self.assertEqual(expected, pm2_watchers.process_status_exit_code("codex"))
+
 
 if __name__ == "__main__":
     unittest.main()
