@@ -74,36 +74,48 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 )
             self.assertEqual(config["workspace_id"], "ws_existing123")
 
-    def test_fresh_init_prints_ordered_pm2_rotation_setup_and_coverage_gate(self) -> None:
+    def test_fresh_init_points_to_complete_canonical_pm2_rotation_workflow(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _, output = self.run_minimal_init(
                 root,
                 ["test", str(root / "repos"), str(root / "state"), "15", "n"],
-            )
-
-        expected_flow = (
-            "Preserve existing PM2 evidence, then configure and verify rotation",
-            "installing pm2-logrotate starts rotation immediately",
-            "BEFORE installing it: complete the operator-owned disposition of existing logs",
-            "Archive needed diagnostic history outside live PM2 paths; do not delete or truncate blindly",
-            "Inspect orphaned files from deleted PM2 entries separately",
-            "pm2 install pm2-logrotate",
-            "pm2 set pm2-logrotate:max_size 10M",
-            "pm2 set pm2-logrotate:retain 7",
-            "pm2 set pm2-logrotate:compress true",
-            "pm2 set pm2-logrotate:rotateInterval '0 0 * * *'",
-            "bin/llm-collab pm2_watchers.py start --all",
-            "sleep 35",
-            "pm2 trigger pm2-logrotate 'list watched logs'",
-            "PASS only if the returned map includes Logs/watchers/ and ~/.pm2/logs/ paths.",
-            "If either path class is missing, stop; see docs/adapters/pm2.md.",
         )
-        positions = []
-        for step in expected_flow:
-            self.assertIn(step, output)
-            positions.append(output.index(step))
-        self.assertEqual(sorted(positions), positions)
+
+        workflow_path = "docs/workflows/pm2-log-rotation.md"
+        self.assertIn(
+            f"3. PM2 log rotation (optional): {workflow_path}", output.splitlines()
+        )
+        self.assertNotIn("pm2 install", output)
+        self.assertNotIn("pm2 set", output)
+        self.assertNotIn("pm2 trigger", output)
+
+        workflow = (REPO_ROOT / workflow_path).read_text()
+        required_steps = (
+            "operator-owned disposition",
+            "Installing `pm2-logrotate` starts the module and rotation immediately",
+            "Archive any history needed for diagnosis",
+            "Do not blindly",
+            "Inspect orphaned files",
+            "install pm2-" + "logrotate",
+            "max_size 10M",
+            "retain 7",
+            "compress true",
+            "rotateInterval '0 0 * * *'",
+            "pm2_watchers.py start --all",
+            "sleep 35",
+            "list watched logs",
+            "PASS only if",
+            "Logs/watchers/",
+            "~/.pm2/logs/",
+            "If either path class is",
+            "missing, treat rotation coverage as failed",
+            "current file plus seven gzip-compressed generations",
+        )
+        cursor = -1
+        for step in required_steps:
+            cursor = workflow.find(step, cursor + 1)
+            self.assertNotEqual(-1, cursor, f"missing or out-of-order PM2 step: {step}")
 
     def test_add_workspace_id_is_backup_protected_atomic_and_non_destructive(self) -> None:
         with TemporaryDirectory() as tmp:
