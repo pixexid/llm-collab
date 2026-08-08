@@ -785,13 +785,21 @@ def main(*, input_fn: Callable[[str], str] | None = None):
 
     divider()
     print("\n[Next steps]\n")
-    print("1. PM2 log rotation (optional, before watcher-enabled bootstrap):")
+    print("1. PM2 log rotation, required before any watcher runs:")
     print("   docs/workflows/pm2-log-rotation.md")
+    print("   Skipping it? Bootstrap with --no-watcher, which skips STARTING a")
+    print("   watcher this session. It does not stop one already running; rotation")
+    print("   stays required while a watcher is up (see the workflow above).")
     print()
     print("2. Bootstrap each agent session:")
     for a in agents:
         if a.get("activation", {}).get("type") not in ("human",):
-            print(f"   {RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {a['id']}")
+            # --no-watcher skips STARTING a watcher this session. It is not a claim
+            # that no watcher runs: one already bootstrapped keeps running, and
+            # rotation stays required while it does. Matches the flag's help text,
+            # not the "declined the watcher" overclaim that survived head 1.
+            suffix = "" if a.get("activation", {}).get("watcher_enabled") else " --no-watcher"
+            print(f"   {RUNTIME_ROOT}/bin/llm-collab current_runtime.py --agent {a['id']}{suffix}")
     print()
     print("3. Generate memory snippets for your LLM tools:")
     for a in agents:

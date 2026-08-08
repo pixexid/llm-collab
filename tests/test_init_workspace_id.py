@@ -38,6 +38,11 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 "activation": {"type": "human"},
             }
         ]
+        return self.run_init_with_agents(root, agents, supplied)
+
+    def run_init_with_agents(
+        self, root: Path, agents: list[dict], supplied: list[str]
+    ) -> tuple[dict, str]:
         with patch.object(init_script, "ROOT", root):
             with patch.object(init_script, "_local_config", {}):
                 with patch.object(init_script, "collect_agents", return_value=agents):
@@ -84,7 +89,7 @@ class InitWorkspaceIdTest(unittest.TestCase):
 
         workflow_path = "docs/workflows/pm2-log-rotation.md"
         self.assertIn(
-            "1. PM2 log rotation (optional, before watcher-enabled bootstrap):",
+            "1. PM2 log rotation, required before any watcher runs:",
             output.splitlines(),
         )
         self.assertIn(f"   {workflow_path}", output.splitlines())
@@ -119,6 +124,113 @@ class InitWorkspaceIdTest(unittest.TestCase):
         for step in required_steps:
             cursor = workflow.find(step, cursor + 1)
             self.assertNotEqual(-1, cursor, f"missing or out-of-order PM2 step: {step}")
+
+    def test_setup_flow_never_pairs_skippable_rotation_with_a_watcher_command(self) -> None:
+        # GH-673 head 1: the setup flow used to print rotation as "(optional)" and
+        # then a bare bootstrap command that starts an unrotated watcher. Rotation
+        # is no longer labelled skippable where a watcher command is printed, and
+        # an agent the operator did not enable a watcher for bootstraps with
+        # --no-watcher. (What --no-watcher actually does -- skip STARTING, not stop
+        # an existing watcher -- is pinned by the head-2 test below.)
+        agents = [
+            {
+                "id": "watchdog",
+                "display_name": "Watchdog",
+                "role": "implementation",
+                "activation": {"type": "cli_session", "watcher_enabled": True},
+            },
+            {
+                "id": "dry",
+                "display_name": "Dry",
+                "role": "implementation",
+                "activation": {"type": "cli_session", "watcher_enabled": False},
+            },
+            {
+                "id": "operator",
+                "display_name": "Operator",
+                "role": "operator",
+                "activation": {"type": "human"},
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, output = self.run_init_with_agents(
+                root,
+                agents,
+                ["test", str(root / "repos"), str(root / "state"), "15", "n"],
+            )
+
+        lines = output.splitlines()
+
+        # Direction 1 — the optional-labelled path can no longer reach watcher
+        # creation: rotation is not presented as skippable, and the agent not
+        # enabled for a watcher is printed with --no-watcher (not a bare command).
+        rotation_lines = [ln for ln in lines if "PM2 log rotation" in ln]
+        self.assertTrue(rotation_lines, "rotation step must be printed")
+        for ln in rotation_lines:
+            self.assertNotIn("(optional", ln)
+            self.assertNotIn("optional,", ln)
+
+        dry_lines = [ln for ln in lines if "current_runtime.py --agent dry" in ln]
+        self.assertEqual(1, len(dry_lines), "the non-watcher agent has one bootstrap line")
+        self.assertIn("--no-watcher", dry_lines[0])
+
+        # The watcher-enabled agent still gets the bare command (rotation required
+        # above it), so the genuinely-wanted watcher path is not broken either.
+        watchdog_lines = [ln for ln in lines if "current_runtime.py --agent watchdog" in ln]
+        self.assertEqual(1, len(watchdog_lines), "the watcher agent has one bootstrap line")
+        self.assertNotIn("--no-watcher", watchdog_lines[0])
+
+    def test_decline_path_says_skip_starting_and_warns_existing_watcher_runs(self) -> None:
+        # GH-673 head 2: --no-watcher only skips STARTING a watcher this session;
+        # it never stops an existing agent-wide PM2 watcher (session_bootstrap just
+        # bypasses start_watcher). The printed decline path must say exactly that --
+        # matching the flag's help text "Skip starting the inbox watcher" -- and must
+        # NOT overclaim that --no-watcher means no watcher runs. A test that only
+        # checks the flag is present cannot see this defect; that is how it survived
+        # head 1, so this test pins the MEANING, not the flag.
+        agents = [
+            {
+                "id": "dry",
+                "display_name": "Dry",
+                "role": "implementation",
+                "activation": {"type": "cli_session", "watcher_enabled": False},
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, output = self.run_init_with_agents(
+                root,
+                agents,
+                ["test", str(root / "repos"), str(root / "state"), "15", "n"],
+            )
+
+        self._assert_accurate_decline_wording(output.lower(), "init [Next steps]")
+
+        getting_started = (REPO_ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
+        self._assert_accurate_decline_wording(getting_started.lower(), "docs/getting-started.md")
+
+    def _assert_accurate_decline_wording(self, text: str, label: str) -> None:
+        # The accurate action, matching the --no-watcher help text.
+        self.assertIn(
+            "skips starting", text, f"{label}: must say --no-watcher skips starting a watcher"
+        )
+        # The existing-watcher caveat: the flag does not stop one already running.
+        self.assertIn(
+            "already running", text, f"{label}: must warn an existing watcher is unaffected"
+        )
+        self.assertIn(
+            "does not stop", text, f"{label}: must state it does not stop a watcher"
+        )
+        # The proxy-for-invariant overclaims that survived head 1.
+        for overclaim in (
+            "decline the watcher",
+            "declines the watcher",
+            "declining the watcher",
+            "without a watcher",
+            "start without one",
+        ):
+            self.assertNotIn(overclaim, text, f"{label}: overclaim present: {overclaim!r}")
 
     def test_add_workspace_id_is_backup_protected_atomic_and_non_destructive(self) -> None:
         with TemporaryDirectory() as tmp:
