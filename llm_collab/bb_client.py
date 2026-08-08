@@ -334,7 +334,15 @@ class BbClient:
     # ---- operations ----------------------------------------------------
 
     def spawn(
-        self, *, project_id: str, prompt: str, profile: BbProfile
+        self,
+        *,
+        project_id: str,
+        prompt: str,
+        profile: BbProfile,
+        environment_id: str | None = None,
+        new_worktree_base_sha: str | None = None,
+        permission_mode: str | None = None,
+        title: str | None = None,
     ) -> BbThread | BbRefusal:
         """Create one bb thread with an explicitly supplied profile.
 
@@ -364,10 +372,21 @@ class BbClient:
             profile.model,
             "--reasoning-level",
             profile.reasoning_level,
-            "--prompt",
-            prompt,
-            "--json",
         ]
+        if new_worktree_base_sha is not None:
+            argv += [
+                "--new-environment",
+                "worktree",
+                "--base-branch",
+                new_worktree_base_sha,
+            ]
+        elif environment_id is not None:
+            argv += ["--environment", environment_id]
+        if permission_mode is not None:
+            argv += ["--permission-mode", permission_mode]
+        if title is not None:
+            argv += ["--title", title]
+        argv += ["--prompt", prompt, "--json"]
         payload = self._task_json(argv)
         if isinstance(payload, BbRefusal):
             return payload
@@ -789,7 +808,42 @@ class BbResponseDecodeError(BbResponseReadError):
     """A response stream contained bytes that could not be decoded as text."""
 
 
-def _read_bounded(stream, limit: int) -> str:
+class _ResponseBudget:
+    """One cumulative read budget shared by every stream and native call."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.remaining = limit + 1
+        self.consumed = 0
+        self.exceeded = False
+        self.condition = threading.Condition()
+
+    def reserve(self) -> int:
+        with self.condition:
+            while self.remaining == 0 and not self.exceeded:
+                self.condition.wait()
+            if self.exceeded:
+                raise BbResponseTooLarge(
+                    f"native streams exceeded {self.limit} chars while reading"
+                )
+            granted = min(65536, self.remaining)
+            self.remaining -= granted
+            return granted
+
+    def complete(self, granted: int, consumed: int) -> None:
+        with self.condition:
+            self.remaining += granted - consumed
+            self.consumed += consumed
+            if self.consumed > self.limit:
+                self.exceeded = True
+            self.condition.notify_all()
+            if self.exceeded:
+                raise BbResponseTooLarge(
+                    f"native streams exceeded {self.limit} chars while reading"
+                )
+
+
+def _read_bounded(stream, limit: int | _ResponseBudget) -> str:
     """Read at most ``limit + 1`` characters, then raise rather than accumulate.
 
     The +1 is what makes the bound detectable: reading exactly ``limit`` cannot
@@ -798,21 +852,23 @@ def _read_bounded(stream, limit: int) -> str:
     chunks keeps a single enormous line from defeating the bound, which a
     line-oriented read would not.
     """
+    budget = limit if isinstance(limit, _ResponseBudget) else _ResponseBudget(limit)
     chunks: list[str] = []
-    remaining = limit + 1
     try:
-        while remaining > 0:
-            chunk = stream.read(min(65536, remaining))
+        while True:
+            granted = budget.reserve()
+            try:
+                chunk = stream.read(granted)
+            except BaseException:
+                budget.complete(granted, 0)
+                raise
+            budget.complete(granted, len(chunk))
             if not chunk:
                 break
             chunks.append(chunk)
-            remaining -= len(chunk)
     except UnicodeError as exc:
         raise BbResponseDecodeError("native response stream could not be decoded") from exc
-    text = "".join(chunks)
-    if len(text) > limit:
-        raise BbResponseTooLarge(f"native stream exceeded {limit} chars while reading")
-    return text
+    return "".join(chunks)
 
 
 def subprocess_transport(
@@ -830,6 +886,8 @@ def subprocess_transport(
     ``BbTransportTimeout`` is raised, which the client maps to an AMBIGUOUS
     outcome for task-bearing calls.
     """
+
+    response_budget = _ResponseBudget(max_response_chars)
 
     def transport(argv: Sequence[str], timeout_seconds: float) -> BbTransportResult:
         # The budget starts at the launch boundary so whatever Popen costs is
@@ -922,8 +980,8 @@ def subprocess_transport(
             # stderr just under a second limit, returned after nearly twice it,
             # and process.wait() could add a third interval. The watcher's
             # configured bound has to bound the CALL.
-            out = pool.submit(_read_bounded, process.stdout, max_response_chars)
-            err = pool.submit(_read_bounded, process.stderr, max_response_chars)
+            out = pool.submit(_read_bounded, process.stdout, response_budget)
+            err = pool.submit(_read_bounded, process.stderr, response_budget)
             stdout = out.result(timeout=remaining())
             stderr = err.result(timeout=remaining())
             exit_code = process.wait(timeout=remaining())
