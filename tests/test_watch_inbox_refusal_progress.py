@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import unittest
 from contextlib import redirect_stderr
@@ -44,17 +45,24 @@ class RefusalRecheckWindowTest(unittest.TestCase):
                 "packet_project": project_id,
                 "session_id": None,
                 "session_repo_targets": repo_targets,
+                "subscriber_project": project_id,
             }
         }
 
-    def test_backlog_over_window_avoids_rechecking_old_packet_identity(self) -> None:
+    def test_backlog_over_window_avoids_rebuilding_old_fingerprint(self) -> None:
         from unittest.mock import patch
 
         old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
         recent = "Chats/x/2026-08-08T00-00-00_to-claude_recent.md"
         progress = self._entry(old, repo_targets=["app"])
         progress.update(self._entry(recent, repo_targets=["app"]))
-        with patch.object(watch_inbox, "_packet_mtime", return_value=1.0) as mtime:
+        with patch.object(
+            watch_inbox, "_packet_mtime", return_value=1.0
+        ) as mtime, patch.object(
+            watch_inbox,
+            "refusal_fingerprint",
+            wraps=watch_inbox.refusal_fingerprint,
+        ) as fingerprint:
             skipped = watch_inbox.terminal_refusal_paths(
                 progress,
                 ["app"],
@@ -64,7 +72,36 @@ class RefusalRecheckWindowTest(unittest.TestCase):
             )
 
         self.assertEqual({old, recent}, skipped)
-        mtime.assert_called_once_with(recent)
+        self.assertEqual([old, recent], [call.args[0] for call in mtime.call_args_list])
+        fingerprint.assert_called_once()
+
+    def test_aged_packet_corrected_in_place_is_re_evaluated(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        path = "Chats/x/2026-07-01T00-00-00_to-claude_corrected.md"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packet = root / path
+            packet.parent.mkdir(parents=True)
+            packet.write_text("repo_targets: [other]\n", encoding="utf-8")
+            os.utime(packet, (100, 100))
+            progress = self._entry(
+                path, repo_targets=["app"], mtime=packet.stat().st_mtime
+            )
+            packet.write_text("repo_targets: [app]\n", encoding="utf-8")
+            os.utime(packet, (200, 200))
+
+            with patch.object(watch_inbox, "ROOT", root):
+                skipped = watch_inbox.terminal_refusal_paths(
+                    progress,
+                    ["app"],
+                    "llm-collab",
+                    refusal_recheck_window_days=7,
+                    now=self.NOW,
+                )
+
+        self.assertEqual(set(), skipped)
 
     def test_new_arrival_is_considered_even_with_an_old_filename(self) -> None:
         recorded = "Chats/x/2026-07-01T00-00-00_to-claude_recorded.md"
@@ -80,26 +117,27 @@ class RefusalRecheckWindowTest(unittest.TestCase):
         self.assertEqual({recorded}, skipped)
         self.assertNotIn(new, skipped)
 
-    def test_changed_fingerprint_escapes_even_with_an_old_filename(self) -> None:
+    def test_changed_subscriber_fingerprint_escapes_old_window(self) -> None:
         from unittest.mock import patch
 
         old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
         progress = self._entry(old, repo_targets=["app"])
-        progress[watch_inbox.progress_key(None, old)]["fp"] = "stale-fingerprint"
-        with patch.object(
-            watch_inbox,
-            "_packet_mtime",
-            side_effect=AssertionError("changed routing must escape before age"),
-        ):
+        stored = progress[watch_inbox.progress_key(None, old)]["fp"]
+        current = watch_inbox.refusal_fingerprint(
+            "repo_mismatch", ["app"], ["other"], "amiga", "llm-collab"
+        )
+        self.assertNotEqual(stored, current)
+        with patch.object(watch_inbox, "_packet_mtime", return_value=1.0) as mtime:
             skipped = watch_inbox.terminal_refusal_paths(
                 progress,
                 ["app"],
-                "llm-collab",
+                "amiga",
                 refusal_recheck_window_days=7,
                 now=self.NOW,
             )
 
         self.assertEqual(set(), skipped)
+        mtime.assert_called_once_with(old)
 
     def test_absent_invalid_or_unparseable_window_inputs_recheck(self) -> None:
         from unittest.mock import patch
@@ -127,6 +165,27 @@ class RefusalRecheckWindowTest(unittest.TestCase):
         self.assertEqual(set(), no_window)
         self.assertEqual(set(), malformed_packet)
         self.assertEqual([old, malformed], [call.args[0] for call in mtime.call_args_list])
+
+    def test_overflowing_window_degrades_to_full_recheck(self) -> None:
+        from unittest.mock import patch
+
+        limit = watch_inbox.MAX_REFUSAL_RECHECK_WINDOW_DAYS
+        self.assertEqual(limit, watch_inbox.parse_refusal_recheck_window_days(limit))
+        self.assertIsNone(watch_inbox.parse_refusal_recheck_window_days(limit + 1))
+        window = watch_inbox.parse_refusal_recheck_window_days(1_000_000_000)
+        self.assertIsNone(window)
+        old = "Chats/x/2026-07-01T00-00-00_to-claude_old.md"
+        with patch.object(watch_inbox, "_packet_mtime", return_value=2.0) as mtime:
+            skipped = watch_inbox.terminal_refusal_paths(
+                self._entry(old, repo_targets=["app"]),
+                ["app"],
+                "llm-collab",
+                refusal_recheck_window_days=window,
+                now=self.NOW,
+            )
+
+        self.assertEqual(set(), skipped)
+        mtime.assert_called_once_with(old)
 
 
 class RefusalFingerprintTest(unittest.TestCase):
@@ -175,6 +234,7 @@ class RefusalProgressStoreTest(unittest.TestCase):
                 "reason": "repo_mismatch",
                 "packet_repo_targets": ["other"],
                 "packet_project": "amiga",
+                "subscriber_project": "llm-collab",
                 "session_id": None,
                 "path": "a.md",
                 "session_repo_targets": ["app"],

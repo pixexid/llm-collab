@@ -56,6 +56,14 @@ def sidecars(apps: list[dict]) -> list[dict]:
 
 @unittest.skipIf(NODE is None, "node is required to load the CJS ecosystem config")
 class Pm2EcosystemTest(unittest.TestCase):
+    def test_persistent_watchers_enable_the_seven_day_refusal_window(self) -> None:
+        apps = load_apps({})
+        watchers = [app for app in apps if not app["name"].endswith(SIDECAR_SUFFIX)]
+        self.assertTrue(watchers)
+        for watcher in watchers:
+            flag = watcher["args"].index("--refusal-recheck-window-days")
+            self.assertEqual("7", watcher["args"][flag + 1])
+
     def test_missing_token_file_leaves_the_app_list_unchanged(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             binary = Path(tmp) / "codex"

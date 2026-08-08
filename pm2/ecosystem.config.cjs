@@ -33,6 +33,7 @@ const agents = Array.isArray(agentsPayload.agents) ? agentsPayload.agents : [];
 
 const workspaceName = config.workspace_name || "collab";
 const pollSeconds = config.poll_interval_seconds || 15;
+const refusalRecheckWindowDays = 7;
 const notificationsEnabled = config.notifications_enabled !== false;
 const logsDir = path.join(root, "Logs", "watchers");
 const python = process.env.PYTHON || "python3";
@@ -200,6 +201,7 @@ const watcherApps = watcherAgents.map((agent) => {
       watchScript,
       "--me", agent.id,
       "--poll-seconds", String(pollSeconds),
+      "--refusal-recheck-window-days", String(refusalRecheckWindowDays),
       "--skip-existing",
     ];
     if (notificationsEnabled) appArgs.push("--notify");

@@ -87,6 +87,9 @@ from llm_collab.bb_bootstrap import (
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 
+MAX_REFUSAL_RECHECK_WINDOW_DAYS = (datetime.utcnow() - datetime.min).days
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Background inbox watcher.")
     p.add_argument("--me", required=True, help="Agent ID to watch for")
@@ -138,7 +141,7 @@ def parse_refusal_recheck_window_days(value) -> int | None:
         days = int(value)
     except (TypeError, ValueError):
         return None
-    return days if days >= 0 else None
+    return days if 0 <= days <= MAX_REFUSAL_RECHECK_WINDOW_DAYS else None
 
 
 def send_notification(title: str, body: str) -> None:
@@ -313,7 +316,7 @@ def load_refusal_progress(agent_id: str) -> dict:
             reason = value.get("reason")
             packet_repo_targets = value.get("packet_repo_targets")
             packet_project = value.get("packet_project")
-            clean[key] = {
+            entry = {
                 "fp": value["fp"],
                 "mtime": value.get("mtime") if isinstance(value.get("mtime"), (int, float)) else None,
                 "reason": reason if isinstance(reason, str) else "",
@@ -333,6 +336,16 @@ def load_refusal_progress(agent_id: str) -> dict:
                 or value.get("session_repo_targets") is None
                 else None,
             }
+            subscriber_project = value.get("subscriber_project")
+            if (
+                isinstance(subscriber_project, str)
+                or (
+                    subscriber_project is None
+                    and "subscriber_project" in value
+                )
+            ):
+                entry["subscriber_project"] = subscriber_project
+            clean[key] = entry
         elif isinstance(value, str):  # pre-GH-539 shape: fingerprint only
             clean[key] = {
                 "fp": value,
@@ -406,7 +419,11 @@ def _outside_refusal_recheck_window(
         )
     except ValueError:
         return False
-    return stamp < (now or datetime.utcnow()) - timedelta(days=window_days)
+    try:
+        cutoff = (now or datetime.utcnow()) - timedelta(days=window_days)
+    except OverflowError:
+        return False
+    return stamp < cutoff
 
 
 def terminal_refusal_paths(
@@ -419,10 +436,10 @@ def terminal_refusal_paths(
     now: datetime | None = None,
 ) -> set[str]:
     """Paths whose repo-scope refusal is already terminal under the CURRENT
-    subscriber decision. A changed fingerprint always re-opens eligibility;
-    recent decisions additionally require unchanged packet identity. Only an
-    old decision with that same current fingerprint bypasses the identity
-    recheck."""
+    subscriber decision AND whose packet file is unchanged. Packet identity is
+    checked for every age because it is the only signal for an in-place packet
+    correction. The window only avoids rebuilding the full fingerprint for old
+    entries that recorded the same subscriber project."""
     skip: set[str] = set()
     for key, entry in progress.items():
         if entry.get("session_id") != session_id:
@@ -436,6 +453,15 @@ def terminal_refusal_paths(
             # decision was made under the OLD scope and must be re-evaluated.
             continue
         path = entry.get("path") or key.split("\u0000", 1)[-1]
+        if entry.get("mtime") != _packet_mtime(path):
+            continue
+        if _outside_refusal_recheck_window(
+            path, refusal_recheck_window_days, now
+        ) and "subscriber_project" in entry:
+            if entry["subscriber_project"] != project_id:
+                continue
+            skip.add(path)
+            continue
         expected = refusal_fingerprint(
             entry.get("reason", ""),
             repo_targets,
@@ -450,13 +476,6 @@ def terminal_refusal_paths(
             session_scope,
         )
         if entry.get("fp") != expected:
-            continue
-        if _outside_refusal_recheck_window(
-            path, refusal_recheck_window_days, now
-        ):
-            skip.add(path)
-            continue
-        if entry.get("mtime") != _packet_mtime(path):
             continue
         skip.add(path)
     return skip
@@ -542,6 +561,7 @@ def record_refusal_progress(
         "reason": reason,
         "packet_repo_targets": packet_repo_targets,
         "packet_project": packet_project,
+        "subscriber_project": project_id,
         "session_id": session_id,
     }
     stats["_new"] = stats.get("_new", 0) + 1
