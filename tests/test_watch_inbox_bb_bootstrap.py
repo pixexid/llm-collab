@@ -161,6 +161,79 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             )
         )
 
+    def test_skip_existing_refuses_oversized_index_before_startup_snapshot(self) -> None:
+        real_get_unread = watch_inbox.get_unread_messages
+        real_load_inbox = watch_inbox.load_agent_inbox
+        get_calls = 0
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-watch-skip-") as raw:
+            inbox_path = Path(raw) / "inbox.json"
+            inbox_path.write_text(
+                json.dumps(
+                    {
+                        "unread": [],
+                        "read": [],
+                        "padding": "x" * 128,
+                    }
+                )
+            )
+
+            def refuse_then_repair(*args, **kwargs):
+                nonlocal get_calls
+                get_calls += 1
+                try:
+                    return real_get_unread(*args, **kwargs)
+                except InboxScanLimitExceeded:
+                    inbox_path.write_text('{"unread": [], "read": []}')
+                    raise
+
+            argv = [
+                "watch_inbox.py",
+                "--me",
+                "glmpi",
+                "--project",
+                "amiga",
+                "--skip-existing",
+                "--no-autobridge",
+                "--poll-seconds",
+                "1",
+                "--max-polls",
+                "1",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                watch_inbox, "require_current_runtime"
+            ), patch.object(
+                watch_inbox, "agent_ids", return_value=["glmpi"]
+            ), patch.object(
+                watch_inbox, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                helpers, "agent_inbox_path", return_value=inbox_path
+            ), patch.object(
+                session_autobridge, "MAX_DISPATCH_INBOX_BYTES", 64
+            ), patch.object(
+                watch_inbox,
+                "get_unread_messages",
+                side_effect=refuse_then_repair,
+            ), patch.object(
+                watch_inbox,
+                "load_agent_inbox",
+                wraps=real_load_inbox,
+            ) as unbounded_startup, patch.object(
+                watch_inbox, "load_refusal_progress", return_value={}
+            ), patch.object(watch_inbox.time, "sleep"), patch.object(
+                watch_inbox, "emit"
+            ) as emit:
+                watch_inbox.main()
+
+        unbounded_startup.assert_not_called()
+        self.assertGreaterEqual(get_calls, 2, "startup never retried after repair")
+        self.assertTrue(
+            any(
+                call.args[0].get("event") == "error"
+                and "byte limit" in call.args[0].get("detail", "")
+                for call in emit.call_args_list
+            )
+        )
+
     def test_oversized_index_swap_never_reaches_a_second_watcher_read(self) -> None:
         real_get_unread = watch_inbox.get_unread_messages
         real_load_inbox = watch_inbox.load_agent_inbox
