@@ -259,6 +259,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             session_autobridge_lib, "SESSIONS_DIR", sessions
         ), patch.object(
             session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ), patch.object(
+            session_autobridge_lib,
             "agent_inbox_path",
             return_value=inbox_path,
         ), patch.object(
@@ -297,6 +301,10 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         with patch.object(
             session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
         ), patch.object(
             session_autobridge_lib,
             "agent_inbox_path",
@@ -350,6 +358,10 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         with patch.object(
             session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
         ), patch.object(
             session_autobridge_lib,
             "agent_inbox_path",
@@ -455,6 +467,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 session_autobridge_lib.iter_sessions()
 
     def test_registration_checks_capacity_before_publishing_a_binding(self):
+        root = self.make_workspace()
         args = argparse.Namespace(
             session="SESSION-LARGE",
             agent="claude",
@@ -477,6 +490,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         with patch.object(
             session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
         ), patch.object(
             session_autobridge_cli, "load_session", side_effect=FileNotFoundError
         ), patch.object(
@@ -538,6 +555,11 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_gh536_preflight_refuses_owned_native_without_writing(self):
         sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
         with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions), \
+             patch.object(
+                 session_autobridge_lib,
+                 "SESSION_WRITE_LOCK",
+                 sessions.parent / ".session-write.lock",
+             ), \
              self.assertRaisesRegex(
                  session_autobridge_cli.NativeSessionOwnedElsewhere,
                  "deactivate the other lease or use a fresh native session",
@@ -550,7 +572,13 @@ class SessionAutobridgeTest(unittest.TestCase):
 
     def test_gh536_preflight_allows_unowned_native(self):
         sessions = self._sessions_dir(self._rec("S0", "claude_app", "NAT-1"))
-        with patch.object(session_autobridge_lib, "SESSIONS_DIR", sessions):
+        with patch.object(
+            session_autobridge_lib, "SESSIONS_DIR", sessions
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            sessions.parent / ".session-write.lock",
+        ):
             session_autobridge_cli.preflight_native_session_registration(
                 session_id="PENDING", project_id="llm-collab", chat_id="CHAT-NEW",
                 native_session_id="NAT-2", native_family="claude_app",
@@ -804,9 +832,15 @@ class SessionAutobridgeTest(unittest.TestCase):
         # Finding #2 prerequisite: the register write lock must be reentrant so
         # the ownership scan can be held across save_session (which re-acquires
         # it) without a self-deadlock.
-        with session_autobridge_lib._session_write_lock():
+        root = self.make_workspace()
+        with patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
+        ):
             with session_autobridge_lib._session_write_lock():
-                pass  # nested acquisition must not deadlock or raise
+                with session_autobridge_lib._session_write_lock():
+                    pass  # nested acquisition must not deadlock or raise
 
     def test_gh468_scan_and_write_share_one_lock(self):
         # Finding #2: the ownership scan and the register writes must be one
@@ -7672,8 +7706,27 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertEqual(events_after_wake, event_path.read_text())
         self.assertEqual(wake_events_after_wake, wake_path.read_text())
-        session_autobridge_lib.append_event(
-            "SESSION-PI-GLIM", {"event": "session_skipped", "reason": "stopped"}
+        workspace_event_path = session_autobridge_lib.autobridge_event_log_path(
+            "SESSION-PI-GLIM"
+        )
+        self.assertNotEqual(workspace_event_path, event_path)
+        workspace_event_before = (
+            workspace_event_path.read_bytes() if workspace_event_path.exists() else None
+        )
+        with patch.object(session_autobridge_lib, "EVENTS_DIR", event_path.parent):
+            session_autobridge_lib.append_event(
+                "SESSION-PI-GLIM", {"event": "session_skipped", "reason": "stopped"}
+            )
+        events_after_diagnostic = event_path.read_text()
+        self.assertNotEqual(events_after_wake, events_after_diagnostic)
+        self.assertEqual(
+            "session_skipped",
+            json.loads(events_after_diagnostic.splitlines()[-1])["event"],
+        )
+        self.assertEqual(
+            workspace_event_before,
+            workspace_event_path.read_bytes() if workspace_event_path.exists() else None,
+            "the in-process diagnostic append must not write under the workspace root",
         )
         self.assertEqual(
             wake_events_after_wake,
@@ -9180,6 +9233,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
 
     def test_pi_replacement_does_not_prepare_again_after_the_swap(self):
+        root = self.make_workspace()
         args = SimpleNamespace(
             session="SESSION-NEW", agent="glmpi", project="amiga", chat="CHAT-R",
             repo_targets=["app"], mode="auto-read", status="active",
@@ -9200,6 +9254,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         }
         with patch.object(
             session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
         ), patch.object(
             session_autobridge_cli,
             "read_pi_session_fingerprint",
@@ -10499,6 +10557,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertIn(successor["status"], {"active", "parked"})
 
     def test_registration_refuses_an_unreadable_superseded_ledger(self):
+        root = self.make_workspace()
         args = SimpleNamespace(
             session="SESSION-NEW", agent="claude", project="amiga", chat="CHAT-X",
             mode="notify", status="active", wake_strategy="none", allowed_actions=[],
@@ -10509,6 +10568,10 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         with patch.object(
             session_autobridge_cli, "get_agent", return_value={"activation": {}}
+        ), patch.object(
+            session_autobridge_lib,
+            "SESSION_WRITE_LOCK",
+            root / "State" / "session_autobridge" / ".session-write.lock",
         ), patch.object(
             session_autobridge_cli,
             "load_session",
@@ -10539,6 +10602,7 @@ class SessionAutobridgeTest(unittest.TestCase):
         Proved by ordering — the binding preflight raises and retire must not have
         been reached.
         """
+        root = self.make_workspace()
         agent = {"id": "claude", "activation": {"type": "cli_session"}}
         args = SimpleNamespace(
             session="SESSION-NEW", agent="claude", project="amiga", chat="CHAT-X",
@@ -10550,6 +10614,11 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         with patch.object(session_autobridge_cli, "get_agent",
                           return_value=agent), \
+             patch.object(
+                 session_autobridge_lib,
+                 "SESSION_WRITE_LOCK",
+                 root / "State" / "session_autobridge" / ".session-write.lock",
+             ), \
              patch.object(session_autobridge_cli, "load_session", return_value={}), \
              patch.object(session_autobridge_cli, "prepare_session_write",
                           return_value=({"session_id": "SESSION-NEW"}, "{}")), \
