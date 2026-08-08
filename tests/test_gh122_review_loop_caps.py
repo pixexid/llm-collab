@@ -484,8 +484,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             self.assertIn("Verify all four", sources["review_policy"])
             for condition in (
                 "the actor is the connector",
-                "that the reaction post-dates the push of the current head",
-                "that the head has not been amended since",
+                "the reaction post-dates the push of the current head",
+                "no push or force-push occurred between that push and the `+1`",
                 "every other artifact class is empty",
             ):
                 self.assertIn(condition, sources["review_policy"])
@@ -1876,40 +1876,38 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         self.assert_scenario_cases("compact_wait_gate", check)
 
     def test_automatic_plus_one_fails_closed_on_a_mid_pass_push(self):
-        """GH-549 P1: a PR-level +1 carries no SHA, so the four checks cannot bind
-        it to the reviewed head. A pass started on H1 that ends with a +1 after an
-        H2 push passes all four for H2 though H1 was reviewed. The contract must
-        fail closed in that case (route through the prior-OID local proof) unless a
-        trustworthy connector pickup artifact proves the pass started after the
-        current head's push with no push in between."""
+        """GH-616: a PR-level +1 carries no SHA, so durable push history must bind
+        it to the reviewed head. The reaction must post-date the current-head push,
+        with no intervening push or force-push; an ambiguous record fails closed
+        through the prior-OID local-proof path."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "those four checks cannot by themselves bind the `+1` to the reviewed head",
+            "bind the interval to the current head with durable commit/push timestamps "
+            "and retained `head_ref_force_pushed` events",
             text,
         )
-        self.assertIn("passes all four for H2 though H1 was reviewed", text)
+        self.assertIn(
+            "no push or force-push occurred between that push and the `+1`", text
+        )
         self.assertIn(
             "route it through the prior-OID path below and locally prove every amendment",
             text,
         )
 
     def test_canonical_terminal_list_binds_automatic_plus_one_to_the_reviewed_head(self):
-        """GH-549 P1 (canonical list): the merge-driving automatic PR-level +1 bullet
-        must carry the same head-binding as the review-policy enumeration -- a PR-level
-        reaction has no SHA, so the four checks do not bind it to the reviewed head.
-        Require a trustworthy connector pickup artifact (eyes) proving the pass started
-        after the current head's push with no push in between, and route an
-        ambiguous/prior-head +1 through the prior-OID local proof."""
+        """GH-616 (canonical list): the merge-driving automatic PR-level +1 bullet
+        must carry the same durable push-history binding as the review-policy
+        enumeration and route an ambiguous/prior-head +1 through local proof."""
         text = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         self.assertIn(
-            "terminal on this path only when a trustworthy existing connector pickup "
-            "artifact (its `eyes` reaction) proves the pass started after the current "
-            "head's push with no push between pickup and `+1`",
+            "Bind that interval with durable commit/push timestamps and retained "
+            "`head_ref_force_pushed` events",
             text,
         )
         self.assertIn(
-            "an ambiguous or prior-head `+1` is not terminal here — fall back to the "
-            "prior-OID clause below with local proof of every amendment",
+            "If the durable record is ambiguous or binds the `+1` to a prior head, it "
+            "is not terminal here — fall back to the prior-OID clause below with local "
+            "proof of every amendment",
             text,
         )
 
