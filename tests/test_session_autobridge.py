@@ -260,6 +260,94 @@ class SessionAutobridgeTest(unittest.TestCase):
             self.assertEqual(timestamps[2], transitioned["ts"])
             self.assertEqual(1, transitioned["repeat_count"])
 
+    def test_event_log_first_rollover_moves_compacted_record_once(self):
+        def padded_line(event_name, size):
+            empty = (
+                json.dumps({"detail": "", "event": event_name}, sort_keys=True)
+                + "\n"
+            ).encode()
+            line = (
+                json.dumps(
+                    {"detail": "x" * (size - len(empty)), "event": event_name},
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            self.assertEqual(size, len(line))
+            return line
+
+        def assert_sequence_total(path, expected):
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            sequence = [
+                record for record in records if record["event"] == "session_skipped"
+            ]
+            self.assertEqual(
+                expected,
+                sum(record.get("repeat_count", 1) for record in sequence),
+                records,
+            )
+            self.assertEqual(1, len(sequence), records)
+            return records, sequence[0]
+
+        seen_at = "2026-08-08T01:00:00+00:00"
+        event = {
+            "event": "session_skipped",
+            "reason": "lease_expired",
+            "status": "parked",
+        }
+        compacted = {
+            "ts": seen_at,
+            **event,
+            "first_seen_at_utc": seen_at,
+            "last_seen_at_utc": seen_at,
+            "repeat_compacted": True,
+            "repeat_count": 9,
+        }
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, patch.object(
+            session_autobridge_lib, "EVENTS_DIR", Path(tmp)
+        ), patch.object(
+            session_autobridge_lib, "MAX_EVENT_LOG_BYTES", 700
+        ), patch.object(
+            session_autobridge_lib, "utc_iso", return_value=seen_at
+        ):
+            region_limit = (
+                session_autobridge_lib.MAX_EVENT_LOG_BYTES
+                - session_autobridge_lib.EVENT_LOG_TRUNCATION_RESERVE_BYTES
+            )
+            compacted_line = (json.dumps(compacted, sort_keys=True) + "\n").encode()
+            filler_size = region_limit - len(compacted_line)
+
+            path = Path(tmp) / "SESSION-ROLLOVER.jsonl"
+            path.write_bytes(padded_line("head", filler_size))
+            for _ in range(9):
+                session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            self.assertEqual(region_limit, path.stat().st_size)
+
+            session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            records, repeated = assert_sequence_total(path, 10)
+            self.assertEqual(10, repeated["repeat_count"])
+            marker = next(
+                record for record in records if record["event"] == "event_log_truncated"
+            )
+            self.assertEqual(filler_size, marker["head_retained_bytes"])
+
+            session_autobridge_lib.append_event("SESSION-ROLLOVER", event)
+            assert_sequence_total(path, 11)
+
+            tail_marker = {**marker, "head_retained_bytes": 0}
+            marker_line = (json.dumps(tail_marker, sort_keys=True) + "\n").encode()
+            tail_filler_size = (
+                session_autobridge_lib.MAX_EVENT_LOG_BYTES - len(compacted_line)
+            )
+            tail_path = Path(tmp) / "SESSION-TAIL-ROLLOVER.jsonl"
+            tail_path.write_bytes(
+                marker_line + padded_line("tail", tail_filler_size) + compacted_line
+            )
+
+            session_autobridge_lib.append_event("SESSION-TAIL-ROLLOVER", event)
+            _, repeated = assert_sequence_total(tail_path, 10)
+            self.assertEqual(10, repeated["repeat_count"])
+
     def make_workspace(self) -> Path:
         temp_root = Path(tempfile.mkdtemp(prefix="lca-", dir="/tmp"))
         write(

@@ -1253,11 +1253,12 @@ def _append_event_path(
         )
         projected_region_size = projected_size - tail_start
         if projected_region_size > region_limit and not tail_start:
+            head_retained_bytes = last_start if replace_last else size
             marker = (
                 json.dumps(
                     {
                         "event": "event_log_truncated",
-                        "head_retained_bytes": size,
+                        "head_retained_bytes": head_retained_bytes,
                         "retention": "bounded_head_and_tail",
                         "tail_limit_bytes": MAX_EVENT_LOG_BYTES,
                         "truncated": True,
@@ -1267,6 +1268,7 @@ def _append_event_path(
                 )
                 + "\n"
             ).encode()
+            handle.truncate(head_retained_bytes)
             handle.seek(0, os.SEEK_END)
             handle.write(marker)
             handle.write(encoded)
