@@ -377,9 +377,17 @@ pm2 save
 ### Verifying and using it
 
 ```bash
-curl -s http://127.0.0.1:8767/readyz
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  http://127.0.0.1:8767/readyz)" = 200
+<runtime_root>/bin/llm-collab pm2_watchers.py ensure \
+  --agent codex-appserver --runtime-home <exact-canonical-runtime-home>
 <runtime_root>/bin/llm-collab pm2_watchers.py status --agent codex-appserver
 ```
+
+Only an exact HTTP 200 is ready; redirects and HTTP errors are refused. Before
+`ensure` succeeds for a binding, it also authenticates a WebSocket `initialize`
+and requires the returned `codexHome` to equal the exact canonical runtime home
+that registration will store.
 
 Delivery itself is exercised by the autobridge dispatch path, which reports
 `adapter: codex_app_server` with `returncode: 0` once a session declares the

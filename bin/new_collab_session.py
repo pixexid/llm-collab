@@ -186,12 +186,12 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
         raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
 
 
-CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 50
+CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS = 70
 
 
-def ensure_codex_transport() -> None:
+def ensure_codex_transport(runtime_home: str) -> None:
     cmd = [sys.executable, str(BIN / "pm2_watchers.py"), "ensure",
-           "--agent", "codex-appserver"]
+           "--agent", "codex-appserver", "--runtime-home", runtime_home]
     try:
         r = subprocess.run(
             cmd, capture_output=True, text=True,
@@ -337,7 +337,8 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family,
             "",
             "# 2. Establish the App Server transport before registration. STOP",
             "#    if this fails; no binding may become dispatchable without it:",
-            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
+            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver \\",
+            "  --runtime-home <YOUR_HOME_FROM_STEP_1>",
         ]
         register_step = 3
     lines += [
@@ -460,8 +461,13 @@ def main():
     my_home = args.my_runtime_home or DEFAULT_HOMES.get(args.my_runtime_family, f"~/.{args.me}")
     my_activation = agent_activation(agents, args.me)
     try:
+        from session_autobridge import canonical_runtime_home
+
+        my_home = canonical_runtime_home(my_home)
+        if my_home is None:
+            raise RuntimeError("the initiator runtime home is empty")
         if needs_dispatch_wake(my_activation):
-            ensure_codex_transport()
+            ensure_codex_transport(my_home)
         register_session(my_session, args.me, args.project, chat, args.repo_target,
                          args.my_runtime_family, args.my_runtime_session_id, my_home)
     except RuntimeError as exc:

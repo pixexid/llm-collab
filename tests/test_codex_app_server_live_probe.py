@@ -23,6 +23,7 @@ from llm_collab.codex_app_server_live_probe import (
     observe_exact_thread,
     probe_exact_thread,
     probe_live_codex_app_server,
+    probe_runtime_home_identity,
 )
 
 
@@ -187,6 +188,22 @@ class CodexAppServerLiveProbeTests(unittest.TestCase):
         # Load-bearing: thread/read carries exactly threadId + includeTurns false
         # -- no resume, no mutation, anything that would start a turn.
         self.assertEqual({"threadId": thread_id, "includeTurns": False}, fake.requests[1]["params"])
+
+    def test_runtime_home_identity_uses_minimal_initialize_and_matches_exactly(self):
+        fake = FakeTransport(init_result={"codexHome": "/Users/test/.codex"})
+
+        self.assertEqual(
+            "/Users/test/.codex",
+            probe_runtime_home_identity("/Users/test/.codex", transport=fake),
+        )
+        self.assertEqual(["initialize"], [frame["method"] for frame in fake.requests])
+        self.assertEqual(["initialized"], [frame["method"] for frame in fake.notifications])
+
+    def test_runtime_home_identity_refuses_a_different_home(self):
+        fake = FakeTransport(init_result={"codexHome": "/Users/other/.codex"})
+
+        with self.assertRaisesRegex(CodexAppServerLiveProbeError, "does not match"):
+            probe_runtime_home_identity("/Users/test/.codex", transport=fake)
 
     def test_exact_thread_probe_fails_closed_on_an_unknown_thread_id(self):
         thread_id = "019f9452-6954-7301-bff9-db1c47432bc8"

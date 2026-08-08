@@ -184,6 +184,51 @@ def _minimal_initialize(transport: Any) -> Mapping[str, Any]:
     return initialize
 
 
+def probe_runtime_home_identity(
+    expected_runtime_home: str,
+    *,
+    endpoint_url: str | None = None,
+    transport: Any | None = None,
+    timeout_seconds: float = 5,
+    token: str | None = None,
+) -> str:
+    """Initialize one endpoint and require its own ``codexHome`` identity."""
+    _require_runtime_home(expected_runtime_home)
+    if (endpoint_url is None) == (transport is None):
+        raise CodexAppServerLiveProbeError("supply exactly one endpoint_url or transport")
+    if transport is not None:
+        return _matching_runtime_home(_minimal_initialize(transport), expected_runtime_home)
+    with _WebSocketJsonRpcTransport(
+        endpoint_url, timeout_seconds=timeout_seconds, token=token
+    ) as live_transport:
+        return _matching_runtime_home(
+            _minimal_initialize(live_transport), expected_runtime_home
+        )
+
+
+def _require_runtime_home(expected_runtime_home: str) -> None:
+    if (
+        not isinstance(expected_runtime_home, str)
+        or not expected_runtime_home
+        or "\x00" in expected_runtime_home
+        or expected_runtime_home != os.path.realpath(expected_runtime_home)
+    ):
+        raise CodexAppServerLiveProbeError(
+            "expected_runtime_home must be an absolute normalized realpath"
+        )
+
+
+def _matching_runtime_home(
+    initialize: Mapping[str, Any], expected_runtime_home: str
+) -> str:
+    codex_home = initialize.get("codexHome")
+    if codex_home != expected_runtime_home:
+        raise CodexAppServerLiveProbeError(
+            "initialize codexHome does not match the expected runtime home"
+        )
+    return codex_home
+
+
 def _read_exact_thread(transport: Any, thread_id: str) -> Mapping[str, Any]:
     result = _request(
         transport, 2, THREAD_READ_METHOD, {"threadId": thread_id, "includeTurns": False},
@@ -255,15 +300,7 @@ def observe_exact_thread(
     resume/start/fork/turn/archive is issued. Identity failures raise; a
     thread/read request failure after identity proof classifies uncertain."""
     _require_thread_id(thread_id)
-    if (
-        not isinstance(expected_runtime_home, str)
-        or not expected_runtime_home
-        or "\x00" in expected_runtime_home
-        or expected_runtime_home != os.path.realpath(expected_runtime_home)
-    ):
-        raise CodexAppServerLiveProbeError(
-            "expected_runtime_home must be an absolute normalized realpath"
-        )
+    _require_runtime_home(expected_runtime_home)
     if (
         not isinstance(supported_user_agent_prefixes, (frozenset, tuple))
         or not supported_user_agent_prefixes
@@ -291,11 +328,7 @@ def _observe_exact_thread_transport(
     supported_user_agent_prefixes: frozenset[str] | tuple[str, ...],
 ) -> CodexAppServerThreadObservation:
     initialize = _minimal_initialize(transport)
-    codex_home = initialize.get("codexHome")
-    if codex_home != expected_runtime_home:
-        raise CodexAppServerLiveProbeError(
-            "initialize codexHome does not match the expected runtime home"
-        )
+    codex_home = _matching_runtime_home(initialize, expected_runtime_home)
     user_agent = initialize.get("userAgent")
     if not isinstance(user_agent, str) or not any(
         user_agent.startswith(prefix) for prefix in supported_user_agent_prefixes
