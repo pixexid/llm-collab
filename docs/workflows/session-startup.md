@@ -88,7 +88,11 @@ The deploy command requires the named source to be an exact `origin/main`, then
 performs one fenced deployment transaction:
 
 1. Preflight the source and deployed target, including the target's current head,
-   clean tracked state, PM2 availability, and both old/new workspace names.
+   clean tracked state, PM2 availability, and both old/new workspace names. Before
+   any mutation, refuse if a process the ecosystem does not declare is executing
+   the deployed runtime's own `bin/watch_inbox.py` — a live dispatcher outside the
+   fence — so code replacement never happens under it and rollback is never
+   reached for that condition.
 2. Read `pm2 jlist` and stop every persistent PM2 app owned by either workspace
    name. The command verifies that no owned app remains live before changing the
    deployed tree.
@@ -123,7 +127,9 @@ This is a configuration contract, not a claim about live PM2 state. The deploy
 transaction above reads the current ecosystem and fails unless every managed
 process's live script and arguments match it, and also refuses when a process
 the ecosystem does not declare is running the deployed runtime's own
-`bin/watch_inbox.py` — so an undeclared watcher cannot report conformance green.
+`bin/watch_inbox.py`, refusing before the fence so no code replacement happens
+under a live dispatcher — so an undeclared watcher cannot report conformance
+green.
 The match is on the property (a process executing that script), never a PM2 name
 pattern, so unrelated entries on this host are not implicated. Use that check
 whenever current runtime conformance matters; do not derive or preserve a second
