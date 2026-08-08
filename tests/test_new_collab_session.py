@@ -83,6 +83,14 @@ class CoworkerPromptTest(unittest.TestCase):
         # agent-wide, because that is the one that dispatches.
         self.assertIn("--session SESSION-CODEX-ABCD1234 --agent codex", p)
         self.assertNotIn("--session SESSION-CODEX-ABCD1234 --repo-target", p)
+        self.assertLess(
+            p.index("pm2_watchers.py ensure --agent codex-appserver"),
+            p.index("session_autobridge.py register"),
+        )
+        self.assertLess(
+            p.index("session_autobridge.py register"),
+            p.rindex("pm2_watchers.py ensure --agent codex"),
+        )
 
     def test_watcher_prompt_arms_watcher(self):
         p = ncs.coworker_prompt("gemini", "watcher", "llm-collab",
@@ -158,16 +166,13 @@ class PickupBlockTest(unittest.TestCase):
         # (PR #559 r3725819269).
         self.assertIn("pm2_watchers.py ensure --agent codex", command)
         self.assertNotIn("watch_inbox.py", command)
-        # Transport before binding-dependent wake: ensuring the watcher without
-        # the sidecar leaves a dispatchable binding that suppresses AX with
-        # nowhere to send the turn — the 2026-08-05 silent outage
-        # (PR #559 r3725873619). Order is asserted, not just presence.
+        # Transport setup now precedes registration, so pickup only ensures the
+        # dispatching watcher and cannot repeat transport setup too late.
         cmds = [l.strip() for l in command.splitlines() if l.strip()]
         self.assertEqual(
-            [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
-             f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
+            [f"{ncs.LAUNCH} pm2_watchers.py ensure --agent codex"],
             cmds,
-            "sidecar must be ensured BEFORE the watcher, and nothing else emitted",
+            "pickup must only ensure the watcher after transport and registration",
         )
         self.assertNotIn("--session", command)
         self.assertNotIn("NO native session watcher", block)
@@ -254,6 +259,33 @@ class MainPathTest(unittest.TestCase):
         self.assertIn("pm2_watchers.py ensure --agent codex", initiator)
         self.assertNotIn("NO native session watcher", initiator)
 
+    def test_codex_initiator_ensures_transport_before_registration(self):
+        import io
+        from contextlib import redirect_stdout
+
+        calls = []
+
+        def run(cmd, **kwargs):
+            if cmd[1].endswith("new_chat.py"):
+                return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+            calls.append("transport")
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        argv = ["--project", "p", "--title", "t", "--me", "codex",
+                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+        with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+             patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
+             patch.object(ncs, "register_session", side_effect=lambda *args: calls.append("register")), \
+             patch.object(ncs.subprocess, "run", side_effect=run), \
+             redirect_stdout(io.StringIO()):
+            ncs.main()
+
+        self.assertEqual(["transport", "register"], calls)
+
     def test_claude_initiator_arms_watcher(self):
         out, _ = self._main([
             "--project", "p", "--title", "t", "--me", "claude",
@@ -338,6 +370,90 @@ class MainPathTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 ncs.main()
             sh.rmtree.assert_called_once()  # orphan chat rolled back
+
+    def test_pm2_start_must_succeed_and_be_online_before_registration(self):
+        import pm2_watchers
+
+        argv = ["--project", "p", "--title", "t", "--me", "codex",
+                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+
+        cases = {
+            "start failed": [
+                type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 7, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})(),
+            ],
+            "start returned zero but app stayed offline": [
+                type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+                type("R", (), {"returncode": 0, "stdout": "stopped", "stderr": ""})(),
+            ],
+        }
+        for label, pm2_results in cases.items():
+            with self.subTest(label):
+                results = iter(pm2_results)
+
+                def run(cmd, **kwargs):
+                    if cmd[1].endswith("new_chat.py"):
+                        return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+                    try:
+                        with patch.object(sys, "argv", ["pm2_watchers.py", "ensure", "--agent", "codex-appserver"]), \
+                             patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                             patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=["codex-appserver"]), \
+                             patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                             patch.object(pm2_watchers, "pm2_run", side_effect=results):
+                            pm2_watchers.main()
+                    except SystemExit as exc:
+                        return type("R", (), {"returncode": exc.code, "stdout": "", "stderr": "transport unavailable"})()
+                    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+                     patch.object(ncs, "ensure_project", return_value=None), \
+                     patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+                     patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+                     patch.object(ncs, "preflight_starter_binding", return_value=None), \
+                     patch.object(ncs, "register_session") as register, \
+                     patch.object(ncs, "shutil") as sh, \
+                     patch.object(ncs.subprocess, "run", side_effect=run):
+                    with self.assertRaisesRegex(SystemExit, "transport unavailable"):
+                        ncs.main()
+
+                register.assert_not_called()
+                sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
+
+    def test_transport_timeout_rolls_back_instead_of_hanging(self):
+        import threading
+
+        argv = ["--project", "p", "--title", "t", "--me", "codex",
+                "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
+                "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+        seen_timeouts = []
+
+        def run(cmd, **kwargs):
+            if cmd[1].endswith("new_chat.py"):
+                return type("R", (), {"returncode": 0, "stdout": '{"chat_id": "CHAT-X", "path": "/tmp/chat-x"}', "stderr": ""})()
+            timeout = kwargs.get("timeout")
+            seen_timeouts.append(timeout)
+            threading.Event().wait(0.01)  # fake a blocked token read without a real hung mount
+            if timeout is None:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+        with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \
+             patch.object(ncs, "ensure_project", return_value=None), \
+             patch.object(ncs, "get_project", return_value={"repos": {"app": "."}}), \
+             patch.object(ncs, "load_agents", return_value=self.AGENTS), \
+             patch.object(ncs, "preflight_starter_binding", return_value=None), \
+             patch.object(ncs, "register_session") as register, \
+             patch.object(ncs, "shutil") as sh, \
+             patch.object(ncs.subprocess, "run", side_effect=run):
+            with self.assertRaisesRegex(SystemExit, "timed out after 50s"):
+                ncs.main()
+
+        self.assertEqual([ncs.CODEX_TRANSPORT_ENSURE_TIMEOUT_SECONDS], seen_timeouts)
+        register.assert_not_called()
+        sh.rmtree.assert_called_once_with("/tmp/chat-x", ignore_errors=True)
 
     def _run_expect_exit(self, argv, agents, *, get_project_ret={"repos": {"app": "."}}):
         with patch.object(sys, "argv", ["new_collab_session.py", *argv]), \

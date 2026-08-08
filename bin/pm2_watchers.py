@@ -270,14 +270,22 @@ def ecosystem_path() -> Path:
 
 
 def start_agent(agent_id: str) -> None:
-    if is_sidecar(agent_id):
-        pm2_run(["start", str(ecosystem_path()), "--only", app_name(agent_id)])
-        return
-    agent = get_agent(agent_id)
-    if not agent.get("activation", {}).get("watcher_enabled", False):
-        print(f"[skip] {agent_id} has watcher_enabled: false")
-        return
-    pm2_run(["start", str(ecosystem_path()), "--only", app_name(agent_id)])
+    if not is_sidecar(agent_id):
+        agent = get_agent(agent_id)
+        if not agent.get("activation", {}).get("watcher_enabled", False):
+            print(f"[skip] {agent_id} has watcher_enabled: false")
+            return
+
+    name = app_name(agent_id)
+    started = pm2_run(["start", str(ecosystem_path()), "--only", name])
+    if started.returncode != 0:
+        print(f"[error] pm2 failed to start {name} (exit {started.returncode})", file=sys.stderr)
+        sys.exit(started.returncode)
+
+    status = pm2_run(["describe", name], capture_output=True)
+    if status.returncode != 0 or "online" not in (status.stdout or "").lower():
+        print(f"[error] pm2 started {name} but it is not online", file=sys.stderr)
+        sys.exit(status.returncode or 1)
 
 
 def ensure_agent(agent_id: str) -> None:
