@@ -325,14 +325,27 @@ def load_refusal_progress(agent_id: str) -> dict:
     return clean
 
 
-def save_refusal_progress(agent_id: str, refused: dict) -> None:
+def save_refusal_progress(agent_id: str, refused: dict) -> bool:
     """Atomic single-writer update; a partial write must never be readable."""
     path = refusal_progress_path(agent_id)
     tmp = path.with_suffix(".json.tmp")
+    payload = json.dumps({"version": 1, "refused": refused}, indent=2).encode(
+        "utf-8"
+    )
+    if len(payload) > MAX_REFUSAL_PROGRESS_BYTES:
+        print(
+            "[warn] refusal progress not persisted: "
+            f"{len(payload)} serialized bytes exceeds "
+            f"{MAX_REFUSAL_PROGRESS_BYTES}; existing store preserved",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({"version": 1, "refused": refused}, indent=2))
+        tmp.write_bytes(payload)
         os.replace(tmp, path)
+        return True
     except OSError:
         # Progress state is an optimisation, never a gate: if it cannot be
         # persisted the watcher still refuses correctly, it just re-logs.
@@ -340,6 +353,7 @@ def save_refusal_progress(agent_id: str, refused: dict) -> None:
             tmp.unlink()
         except OSError:
             pass
+        return False
 
 
 def _packet_mtime(message_path: str) -> float | None:
