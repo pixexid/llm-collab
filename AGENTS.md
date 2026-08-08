@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 12 -->
+<!-- CONTRACT_VERSION: 13 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,19 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v13 (2026-08-07) corrects the lane WIP cap to count **writing lanes
+only**. Read-only lanes — audits, probes, scoping, and reviews with no branch and
+no designated writer — never counted and do not now. One-writer-per-lane
+remains a separate, unchanged rule. The scarce resource is **orchestrator
+verification capacity**, a judgment rather than a constant: the limit protects
+independent verification rather than rationing worktrees.
+
+Practice had already diverged for a full session under an override recorded only
+in a chat message, so cached worker instructions still taught the obsolete
+"implementation lanes" wording without a version signal. This bump makes that
+drift visible. Canonical definitions, rationale, and activation mechanics live
+in [`Lane WIP limit`](docs/workflows/task-intake-and-delegation.md#lane-wip-limit).
 
 Contract v12 (2026-08-06) makes the **durable packet plus session-autobridge
 dispatch the routine wake for every watcher/monitor-backed recipient, Codex
