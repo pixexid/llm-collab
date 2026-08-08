@@ -1548,7 +1548,9 @@ class SessionAutobridgeTest(unittest.TestCase):
 
         return session, message, result, watcher_events, consumed, mark_read
 
-    def test_watcher_text_renderer_exposes_nonroutine_data_and_keeps_poll_line_compact(self):
+    def test_watcher_text_renderer_suppresses_only_repeat_unchanged_payloads(self):
+        watch_inbox_lib._last_text_payloads.clear()
+        self.addCleanup(watch_inbox_lib._last_text_payloads.clear)
         text_output = StringIO()
         with redirect_stdout(text_output):
             watch_inbox_lib.emit(
@@ -1563,51 +1565,139 @@ class SessionAutobridgeTest(unittest.TestCase):
             watch_inbox_lib.emit(
                 {
                     "ts": "2026-08-08T12:00:01",
-                    "event": "new_message",
-                    "detail": "Chats/CHAT-ONE/packet.md",
-                    "agent": "codex",
+                    "event": "future_event",
+                    "detail": "ready",
+                    "new_field": {"visible": True},
                 },
                 json_output=False,
             )
             watch_inbox_lib.emit(
                 {
                     "ts": "2026-08-08T12:00:02",
-                    "event": "bb_observation",
-                    "detail": "idle",
-                    "project_id": "llm-collab",
-                    "session_id": "thread-one",
-                    "state": "idle",
-                    "last_event_seq": 42,
-                    "processed_events": 0,
-                    "receipt_id": None,
+                    "event": "future_event",
+                    "detail": "ready",
+                    "new_field": {"visible": False},
                 },
                 json_output=False,
             )
             watch_inbox_lib.emit(
                 {
                     "ts": "2026-08-08T12:00:03",
-                    "event": "autobridge_refusal_summary",
-                    "detail": "1 already-refused message(s) skipped",
-                    "agent": "codex",
-                    "suppressed_by_reason": {"repo_scope_mismatch": 1},
-                    "new_refusals": 0,
+                    "event": "future_event",
+                    "detail": "ready",
+                    "new_field": {"visible": False},
+                },
+                json_output=False,
+            )
+            watch_inbox_lib.emit(
+                {
+                    "ts": "2026-08-08T12:00:04",
+                    "event": "future_event",
+                    "detail": "ready",
+                    "new_field": {"visible": True},
                 },
                 json_output=False,
             )
 
         expected = [
             '[2026-08-08T12:00:00] future_event: ready data={"new_field":{"visible":true}}',
-            '[2026-08-08T12:00:01] new_message: Chats/CHAT-ONE/packet.md data={"agent":"codex"}',
-            "[2026-08-08T12:00:02] bb_observation: idle",
-            "[2026-08-08T12:00:03] autobridge_refusal_summary: 1 already-refused message(s) skipped",
+            "[2026-08-08T12:00:01] future_event: ready",
+            '[2026-08-08T12:00:02] future_event: ready data={"new_field":{"visible":false}}',
+            "[2026-08-08T12:00:03] future_event: ready",
+            '[2026-08-08T12:00:04] future_event: ready data={"new_field":{"visible":true}}',
         ]
+        self.assertEqual(expected, text_output.getvalue().splitlines())
+
+    def test_watcher_text_renderer_keeps_interleaved_sessions_independent(self):
+        watch_inbox_lib._last_text_payloads.clear()
+        self.addCleanup(watch_inbox_lib._last_text_payloads.clear)
+        text_output = StringIO()
+        with redirect_stdout(text_output):
+            for ts, session_id in (
+                ("2026-08-08T12:00:00", "SESSION-ONE"),
+                ("2026-08-08T12:00:01", "SESSION-TWO"),
+                ("2026-08-08T12:00:02", "SESSION-ONE"),
+            ):
+                watch_inbox_lib.emit(
+                    {
+                        "ts": ts,
+                        "event": "future_event",
+                        "detail": "idle",
+                        "agent": "codex",
+                        "session_id": session_id,
+                        "state": "idle",
+                    },
+                    json_output=False,
+                )
+
         rendered = text_output.getvalue().splitlines()
-        self.assertEqual(len(expected[2]), len(rendered[2]))
-        self.assertEqual(len(expected[3]), len(rendered[3]))
-        self.assertEqual(expected, rendered)
+        self.assertIn(" data=", rendered[0])
+        self.assertIn(" data=", rendered[1])
+        self.assertNotIn(" data=", rendered[2])
+
+    def test_watcher_text_renderer_compacts_known_repeat_cases_by_behavior(self):
+        watch_inbox_lib._last_text_payloads.clear()
+        self.addCleanup(watch_inbox_lib._last_text_payloads.clear)
+        messages = (
+            {
+                "event": "bb_observation",
+                "detail": "idle",
+                "project_id": "llm-collab",
+                "session_id": "thread-one",
+                "state": "idle",
+                "last_event_seq": 42,
+                "processed_events": 0,
+                "receipt_id": None,
+            },
+            {
+                "event": "autobridge_refusal_summary",
+                "detail": "1 already-refused message(s) skipped",
+                "agent": "codex",
+                "suppressed_by_reason": {"repo_scope_mismatch": 1},
+                "new_refusals": 0,
+            },
+            {
+                "event": "autobridge_binding_refused",
+                "detail": "SESSION-STALE",
+                "agent": "codex",
+                "session_id": "SESSION-STALE",
+                "reason": "stale_or_foreign_canonical_binding",
+            },
+        )
+        for message in messages:
+            with self.subTest(event=message["event"]):
+                text_output = StringIO()
+                with redirect_stdout(text_output):
+                    watch_inbox_lib.emit(
+                        {"ts": "2026-08-08T12:00:00", **message},
+                        json_output=False,
+                    )
+                    watch_inbox_lib.emit(
+                        {"ts": "2026-08-08T12:00:01", **message},
+                        json_output=False,
+                    )
+                first, repeat = text_output.getvalue().splitlines()
+                self.assertIn(" data=", first)
+                self.assertNotIn(" data=", repeat)
+
+    def test_watcher_text_renderer_repeat_state_is_bounded(self):
+        watch_inbox_lib._last_text_payloads.clear()
+        self.addCleanup(watch_inbox_lib._last_text_payloads.clear)
+        with redirect_stdout(StringIO()):
+            for index in range(watch_inbox_lib.TEXT_REPEAT_CACHE_MAX_KEYS + 1):
+                watch_inbox_lib.emit(
+                    {
+                        "ts": "2026-08-08T12:00:00",
+                        "event": "future_event",
+                        "detail": "idle",
+                        "session_id": f"SESSION-{index}",
+                        "state": "idle",
+                    },
+                    json_output=False,
+                )
         self.assertEqual(
-            frozenset({"autobridge_refusal_summary", "bb_observation"}),
-            watch_inbox_lib.DETAIL_ONLY_TEXT_EVENTS,
+            watch_inbox_lib.TEXT_REPEAT_CACHE_MAX_KEYS,
+            len(watch_inbox_lib._last_text_payloads),
         )
 
     def test_settled_wake_reports_diagnostic_failure(self):
@@ -1661,6 +1751,8 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertIn('"detail":"runtime_trigger event fsync failed"', wake_line)
 
     def test_settled_nonruntime_actions_report_diagnostic_failure(self):
+        watch_inbox_lib._last_text_payloads.clear()
+        self.addCleanup(watch_inbox_lib._last_text_payloads.clear)
         reported = {}
         expected = {}
         for effective_action in ("relay_prompt", "notify_only", "manual_noop"):
