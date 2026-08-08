@@ -127,28 +127,31 @@ Before any watcher-enabled bootstrap, complete the canonical
 the archive-before-install gate, configuration, watcher start, retention, and
 two-store verification; this guide intentionally does not copy those commands.
 
-If you are not completing rotation, decline the watcher too by passing
-`--no-watcher` to the bootstrap command in Step 5. Declining rotation and
-declining the watcher are the same choice: there is no documented path that
-starts a watcher while skipping rotation.
+If you are skipping rotation, pass `--no-watcher` so this bootstrap does not
+start a watcher. Be precise about what that flag does: `--no-watcher` skips
+starting the inbox watcher for this session only — it does not stop a watcher
+that is already running. If a watcher is already up (from an earlier bootstrap
+or a reinitialized workspace), it keeps running unrotated, and rotation is
+still required; complete the workflow above rather than relying on
+`--no-watcher`.
 
 ## Step 5: Bootstrap agent sessions
 
 At the start of **every LLM session**, run the bootstrap command. Complete Step 4
-first if you want a background watcher; otherwise pass `--no-watcher` to start
-without one:
+first if you want a background watcher; otherwise pass `--no-watcher` to skip
+starting one this session:
 
 ```bash
-# with a background watcher (Step 4 completed):
+# starts the background watcher (Step 4 completed):
 ~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent <id>
-# without a watcher (rotation skipped):
+# skips starting a watcher this session (does not stop one already running):
 ~/.local/share/llm-collab/runtime/main/bin/llm-collab current_runtime.py --agent <id> --no-watcher
 ```
 
 This:
 1. Prints your `identity.md` — the LLM immediately knows who it is
 2. Shows unread inbox
-3. Starts the background watcher (for `cli_session` agents, unless `--no-watcher`)
+3. Starts the background watcher for `cli_session` agents, unless `--no-watcher` skips starting it
 
 For `human_relay` agents: you paste the bootstrap command into the new LLM session. The system generates this command automatically when someone sends them a message.
 

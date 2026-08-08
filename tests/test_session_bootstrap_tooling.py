@@ -502,13 +502,14 @@ class BindingDriftBannerTest(unittest.TestCase):
 
 
 class NoWatcherDeclineTest(unittest.TestCase):
-    """GH-673: the --no-watcher bootstrap is the genuinely-optional path.
+    """GH-673: --no-watcher skips STARTING the watcher; it does not stop one.
 
-    The setup flow prints --no-watcher for any agent that declined a watcher, so
-    declining rotation and declining the watcher are one choice. That path must
-    still work — it bootstraps successfully and never starts a watcher — even for
-    an agent whose activation is watcher-enabled, where --no-watcher is the ONLY
-    thing preventing the watcher.
+    The setup flow prints --no-watcher for an agent the operator did not enable a
+    watcher for, so this bootstrap starts none. That is a claim about STARTING,
+    not about whether a watcher runs: --no-watcher never stops an existing
+    agent-wide PM2 watcher (head 2 -- session_bootstrap only bypasses
+    start_watcher). The behavior pinned here is the narrow one -- this bootstrap
+    does not call start_watcher -- which is all the flag does.
     """
 
     def _run_bootstrap(self, *, no_watcher: bool) -> tuple[object, str]:
