@@ -512,10 +512,14 @@ class MainPathTest(unittest.TestCase):
                 "--my-runtime-session-id", "019f-x", "--my-runtime-family", "codex_app",
                 "--my-runtime-home", "/Users/test/.codex",
                 "--with", "claude:claude_app", "--repo-target", "app", "--skip-currency-check"]
+        # ensure_agent -> watcher_status -> jlist (codex-appserver absent ->
+        # not online -> start_agent); start ok; start_agent -> watcher_status ->
+        # jlist (codex-appserver online). status is read structurally, not from
+        # rendered describe text.
         pm2_results = iter([
-            type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+            type("R", (), {"returncode": 0, "stdout": "[]", "stderr": ""})(),
             type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-            type("R", (), {"returncode": 0, "stdout": "online", "stderr": ""})(),
+            type("R", (), {"returncode": 0, "stdout": json.dumps([{"name": "llm-collab-codex-appserver", "pm2_env": {"status": "online"}, "pm_id": 0, "pid": 1, "monit": {}}]), "stderr": ""})(),
         ])
         status_results = iter(statuses)
         last_status = statuses[-1]

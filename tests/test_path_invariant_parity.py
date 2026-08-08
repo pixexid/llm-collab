@@ -146,8 +146,17 @@ class SidecarRestartArgvTest(unittest.TestCase):
     def test_restart_uses_start_or_restart_with_the_ecosystem_file(self) -> None:
         from unittest import mock
 
+        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
+            # startOrRestart succeeds; jlist reports the sidecar online via the
+            # structured pm2_env.status field, the form the single liveness
+            # authority requires (a value, not a text match).
+            if args_list[0] == "jlist":
+                entry = {"name": "llm-collab-codex-appserver", "pm2_env": {"status": "online"}, "pm_id": 0, "pid": 1, "monit": {}}
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout=json.dumps([entry]), stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0, stdout="", stderr="")
+
         with mock.patch.object(pm2_watchers, "config_get", return_value="llm-collab"):
-            with mock.patch.object(pm2_watchers, "pm2_run") as ran:
+            with mock.patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run) as ran:
                 with mock.patch.object(pm2_watchers, "is_sidecar", return_value=True):
                     pm2_watchers.start_agent  # ensure module loaded
                     # drive the restart branch directly through main()
@@ -158,7 +167,9 @@ class SidecarRestartArgvTest(unittest.TestCase):
                             with mock.patch.object(pm2_watchers, "sidecar_id_conflicts", return_value=[]):
                                 pm2_watchers.main()
         self.assertTrue(ran.called, "pm2 must be invoked")
-        argv = ran.call_args[0][0]
+        start_or_restart = [c.args[0] for c in ran.call_args_list if c.args and c.args[0][0] == "startOrRestart"]
+        self.assertTrue(start_or_restart, "restart must invoke pm2 startOrRestart")
+        argv = start_or_restart[0]
         self.assertEqual("startOrRestart", argv[0],
                          f"plain restart would relaunch a stored definition: {argv}")
         self.assertIn(str(pm2_watchers.ecosystem_path()), argv)

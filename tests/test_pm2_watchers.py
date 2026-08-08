@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import unittest
@@ -11,6 +12,38 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import pm2_watchers
+
+
+def _jlist_entry(name: str, status: str, **env_extra) -> dict:
+    """One `pm2 jlist` entry with pm2_env.status set, plus arbitrary env fields."""
+    return {
+        "name": name,
+        "pm2_env": {"status": status, **env_extra},
+        "pm_id": 0,
+        "pid": 0,
+        "monit": {},
+    }
+
+
+def _jlist(*entries: dict) -> str:
+    return json.dumps(list(entries))
+
+
+# Concrete fail-open fixture for the secondary item: an entry whose real
+# pm2_env.status is errored, but "online" appears in operator-chosen fields --
+# the app name (agent id), script args (--me/--project), cwd and exec/log paths
+# (runtime home). A project named "online-store" produces exactly this.
+# Text-matching forms reported this dead process as live; the structured read
+# takes pm2_env.status, so those fields are irrelevant.
+_DIVERGENT_JLIST = _jlist(_jlist_entry(
+    "llm-collab-online-store",
+    "errored",
+    args=["--me", "online-store", "--project", "online-store", "--repo-target", "app"],
+    pm_cwd="/srv/online-home",
+    pm_exec_path="/srv/online-home/runtime/bin/watch_inbox.py",
+    pm_out_log_path="/srv/online-home/.pm2/logs/online-store-out.log",
+    pm_err_log_path="/srv/online-home/.pm2/logs/online-store-error.log",
+))
 
 
 class PM2WatchersTest(unittest.TestCase):
@@ -49,16 +82,137 @@ class PM2WatchersTest(unittest.TestCase):
         self.assertEqual(calls, [["logs", "llm-collab-codex", "--lines", "7", "--nostream"]])
 
     def test_process_status_preserves_failure_and_requires_online(self) -> None:
+        # status is read structurally from `pm2 jlist` (pm2_env.status), not
+        # matched out of rendered text. A missing app reads as not-online (1),
+        # not as a pm2 error code, because jlist succeeds and simply omits it.
         cases = (
-            ("missing", subprocess.CompletedProcess([], 9, "", "not found"), 9),
-            ("offline", subprocess.CompletedProcess([], 0, "│ status │ stopped │", ""), 1),
-            ("online", subprocess.CompletedProcess([], 0, "│ status │ online │", ""), 0),
+            ("online", _jlist(_jlist_entry("llm-collab-codex", "online")), 0),
+            ("stopped", _jlist(_jlist_entry("llm-collab-codex", "stopped")), 1),
+            ("errored", _jlist(_jlist_entry("llm-collab-codex", "errored")), 1),
+            ("missing", _jlist(_jlist_entry("llm-collab-someone-else", "online")), 1),
+            ("pm2_error", None, 9),
         )
-        for label, result, expected in cases:
+        for label, stdout, expected in cases:
             with self.subTest(label):
+                result = subprocess.CompletedProcess(
+                    args=[],
+                    returncode=(9 if stdout is None else 0),
+                    stdout=(stdout or ""),
+                    stderr=("boom" if stdout is None else ""),
+                )
                 with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
                      patch.object(pm2_watchers, "pm2_run", return_value=result):
                     self.assertEqual(expected, pm2_watchers.process_status_exit_code("codex"))
+
+    def _restart_env(self, start_or_restart_returncode: int, jlist_stdout: str):
+        """pm2_run that answers startOrRestart then jlist for `restart --agent`."""
+        def fake(args_list, *, capture_output=False, max_output_bytes=None):
+            if args_list[0] == "startOrRestart":
+                return subprocess.CompletedProcess(args=args_list, returncode=start_or_restart_returncode)
+            if args_list[0] == "jlist":
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout=jlist_stdout, stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+        return fake
+
+    def test_restart_propagates_pm2_exit_code_when_start_or_restart_fails(self) -> None:
+        # pm2_run returns a CompletedProcess on a non-zero PM2 exit; the restart
+        # branch used to discard it and fall through to exit 0.
+        online = _jlist(_jlist_entry("llm-collab-codex", "online"))
+        with patch.object(sys, "argv", ["pm2_watchers.py", "restart", "--agent", "codex"]):
+            with patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=self._restart_env(7, online)):
+                with self.assertRaises(SystemExit) as ctx:
+                    pm2_watchers.main()
+        self.assertEqual(7, ctx.exception.code)
+
+    def test_restart_verifies_online_after_pm2_accepts(self) -> None:
+        # startOrRestart exits 0 but the process lands errored. The discarded
+        # return value plus no post-check let restart exit 0, so start_watcher
+        # reported ok for a watcher that was not running (GH-678).
+        errored = _jlist(_jlist_entry("llm-collab-codex", "errored"))
+        with patch.object(sys, "argv", ["pm2_watchers.py", "restart", "--agent", "codex"]):
+            with patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=self._restart_env(0, errored)):
+                with self.assertRaises(SystemExit) as ctx:
+                    pm2_watchers.main()
+        self.assertNotEqual(0, ctx.exception.code)
+
+    def test_restart_returns_zero_when_online(self) -> None:
+        # A healthy restart must still fall through to exit 0.
+        online = _jlist(_jlist_entry("llm-collab-codex", "online"))
+        with patch.object(sys, "argv", ["pm2_watchers.py", "restart", "--agent", "codex"]):
+            with patch.object(pm2_watchers, "agent_ids", return_value=["codex"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=self._restart_env(0, online)):
+                pm2_watchers.main()  # must not raise SystemExit
+
+    def test_watcher_status_reads_pm2_env_status_not_any_text(self) -> None:
+        # The authority. Status is errored; "online" appears in the app name,
+        # script args, cwd and log paths -- all operator-chosen. The read takes
+        # pm2_env.status, so it is not online. This is what stops any text match
+        # being reintroduced.
+        result = subprocess.CompletedProcess(args=[], returncode=0, stdout=_DIVERGENT_JLIST, stderr="")
+        with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+             patch.object(pm2_watchers, "pm2_run", return_value=result):
+            _, status = pm2_watchers.watcher_status("online-store")
+        self.assertEqual("errored", status)
+
+    def test_watcher_status_ignores_literal_status_online_in_other_fields(self) -> None:
+        # The review finding (PR #680): the row/field regex had a colon
+        # alternative, so the literal "status: online" appearing in ANY echoed
+        # field satisfied it while the real status row said errored. The
+        # structured read takes pm2_env.status, so a field value of
+        # "status: online" cannot satisfy it.
+        jlist = _jlist(_jlist_entry("llm-collab-codex", "errored", args=["--project", "status: online"]))
+        result = subprocess.CompletedProcess(args=[], returncode=0, stdout=jlist, stderr="")
+        with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+             patch.object(pm2_watchers, "pm2_run", return_value=result):
+            _, status = pm2_watchers.watcher_status("codex")
+        self.assertEqual("errored", status)
+
+    def test_start_agent_treats_online_in_other_fields_as_not_online(self) -> None:
+        # The named consumer (was start_agent:376). pm2 start succeeds (exit 0),
+        # but the post-start status is errored with "online" in other fields.
+        # start_agent must still exit non-zero -- never report a started watcher.
+        # The authority being correct does not prove a caller routes through it;
+        # that gap is how the original defect survived.
+        def fake(args_list, *, capture_output=False, max_output_bytes=None):
+            if args_list[0] == "jlist":
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout=_DIVERGENT_JLIST, stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+        with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+             patch.object(pm2_watchers, "is_sidecar", return_value=False), \
+             patch.object(pm2_watchers, "get_agent", return_value={"activation": {"watcher_enabled": True}}), \
+             patch.object(pm2_watchers, "pm2_run", side_effect=fake):
+            with self.assertRaises(SystemExit) as ctx:
+                pm2_watchers.start_agent("online-store")
+        self.assertNotEqual(0, ctx.exception.code)
+
+    def test_watcher_status_bounds_the_jlist_read(self) -> None:
+        # The call site must request the bound: a status read that silently fell
+        # back to the unbounded path would reintroduce the finding. Pinning the
+        # kwarg is what stops that, complementing the enforcement test below.
+        with patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+             patch.object(
+                 pm2_watchers,
+                 "pm2_run",
+                 return_value=subprocess.CompletedProcess([], 0, "[]", ""),
+             ) as run:
+            pm2_watchers.watcher_status("codex")
+        self.assertIsNotNone(run.call_args.kwargs.get("max_output_bytes"))
+
+    def test_pm2_run_bounded_fails_closed_on_oversized_output(self) -> None:
+        # A real subprocess producing more than the bound (mirrors deploy_runtime's
+        # _pm2_run_bounded test). Must abort, never return a buffer to parse -- a
+        # truncated jlist that still parsed would report a real watcher as absent.
+        with patch.object(pm2_watchers, "resolve_pm2", return_value=sys.executable):
+            with self.assertRaises(SystemExit):
+                pm2_watchers.pm2_run(
+                    ["-c", "import sys; sys.stdout.write('x' * 128)"],
+                    max_output_bytes=16,
+                )
 
 
 if __name__ == "__main__":
