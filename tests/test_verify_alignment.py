@@ -3,8 +3,10 @@
 (workflow_dispatch) escape hatch — not an automatic PR gate."""
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 VERIFY_PY = ROOT / "bin" / "verify.py"
@@ -120,6 +122,67 @@ class VerifyWorkflowTest(unittest.TestCase):
 
     def test_invokes_the_canonical_verify_command(self):
         self.assertIn("python bin/verify.py", self.text)
+
+
+class SuiteInterpreterDependencyGateTest(unittest.TestCase):
+    """The pin check must describe the interpreter this module will actually
+    launch the suite on (`sys.executable`), not the declared TEST_INTERPRETER.
+
+    A wrong interpreter does not skip what it cannot import — it collects fewer
+    tests than exist and fails the rest, so the run reads as a broken main. Both
+    directions are asserted: an unsatisfied interpreter must refuse, and a
+    satisfied one must not, or the gate cannot be told from its over-application.
+    """
+
+    def setUp(self):
+        self.verify = load_verify()
+        self.clean = {
+            "test_interpreter": sys.executable, "interpreter_unprobeable": False,
+            "critical_missing": [], "critical_mismatched": [],
+            "runtime_missing": [], "runtime_mismatched": [], "read_failures": [],
+        }
+
+    def run_gate(self, report):
+        import session_bootstrap
+
+        probed = {}
+
+        def fake_report(interpreter=session_bootstrap.TEST_INTERPRETER):
+            probed["interpreter"] = interpreter
+            return report
+
+        with patch.object(session_bootstrap, "dependency_report", fake_report):
+            with patch.object(session_bootstrap, "announce_dependencies", lambda r: None):
+                return self.verify.check_suite_interpreter(), probed
+
+    def test_probes_the_interpreter_that_will_run_the_suite(self):
+        # Discriminating: passing TEST_INTERPRETER instead would still refuse
+        # below, so the refusal alone cannot prove which environment was checked.
+        _, probed = self.run_gate(self.clean)
+        self.assertEqual(sys.executable, probed["interpreter"])
+
+    def test_refuses_when_the_suites_interpreter_lacks_a_test_critical_pin(self):
+        rc, _ = self.run_gate({**self.clean, "critical_missing": ["jsonschema"]})
+        self.assertEqual(1, rc)
+
+    def test_refuses_when_the_suites_interpreter_cannot_be_probed(self):
+        rc, _ = self.run_gate({**self.clean, "interpreter_unprobeable": True})
+        self.assertEqual(1, rc)
+
+    def test_allows_a_satisfied_interpreter(self):
+        rc, _ = self.run_gate(self.clean)
+        self.assertEqual(0, rc)
+
+    def test_a_runtime_only_gap_does_not_refuse(self):
+        # Degradable pins never falsify a test result (GH-357/#362 ruling).
+        rc, _ = self.run_gate({**self.clean, "runtime_missing": ["watchdog"]})
+        self.assertEqual(0, rc)
+
+    def test_main_does_not_run_the_suite_on_a_refused_interpreter(self):
+        with patch.object(self.verify, "check_suite_interpreter", return_value=1):
+            with patch.object(self.verify, "run_tests") as run_tests:
+                self.assertEqual(1, self.verify.main())
+        run_tests.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -108,8 +108,44 @@ def run_diff_check() -> int:
     ).returncode
 
 
+def check_suite_interpreter() -> int:
+    """Refuse to run the suite on an interpreter whose test-critical pins are
+    unsatisfied.
+
+    The pin check already exists, but at bootstrap it probes the declared
+    TEST_INTERPRETER, while this module launches the suite on `sys.executable` —
+    whatever the caller invoked verify.py with. When those differ the check
+    vouches for an environment the suite never runs in. A wrong interpreter does
+    not skip what it cannot import: it collects fewer tests than exist and fails
+    the rest, which reads as a broken main rather than a broken environment.
+    That has now happened twice (2026-07-28: 1700/1856 tests; 2026-08-07:
+    2523/2681, 180 failures and 75 errors, against a green main).
+
+    Fails closed, because a truncated run reporting OK is indistinguishable from
+    a complete one.
+    """
+    from session_bootstrap import announce_dependencies, dependency_report
+
+    report = dependency_report(sys.executable)
+    critical = (
+        report["critical_missing"]
+        + report["critical_mismatched"]
+        + [f["detail"] for f in report["read_failures"] if f["test_critical"]]
+    )
+    if not critical and not report["interpreter_unprobeable"]:
+        return 0
+    announce_dependencies(report)
+    print(f"verify: refusing to run the suite on {sys.executable} — its "
+          "test-critical pins are unsatisfied, so any result would be about a "
+          "different environment than the one the gate declares",
+          file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     argv = sys.argv[1:] or ["discover", "-s", "tests"]
+    if check_suite_interpreter():
+        return 1
     # Run both, report both, fail if either fails — a diff-check violation must
     # not be masked by passing tests and vice versa.
     test_rc = run_tests(argv)

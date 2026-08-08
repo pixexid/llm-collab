@@ -379,14 +379,21 @@ def parse_requirements() -> tuple[list[dict], list[dict]]:
     return pins, read_failures
 
 
-def _installed_versions(names: list[str]) -> dict[str, str | None] | None:
+def _installed_versions(
+    names: list[str], interpreter: str = TEST_INTERPRETER
+) -> dict[str, str | None] | None:
     """Ask the test interpreter which pins it has, and at what version.
 
     Returns {name: version | None(absent) | '?'(metadata unreadable)}, or None when
     the test interpreter cannot be probed at all — which is UNKNOWN, not complete.
-    Runs one short subprocess under python3.11 rather than reading our own
+    Runs one short subprocess under `interpreter` rather than reading our own
     importlib.metadata, because the suite's environment is the one that must be
     truthful and it may not be this process's.
+
+    `interpreter` defaults to the declared TEST_INTERPRETER, which is the right
+    answer at bootstrap. A caller that is about to launch the suite itself must
+    pass the interpreter it will actually use: probing a different one reports on
+    an environment the suite never runs in.
     """
     if not names:
         return {}
@@ -402,7 +409,7 @@ def _installed_versions(names: list[str]) -> dict[str, str | None] | None:
     )
     try:
         done = subprocess.run(
-            [TEST_INTERPRETER, "-c", probe, *names],
+            [interpreter, "-c", probe, *names],
             capture_output=True, text=True, timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
@@ -415,8 +422,8 @@ def _installed_versions(names: list[str]) -> dict[str, str | None] | None:
         return None
 
 
-def dependency_report() -> dict:
-    """Classify the pinned environment as it exists for the test interpreter.
+def dependency_report(interpreter: str = TEST_INTERPRETER) -> dict:
+    """Classify the pinned environment as it exists for `interpreter`.
 
     Missing/mismatched split by criticality, because only a test-critical gap
     falsifies a test result — that earns the loud banner; a runtime gap is reported,
@@ -426,13 +433,13 @@ def dependency_report() -> dict:
     """
     pins, read_failures = parse_requirements()
     report = {
-        "test_interpreter": TEST_INTERPRETER,
+        "test_interpreter": interpreter,
         "interpreter_unprobeable": False,
         "critical_missing": [], "critical_mismatched": [],
         "runtime_missing": [], "runtime_mismatched": [],
         "read_failures": read_failures,
     }
-    installed = _installed_versions([pin["name"] for pin in pins])
+    installed = _installed_versions([pin["name"] for pin in pins], interpreter)
     if installed is None:
         # Cannot verify the suite's environment at all. That is UNKNOWN and
         # test-critical: proceeding as if complete is the exact silent-pass this
