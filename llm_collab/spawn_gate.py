@@ -130,7 +130,7 @@ def plan_spawn(
         )
     if assignment_kind not in {"read-only", "writing"}:
         return GateRefusal("invalid_assignment_kind", f"unknown assignment kind {assignment_kind!r}")
-    if assignment_kind == "writing" and (provider, model) in _EXCLUDED_WRITING_MODELS:
+    if (provider, model) in _EXCLUDED_WRITING_MODELS:
         return GateRefusal(
             "excluded_writing_model",
             f"{provider} / {model} is excluded from writing assignments",

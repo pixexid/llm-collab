@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 14 -->
+<!-- CONTRACT_VERSION: 15 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,17 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v15 (2026-08-08) makes measured BB model failures hard exclusions for
+every text-bearing assignment, read-only included. Read-only work produces the
+evidence that gates later decisions, and unlike a patch it has no diff review to
+catch a corrupted glyph or drifted source coordinate. The canonical scope,
+models, and measured rationale live in
+[`BB Workers`](docs/workflows/bb-workers.md#spawn-in-an-isolated-worktree).
+
+This changes what a worker may do: a read-only assignment that the spawn gate
+previously admitted is now refused. The version bump makes that changed
+activation eligibility visible to cached workers. Related GH-647.
 
 Contract v14 (2026-08-08) makes send-time routing admission fail closed before
 durability. `deliver.py` admits only an exact target, a valid Codex AX fallback,
