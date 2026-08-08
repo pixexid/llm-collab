@@ -25,7 +25,7 @@ notifications are optional adapters for teams that need them.
   as mechanical gates.
 - **Explicit activation transports** — runtime sessions, Codex's AX doorbell,
   watcher-backed durable pickup, and human relay are distinct activation paths.
-  Missing transports report `activation_unavailable`.
+  An unroutable send is refused before any durable write.
 - **Local project state** — real queues, runbooks, routing policy, and memory
   templates live under `{project_state_root}/{project_id}/`, normally outside
   this public Git checkout.
@@ -182,9 +182,10 @@ bin/llm-collab deliver.py \
   --body-file brief.md
 ```
 
-`deliver.py` writes the packet before reporting how the recipient can be
-activated. The mailbox packet is the source of truth; a doorbell is only a wake
-signal.
+`deliver.py` resolves a route before writing. It writes only for an exact target,
+an eligible Codex AX fallback, or an explicitly reported watcherless-human /
+operator broadcast. The mailbox packet is then the source of truth; a doorbell
+is only a wake signal.
 
 ## Project boundaries
 
@@ -294,11 +295,11 @@ For GitHub-backed projects:
 |---|---|
 | Dispatchable runtime session | Message can be routed to the bound runtime session |
 | Codex `cli_session` with a supported AX-readable `activation.ax_app` profile (Codex/ChatGPT), **and `deliver.py` reports `ax_doorbell_required: true`** | `deliver.py` prints the only permitted AX doorbell command. The flag is the authority, not the absence of a binding: a dispatchable binding suppresses it, and so does a terminal unreadable/scope-refused state, which is a repair rather than a ring |
-| Watcher-backed worker with `watcher_enabled: true`, Codex included | Durable packet is written; the worker's watcher owns pickup |
+| Watcher-backed worker with an exact dispatchable binding, Codex included | Targeted packet is written; the worker's watcher owns pickup |
 | `ax_attended_only: true` with a supported opaque profile (ZCode) or no app profile | Reports `ax_attended_recovery_required`; Codex-attended recovery, no routine ring |
 | Terminal-only `cli_session` | Requires a dispatchable runtime session |
-| `human_relay` | Prints a human handoff prompt |
-| Missing transport | Reports `activation_unavailable` with a reason |
+| Watcher-disabled `human` / `human_relay`, or `operator` | Writes an explicit `routing_mode: broadcast`; human relays also print the handoff prompt |
+| Missing transport | Refuses before write with a typed `routing_refusal_reason` |
 
 See [Session Startup](docs/workflows/session-startup.md) and the
 [desktop-app doorbell workflow](docs/workflows/claude-code-desktop-computer-use-bridge.md)

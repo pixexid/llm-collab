@@ -427,7 +427,7 @@ class DeliverFoundationTest(unittest.TestCase):
             {"projects": [{"id": "amiga", "display_name": "Amiga", "repos": {"app": "."}}]},
         )
         write_json(root / "agents.json", {"agents": []})
-        for agent in ("codex", "claude", "relay"):
+        for agent in ("codex", "claude", "relay", "operator"):
             payload = json.loads((root / "agents.json").read_text())
             payload["agents"].append(
                 {"id": agent, "display_name": agent,
@@ -452,6 +452,65 @@ class DeliverFoundationTest(unittest.TestCase):
         "--project", "amiga", "--title", "lane a check",
     ]
 
+    def delivery_args(
+        self, recipient: str = "claude", sender: str = "codex"
+    ) -> list[str]:
+        args = self.BASE.copy()
+        args[args.index("--from") + 1] = sender
+        args[args.index("--to") + 1] = recipient
+        return args
+
+    def bind_recipient(self, root: Path, recipient: str) -> None:
+        agents_path = root / "agents.json"
+        agents = json.loads(agents_path.read_text())
+        next(agent for agent in agents["agents"] if agent["id"] == recipient)[
+            "activation"
+        ]["watcher_enabled"] = True
+        write_json(agents_path, agents)
+
+        session_id = f"SESSION-{recipient.upper()}-EXACT"
+        runtime_family = {"codex": "codex_app", "claude": "claude_app", "relay": "pi"}[
+            recipient
+        ]
+        runtime_session_id = f"{recipient}-runtime"
+        write_json(
+            root / "State" / "session_autobridge" / "sessions" / f"{session_id}.json",
+            {
+                "session_id": session_id,
+                "agent_id": recipient,
+                "project_id": "amiga",
+                "chat_id": "CHAT-TEST0001",
+                "mode": "auto-read",
+                "status": "parked",
+                "wake_strategy": "runtime_trigger",
+                "lease_owner": recipient,
+                "lease_expires_utc": "2099-01-01T00:00:00+00:00",
+                "runtime": {
+                    "family": runtime_family,
+                    "session_id": runtime_session_id,
+                    "session_source": "test_fixture",
+                },
+            },
+        )
+        write_json(
+            root
+            / "State"
+            / "session_autobridge"
+            / "bindings"
+            / "amiga"
+            / "CHAT-TEST0001"
+            / f"{recipient}.json",
+            {
+                "project_id": "amiga",
+                "chat_id": "CHAT-TEST0001",
+                "agent_id": recipient,
+                "session_id": session_id,
+                "runtime_family": runtime_family,
+                "runtime_session_id": runtime_session_id,
+                "runtime_session_source": "test_fixture",
+            },
+        )
+
     # Internal test seam: flips the module CONSTANT in-process before calling
     # main(). The production CLI entrypoint (running deliver.py) can never do
     # this — no env var or flag reaches ACTIVATION_RUNTIME_INTEGRATED.
@@ -469,6 +528,8 @@ class DeliverFoundationTest(unittest.TestCase):
         cwd: Path | None = None,
         runtime_ready: bool = True,
         fixed_ts: str | None = None,
+        recipient: str = "claude",
+        sender: str = "codex",
     ) -> subprocess.CompletedProcess:
         body = root / "b.md"
         write(body, "work")
@@ -480,10 +541,13 @@ class DeliverFoundationTest(unittest.TestCase):
             argv = [
                 sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
                 str(REPO_ROOT / "bin"),
-                *self.BASE, "--body-file", str(body), *extra,
+                *self.delivery_args(recipient, sender), "--body-file", str(body), *extra,
             ]
         else:
-            argv = [sys.executable, str(DELIVER), *self.BASE, "--body-file", str(body), *extra]
+            argv = [
+                sys.executable, str(DELIVER), *self.delivery_args(recipient, sender),
+                "--body-file", str(body), *extra,
+            ]
         return subprocess.run(
             argv, cwd=cwd or root, text=True, capture_output=True, env=env, check=False,
         )
@@ -500,6 +564,7 @@ class DeliverFoundationTest(unittest.TestCase):
         """GH-1572: the public activation path is live and the packet body
         carries the runnable exact-packet claim command."""
         root = self.make_workspace()
+        self.bind_recipient(root, "claude")
         result = self.run_deliver(
             root, "--activation", "--related-task", "TASK-TEST01",
             "--worktree", self.worktree, "--branch", "b",
@@ -559,6 +624,7 @@ class DeliverFoundationTest(unittest.TestCase):
 
         # Negative: a non-codex subject (relay) can never reach the AX branch,
         # so the budget failure never fires even though relay has an ax_app.
+        self.bind_recipient(root, "relay")
         relay_selected = subprocess.run(
             argv_for("codex", "relay"), cwd=root, text=True,
             capture_output=True, env={**os.environ}, check=False,
@@ -566,6 +632,7 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertNotIn("long-root budget", relay_selected.stderr)
         self.assertEqual(0, relay_selected.returncode, relay_selected.stderr)
         relay_payload, _ = json.JSONDecoder().raw_decode(relay_selected.stdout)
+        self.assertTrue(relay_payload["autobridge_ready"])
         self.assertFalse(relay_payload["ax_doorbell_required"])
 
         # An exact dispatchable autobridge session for codex selects the
@@ -617,6 +684,20 @@ class DeliverFoundationTest(unittest.TestCase):
         self.assertTrue(payload["autobridge_ready"])
         self.assertFalse(payload["ax_doorbell_required"])
 
+    def test_unbound_routeless_recipient_refused_before_write(self):
+        root = self.make_workspace()
+        result = self.run_deliver(root, recipient="relay")
+        payload, _ = json.JSONDecoder().raw_decode(result.stdout)
+
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertTrue(payload["delivery_refused"])
+        self.assertFalse(payload["durable_write"])
+        self.assertEqual("refused", payload["routing_mode"])
+        self.assertEqual("exact_binding_required", payload["routing_refusal_reason"])
+        self.assertFalse(list(self.chat_dir.glob("*.md")))
+        inbox = json.loads((root / "agents" / "relay" / "inbox.json").read_text())
+        self.assertEqual([], inbox["unread"])
+
     def test_whitespace_only_fields_refused_with_zero_mutations(self):
         """BLOCK P1.3: whitespace-only task/branch must exit 2 and leave the
         chat dir and inbox byte-identical."""
@@ -662,7 +743,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
                     str(REPO_ROOT / "bin"),
-                    *self.BASE, "--body-file", str(body),
+                    *self.delivery_args("operator"), "--body-file", str(body),
                     "--activation", "--related-task", "TASK-TEST01",
                     "--worktree", self.worktree, "--branch", "b",
                 ],
@@ -672,13 +753,13 @@ class DeliverFoundationTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
 
     def assert_two_distinct_deliveries(self, root: Path) -> None:
-        packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        packets = sorted(self.chat_dir.glob("2026-01-01T00-00-00_to-operator_*.md"))
         self.assertEqual(2, len(packets), "no overwrite on same-second collision")
         sender_copies = sorted(self.chat_dir.glob("2026-01-01T00-00-00_from-codex_*.md"))
         self.assertEqual(2, len(sender_copies), "both sender copies survive")
         contents = {p.read_text() for p in packets}
         self.assertEqual(2, len(contents), "two distinct immutable packet contents")
-        inbox = json.loads((root / "agents" / "claude" / "inbox.json").read_text())
+        inbox = json.loads((root / "agents" / "operator" / "inbox.json").read_text())
         self.assertEqual(2, len(inbox["unread"]), "two distinct inbox entries")
         for p in packets:
             self.assertIn(
@@ -853,7 +934,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=""),
                     str(REPO_ROOT / "bin"),
-                    "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "claude",
+                    "--chat", "CHAT-TEST0001", "--from", "codex", "--to", "operator",
                     "--project", "amiga", "--title", f"canon {i}",
                     "--body-file", str(root / "b.md"),
                     "--activation", "--related-task", "TASK-TEST01",
@@ -865,7 +946,7 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
         worktrees = set()
-        for p in sorted(self.chat_dir.glob("*_to-claude_canon-*.md")):
+        for p in sorted(self.chat_dir.glob("*_to-operator_canon-*.md")):
             for line in p.read_text().splitlines():
                 if line.startswith("worktree:"):
                     worktrees.add(line.split(":", 1)[1].strip())
@@ -892,7 +973,7 @@ class DeliverFoundationTest(unittest.TestCase):
                 [
                     sys.executable, "-c", self.WRAPPER.format(extra_patch=extra_patch),
                     str(REPO_ROOT / "bin"),
-                    "--chat", chat, "--from", "codex", "--to", "claude",
+                    "--chat", chat, "--from", "codex", "--to", "operator",
                     "--project", "amiga", "--title", "same title",
                     "--body-file", str(body),
                     "--activation", "--related-task", "TASK-TEST01",
@@ -903,8 +984,8 @@ class DeliverFoundationTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
 
-        packet1 = next(self.chat_dir.glob("2026-01-01T00-00-00_to-claude_*.md"))
-        packet2 = next(chat2.glob("2026-01-01T00-00-00_to-claude_*.md"))
+        packet1 = next(self.chat_dir.glob("2026-01-01T00-00-00_to-operator_*.md"))
+        packet2 = next(chat2.glob("2026-01-01T00-00-00_to-operator_*.md"))
         self.assertEqual(packet1.name, packet2.name, "precondition: identical basenames")
 
         commands = []
@@ -923,6 +1004,7 @@ class DeliverFoundationTest(unittest.TestCase):
 
     def test_activation_packet_carries_banner_with_exact_command(self):
         root = self.make_workspace()
+        self.bind_recipient(root, "claude")
         result = self.run_deliver(
             root, "--activation", "--related-task", "TASK-TEST01",
             "--worktree", self.worktree, "--branch", "b",
@@ -941,9 +1023,9 @@ class DeliverFoundationTest(unittest.TestCase):
 
     def test_non_activation_messages_unchanged(self):
         root = self.make_workspace()
-        result = self.run_deliver(root)
+        result = self.run_deliver(root, recipient="operator")
         self.assertEqual(0, result.returncode, result.stderr)
-        packets = sorted(self.chat_dir.glob("*_to-claude_*.md"))
+        packets = sorted(self.chat_dir.glob("*_to-operator_*.md"))
         body = packets[0].read_text()
         self.assertNotIn("activation", body.split("---")[1], "no activation frontmatter")
         self.assertNotIn("ACTIVATION PACKET", body)

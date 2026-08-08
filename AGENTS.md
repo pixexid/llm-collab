@@ -45,6 +45,22 @@ workflows below.
 
 ### Recent contract changes
 
+GH-590 (2026-08-07) makes send-time routing admission fail closed before
+durability. A packet is admitted only when `deliver.py` resolves an exact target,
+selects the valid Codex AX fallback, or classifies the recipient as an explicit
+unbound broadcast (`operator`, or watcher-disabled `human`/`human_relay`). Every
+other unresolved route exits 2 with `delivery_refused: true`, `durable_write:
+false`, and a typed `routing_refusal_reason`; it writes no chat packet, sender
+copy, inbox pointer, awareness state, thread pair, or chat note. An admitted
+unbound broadcast reports `routing_mode: broadcast` — an unrouted success is
+never implicit.
+
+This is send admission, not watcher compatibility. Exact-session readers remain
+exact and never consume null-targeted worker packets. Contract v12's AX
+precedence and terminal-state predicate remain unchanged: unreadable bindings
+and scope refusals suppress AX, while an eligible Codex AX target is a route and
+therefore is not rejected merely for lacking a binding.
+
 Contract v13 (2026-08-07) corrects the lane WIP cap to count **writing lanes
 only**. Read-only lanes — audits, probes, scoping, and reviews with no branch and
 no designated writer — never counted and do not now. One-writer-per-lane
@@ -81,12 +97,10 @@ Exactly two states are **terminal** and suppress every wake lane: an
 lane may wake a recipient whose authoritative record could not be read or whose
 scope forbids the packet. Those are repairs; do not try to ring through them.
 
-**An unbound recipient refuses dispatch silently.** `autobridge_ready: false`
-with `autobridge_refusal_reason: exact_binding_required` is not an error and
-prints no warning, so the absence of a doorbell is *not* evidence that dispatch
-happened — read the `deliver.py` result rather than inferring from quiet. Every
-delivery to Codex on 2026-08-05 took the AX fallback for this reason and nobody
-noticed, because the contract said AX was the Codex path anyway.
+An unbound recipient may still take the Codex AX fallback when eligible. If no
+AX or explicit broadcast route exists, GH-590 refuses before the durable
+write instead of producing the former silent `exact_binding_required` dispatch
+failure.
 
 Why it is worth the change: while AX was the only route to Codex, no Pi worker
 could reach it — Pi workers cannot ring AX — so every reply had to be relayed by
@@ -332,11 +346,11 @@ no dispatchable target resolved and the refusal was not terminal, not a fixed
 list of causes you can recite. The two terminal ones, an unreadable binding and a
 scope refusal, suppress the doorbell and are repairs rather than rings.
 
-Treat a missing doorbell as information, not permission: an unbound recipient
-refuses dispatch **silently** (`autobridge_refusal_reason:
-exact_binding_required`), so quiet means "unrouted", not "delivered". If a
-recipient you expect to be bound is not, that is the defect to fix — the
-recipient registers its own session, since only it knows its exact runtime id.
+Treat a missing doorbell as information, not permission. An unbound recipient
+with no AX or explicit broadcast route now returns a typed pre-write refusal;
+it does not create a packet. If a recipient you expect to be bound is not, that
+is the defect to fix — the recipient registers its own session, since only it
+knows its exact runtime id.
 
 ## Shared Checkout Safety
 

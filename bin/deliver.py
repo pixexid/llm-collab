@@ -25,8 +25,9 @@ resolved/driven at all, not merely a value-opaque one) instead gets an ATTENDED
 RECOVERY REQUIRED instruction routing control to Codex. Codex-to-Codex delivery is a
 deliberate exception: the durable packet is preserved, but app activation is
 suppressed; managed Codex workers are inspected and steered through BB. Every
-non-Codex watcher-backed recipient is also excluded:
-its durable packet and background watcher are its target-side wake path. If the recipient
+non-Codex recipient needs a verified exact binding unless it is an explicit
+watcherless-human broadcast. An unroutable delivery is refused before any packet
+or inbox write. If the recipient
 has activation.type == "human_relay", prints
 a ready-to-paste handoff prompt for the human operator. Other unresolved
 activation types report an explicit unavailable state.
@@ -197,6 +198,7 @@ def build_message(args, body: str, chat_id: str, packet_name: str | None = None)
         "sender_agent_id": args.sender_agent_id or args.sender,
         "sender_session_id": args.sender_session_id,
         "target_session_id": args.target_session_id,
+        "routing_mode": getattr(args, "routing_mode", "targeted"),
         "supersedes_session_id": args.supersedes_session_id,
         "title": args.title,
         "priority": args.priority,
@@ -353,6 +355,15 @@ def is_watcher_only_target(recipient_agent: dict, recipient_id: str) -> bool:
     return (
         recipient_id != "codex"
         and activation.get("watcher_enabled") is True
+    )
+
+
+def allows_unbound_broadcast(recipient_agent: dict, recipient_id: str) -> bool:
+    """Only explicitly watcherless human recipients may receive an unbound packet."""
+    activation = recipient_agent.get("activation", {})
+    return recipient_id == "operator" or (
+        activation.get("type") in {"human", "human_relay"}
+        and activation.get("watcher_enabled") is False
     )
 
 
@@ -527,7 +538,10 @@ def main():
     durable_session = None
     binding_unreadable = False
     dispatch_scope_refused = False
-    if not thread_coordination_required:
+    explicit_target_refusal_reason = None
+    # GH-554: thread coordination suppresses activation only after the exact
+    # recipient binding has been validated; it is not an unbound exception.
+    if not thread_coordination_required or is_codex_self_target(args.sender, args.recipient):
         try:
             pair, autobridge_refusal_reason, inactive_pair = resolve_exact_dispatch_pair(
                 args.project,
@@ -560,25 +574,32 @@ def main():
             # The sender named a specific target thread the recipient's binding contradicts.
             # Do not re-address the packet to the binding's target; that would silently redirect
             # an explicit intent. Refuse so the sender sees the mismatch.
+            explicit_target_refusal_reason = (
+                autobridge_refusal_reason or EXACT_BINDING_MISMATCH_REASON
+            )
             autobridge_target = None
             autobridge_refusal_reason = EXACT_BINDING_MISMATCH_REASON
             args.target_session_id = None
         elif resolved_binding_target is not None:
-            routable, scope_reason = repo_scope_matches(
-                durable_session.get("repo_targets"),
-                packet_repo_targets(args),
-                subscriber_project=durable_session.get("project_id"),
-                packet_project=args.project,
-            )
-            if not routable:
-                autobridge_target = None
-                autobridge_refusal_reason = scope_reason
+            if autobridge_target is None:
+                # An inactive/ambiguous target is useful to the resolver for a
+                # typed refusal, not as an address for a new durable packet.
                 args.target_session_id = None
-                dispatch_scope_refused = True
             else:
                 args.target_session_id = str(resolved_binding_target)
                 args.target_binding_id = durable_binding.get("binding_id")
                 args.target_binding_generation = durable_binding.get("binding_generation")
+                routable, scope_reason = repo_scope_matches(
+                    durable_session.get("repo_targets"),
+                    packet_repo_targets(args),
+                    subscriber_project=durable_session.get("project_id"),
+                    packet_project=args.project,
+                )
+                if not routable:
+                    autobridge_target = None
+                    autobridge_refusal_reason = scope_reason
+                    args.target_session_id = None
+                    dispatch_scope_refused = True
         else:
             args.target_session_id = None
     autobridge_ready = bool(
@@ -601,9 +622,130 @@ def main():
     # later cannot silently miss the gate by re-deriving `not autobridge_ready` on its own.
     wake_fallback_allowed = not autobridge_ready and not dispatch_scope_refused
 
-    body = read_body(args.body_file)
     slug = slugify(args.title, max_len=40)
     timestamp = ts()
+    if thread_coordination_required:
+        if not args.target_session_id:
+            # A Codex self-target without a verified exact binding is the same
+            # unresolved worker route as any other recipient.
+            thread_coordination_required = False
+        else:
+            # The packet is durable coordination history, not an app wake. Keep
+            # the verified address in frontmatter while suppressing wake flags.
+            autobridge_ready = False
+            wake_fallback_allowed = False
+
+    recipient_agent = get_agent(args.recipient)
+    recipient_type = recipient_agent.get("activation", {}).get("type")
+    # Classify the fallback once, before refusing an unbound route. Terminal
+    # binding/scope states already make wake_fallback_allowed false.
+    ax_doorbell_required = (
+        args.recipient != "operator"
+        and wake_fallback_allowed
+        and is_ax_doorbell_target(
+            recipient_agent,
+            args.recipient,
+            sender_id=args.sender,
+        )
+    )
+
+    if thread_coordination_required:
+        args.routing_mode = "thread_coordination"
+    elif args.target_session_id:
+        args.routing_mode = "targeted"
+    elif allows_unbound_broadcast(recipient_agent, args.recipient):
+        args.routing_mode = "broadcast"
+    elif ax_doorbell_required:
+        args.routing_mode = "targeted"
+    elif explicit_target_session_id is not None:
+        refusal_reason = (
+            explicit_target_refusal_reason
+            or autobridge_refusal_reason
+            or EXACT_BINDING_MISMATCH_REASON
+        )
+        print(
+            json.dumps(
+                {
+                    "delivery_refused": True,
+                    "durable_write": False,
+                    "routing_mode": "refused",
+                    "routing_refusal_reason": refusal_reason,
+                    "autobridge_refusal_reason": refusal_reason,
+                    "autobridge_ready": False,
+                    "thread_coordination_required": False,
+                    "watcher_pickup_ready": False,
+                    "relay_required": False,
+                    "ax_doorbell_required": False,
+                    "ax_doorbell_prompt": None,
+                    "ax_attended_recovery_required": False,
+                    "ax_attended_recovery_prompt": None,
+                    "operator_relay_required": False,
+                    "desktop_bridge_required": False,
+                    "desktop_bridge_prompt": None,
+                    "activation_unavailable": False,
+                    "activation_unavailable_reason": None,
+                    "recipient": args.recipient,
+                    "project_id": args.project,
+                    "chat_id": chat_id,
+                    "resolved_target_session_id": None,
+                    "binding_unreadable_blocker": binding_unreadable,
+                },
+                indent=2,
+            )
+        )
+        print(
+            f"[deliver] REFUSED before durable write: recipient {args.recipient!r} "
+            "has no verified exact binding for the explicitly requested target "
+            f"{explicit_target_session_id!r} ({refusal_reason}); repair the binding "
+            "and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    else:
+        refusal_reason = autobridge_refusal_reason or "exact_binding_required"
+        print(
+            json.dumps(
+                {
+                    "delivery_refused": True,
+                    "durable_write": False,
+                    "routing_mode": "refused",
+                    "routing_refusal_reason": refusal_reason,
+                    "autobridge_refusal_reason": refusal_reason,
+                    "autobridge_ready": False,
+                    "thread_coordination_required": False,
+                    "watcher_pickup_ready": False,
+                    "relay_required": False,
+                    "ax_doorbell_required": False,
+                    "ax_doorbell_prompt": None,
+                    "ax_attended_recovery_required": False,
+                    "ax_attended_recovery_prompt": None,
+                    "operator_relay_required": False,
+                    "desktop_bridge_required": False,
+                    "desktop_bridge_prompt": None,
+                    "activation_unavailable": False,
+                    "activation_unavailable_reason": None,
+                    "recipient": args.recipient,
+                    "project_id": args.project,
+                    "chat_id": chat_id,
+                    "resolved_target_session_id": None,
+                    "binding_unreadable_blocker": binding_unreadable,
+                },
+                indent=2,
+            )
+        )
+        print(
+            f"[deliver] REFUSED before durable write: recipient {args.recipient!r} "
+            f"requires an exact verified session binding ({refusal_reason}); "
+            "repair the binding and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Read the body only AFTER every unresolved-route refusal above. Reading it
+    # first meant a `--body-file -` delivery to an unroutable recipient blocked on
+    # stdin for a body that would be refused anyway, and a missing body file raised
+    # instead of returning the promised typed exit-2 refusal.
+    body = read_body(args.body_file)
     if not body:
         candidate = chat_dir / f"{timestamp}_to-{args.recipient}_{slug}.md"
         print(
@@ -611,8 +753,6 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    recipient_agent = get_agent(args.recipient)
-    recipient_type = recipient_agent.get("activation", {}).get("type")
     should_consider_onboarding = recipient_type != "human" and not args.skip_awareness_instruction
     first_time_awareness = should_consider_onboarding and not has_collab_awareness(args.recipient)
 
@@ -644,18 +784,6 @@ def main():
         to_filename = activation_paths[0].name
     else:
         to_filename = f"{timestamp}_to-{args.recipient}_{slug}.md"
-    # Pre-write wake-path classification: the same value later selects the
-    # ring form, resolved before any file exists so downstream policy lanes
-    # can fail closed pre-write.
-    ax_doorbell_required = (
-        args.recipient != "operator"
-        and wake_fallback_allowed
-        and is_ax_doorbell_target(
-            recipient_agent,
-            args.recipient,
-            sender_id=args.sender,
-        )
-    )
     activation_ring_prompt = None
     if args.activation and ax_doorbell_required:
         # Built and bounded BEFORE any write: there is no generic/raw-file
@@ -843,6 +971,7 @@ def main():
         "activation_unavailable": activation_unavailable,
         "activation_unavailable_reason": activation_unavailable_reason,
         "resolved_target_session_id": args.target_session_id,
+        "routing_mode": args.routing_mode,
         "autobridge_ready": autobridge_ready,
         "autobridge_refusal_reason": autobridge_refusal_reason,
         # An explicit machine-readable blocker, because every wake flag AND activation_unavailable

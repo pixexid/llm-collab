@@ -338,8 +338,10 @@ python3 bin/deliver.py \
   --body-file /tmp/message.md
 ```
 
-If no dispatchable target exists, the command still writes the chat/inbox
-message and prints the manual relay prompt.
+If no dispatchable target or valid Codex AX fallback exists, `deliver.py`
+refuses before writing the chat/inbox message. The only unbound exception is an
+explicit `routing_mode: broadcast` for the operator or a watcher-disabled
+human/human relay.
 
 Do not use `--chat last` for a new implementation task unless you have just
 created and verified that the latest chat is the task's dedicated chat. A new

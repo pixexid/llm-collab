@@ -252,12 +252,15 @@ Safest task-grade workflow for desktop-app agents:
    - for Codex, `ax_doorbell_required` means the sender runs exactly the command
      printed by `deliver.py`; it is
      not a manual operator relay request
-   - `watcher_pickup_ready` means the durable packet is ready and the
-     non-Codex recipient's watcher owns pickup
+   - `watcher_pickup_ready` is retained for compatibility but is false for new
+     admitted deliveries; watcher-backed recipients require an exact binding
    - `desktop_bridge_required` is always false: the Claude Computer Use fallback
      it selected is removed, and Claude is woken by its own background watcher
-   - `activation_unavailable` means the durable packet exists but neither a
-     dispatchable runtime nor an explicit wake transport is configured
+   - `delivery_refused: true` with `durable_write: false` means no exact target,
+     AX fallback, or documented broadcast route was admitted; repair the route
+     and send again
+   - `routing_mode: broadcast` is the explicit signal for the only admitted
+     unbound case: the operator or a watcher-disabled human/human relay
 2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
    command. Do not prove the composer empty first: for Codex, composer content
    and `AXValue` readability/opacity are never a hold, and a busy recipient is

@@ -225,6 +225,7 @@ priority: high
 tags: []
 project_id: my-app
 related_task: TASK-ABC123
+routing_mode: targeted
 repo_targets: [app, api]
 path_targets: [src/routes/checkout.ts]
 sent_utc: 2026-04-07T10:00:00+00:00
@@ -241,6 +242,8 @@ sent_utc: 2026-04-07T10:00:00+00:00
 | `tags` | string[] | Custom labels |
 | `project_id` | string | Registered project this message belongs to |
 | `related_task` | string or null | `TASK-{id}` cross-reference |
+| `target_session_id` | string or null | Exact recipient runtime session for `targeted` and dormant self-coordination packets; null only for explicit broadcasts |
+| `routing_mode` | string | `targeted`, `broadcast`, or `thread_coordination`; `broadcast` is the required explicit signal for an admitted unbound packet |
 | `activation` | bool (optional) | `true` marks a writer ACTIVATION packet. Emitted by `deliver.py --activation`, which atomically requires `related_task`, `worktree`, and `branch` (delivery fails otherwise); `worktree` must be absolute and is canonicalized before serialization. |
 | `worktree` | string (activation only) | Absolute canonical assigned worktree; part of the activation identity |
 | `branch` | string (activation only) | Assigned branch; part of the activation identity |
@@ -1771,6 +1774,11 @@ Notes:
 - `deliver.py` prepends first-time onboarding to the recipient's durable mailbox
   packet before marking awareness, so AX and runtime-dispatched workers receive
   the same setup contract as human-relay recipients
+- `deliver.py` admits a send only after resolving an exact target, selecting an
+  eligible Codex AX fallback, or identifying an explicit watcherless-human /
+  operator broadcast. Other unresolved routes exit 2 before every durable
+  mutation with `delivery_refused: true`, `durable_write: false`,
+  `routing_mode: refused`, and a typed `routing_refusal_reason`.
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
 - Only the Codex `cli_session` configures a supported `activation.ax_app`
@@ -1786,18 +1794,19 @@ Notes:
 - `codex -> codex` is the sender-aware exception. `deliver.py` preserves the
   durable packet, reports `thread_coordination_required: true`, and suppresses
   dispatchable-runtime, AX, desktop-bridge, and operator-relay activation so a
-  managed worker can be inspected with `read_thread` and unblocked with
-  `send_message_to_thread`. Its message frontmatter records
+  managed worker is inspected and steered through its BB thread. Its message frontmatter records
   `autobridge_skip: true`, `autobridge_skip_reason: codex_self_target`, and a
-  null `target_session_id`. Session dispatch excludes every `from: codex` /
+  verified `target_session_id`. Session dispatch excludes every `from: codex` /
   `to: codex` packet, including durable packets created before the flag existed,
   records a `codex_self_target_thread_coordination` skip, and leaves the packet
   unread.
 - A terminal-only `cli_session` needs a dispatchable runtime session. Without
-  either transport, `deliver.py` reports `activation_unavailable` instead of
-  silently requesting operator relay.
-- `watcher_pickup_ready` means a non-Codex worker's durable packet is ready for
-  its configured watcher. `claude_desktop_bridge` no longer selects anything;
+  a route, `deliver.py` returns the typed pre-write refusal instead of writing
+  a packet and reporting `activation_unavailable`.
+- `watcher_pickup_ready` is retained in the result shape for compatibility but
+  is false for new admitted deliveries: bound workers use exact dispatch, and
+  unbound watcher-backed workers are refused before write.
+  `claude_desktop_bridge` no longer selects anything;
   `deliver.py` emits neither `ax_doorbell_required` nor
   `desktop_bridge_required` for watcher-backed workers;
   `desktop_bridge_required` is retained in the result shape and is always false.
