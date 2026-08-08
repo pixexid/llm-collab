@@ -792,8 +792,7 @@ def main(*, input_fn: Callable[[str], str] | None = None):
         if a.get("activation", {}).get("type") not in ("human",):
             print(f"   bin/llm-collab init_agent_memory.py --agent {a['id']} --target generic")
     print()
-    print("3. Start PM2 watchers (optional, requires pm2):")
-    print("   bin/llm-collab pm2_watchers.py start --all")
+    print("3. PM2 log rotation (optional): docs/workflows/pm2-log-rotation.md")
     print()
     print("4. Create your first chat:")
     print('   bin/llm-collab new_chat.py --title "..." --project <project_id>')

@@ -34,3 +34,5 @@ Recommended read order:
 11. `isolated-worktrees.md`
 12. `commit-push-prs.md`
 13. `github-projects.md`
+14. `pm2-log-rotation.md` — canonical archive-before-install, configuration,
+    retention, and two-store verification procedure for optional PM2 logging

@@ -29,7 +29,7 @@ def answers(values: list[str]):
 
 
 class InitWorkspaceIdTest(unittest.TestCase):
-    def run_minimal_init(self, root: Path, supplied: list[str]) -> dict:
+    def run_minimal_init(self, root: Path, supplied: list[str]) -> tuple[dict, str]:
         agents = [
             {
                 "id": "operator",
@@ -42,15 +42,16 @@ class InitWorkspaceIdTest(unittest.TestCase):
             with patch.object(init_script, "_local_config", {}):
                 with patch.object(init_script, "collect_agents", return_value=agents):
                     with patch.object(init_script, "collect_projects", return_value=[]):
-                        with redirect_stdout(StringIO()):
+                        output = StringIO()
+                        with redirect_stdout(output):
                             init_script.main(input_fn=answers(supplied))
-        return json.loads((root / "collab.config.json").read_text())
+        return json.loads((root / "collab.config.json").read_text()), output.getvalue()
 
     def test_fresh_init_generates_and_persists_workspace_id(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(init_script, "generate_workspace_id", return_value="ws_fresh123"):
-                config = self.run_minimal_init(
+                config, _ = self.run_minimal_init(
                     root,
                     ["test", str(root / "repos"), str(root / "state"), "15", "n"],
                 )
@@ -67,11 +68,54 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 "generate_workspace_id",
                 side_effect=AssertionError("existing workspace identity must not rotate"),
             ):
-                config = self.run_minimal_init(
+                config, _ = self.run_minimal_init(
                     root,
                     ["y", "test", str(root / "repos"), str(root / "state"), "15", "n"],
                 )
             self.assertEqual(config["workspace_id"], "ws_existing123")
+
+    def test_fresh_init_points_to_complete_canonical_pm2_rotation_workflow(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, output = self.run_minimal_init(
+                root,
+                ["test", str(root / "repos"), str(root / "state"), "15", "n"],
+        )
+
+        workflow_path = "docs/workflows/pm2-log-rotation.md"
+        self.assertIn(
+            f"3. PM2 log rotation (optional): {workflow_path}", output.splitlines()
+        )
+        self.assertNotIn("pm2 install", output)
+        self.assertNotIn("pm2 set", output)
+        self.assertNotIn("pm2 trigger", output)
+
+        workflow = (REPO_ROOT / workflow_path).read_text()
+        required_steps = (
+            "operator-owned disposition",
+            "Installing `pm2-logrotate` starts the module and rotation immediately",
+            "Archive any history needed for diagnosis",
+            "Do not blindly",
+            "Inspect orphaned files",
+            "install pm2-" + "logrotate",
+            "max_size 10M",
+            "retain 7",
+            "compress true",
+            "rotateInterval '0 0 * * *'",
+            "pm2_watchers.py start --all",
+            "sleep 35",
+            "list watched logs",
+            "PASS only if",
+            "Logs/watchers/",
+            "~/.pm2/logs/",
+            "If either path class is",
+            "missing, treat rotation coverage as failed",
+            "current file plus seven gzip-compressed generations",
+        )
+        cursor = -1
+        for step in required_steps:
+            cursor = workflow.find(step, cursor + 1)
+            self.assertNotEqual(-1, cursor, f"missing or out-of-order PM2 step: {step}")
 
     def test_add_workspace_id_is_backup_protected_atomic_and_non_destructive(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -301,9 +301,19 @@ After this, PM2 and all running watchers restart automatically on reboot.
 
 ## Log locations
 
-Logs are written to `Logs/watchers/{agent}.pm2.{out,err}.log`.
+Apps defined by `pm2/ecosystem.config.cjs` write to
+`Logs/watchers/{agent}.pm2.{out,err}.log`. Apps started ad hoc without explicit
+`out_file` and `error_file` settings use PM2's default `~/.pm2/logs/` directory,
+so inspect both locations when accounting for disk usage.
 
 These files are gitignored.
+
+### Rotation and retention
+
+Follow the canonical
+[PM2 Log Rotation workflow](../workflows/pm2-log-rotation.md) end to end. It owns
+the archive-before-install gate, configuration, retention policy, and mandatory
+two-store verification; this adapter intentionally does not copy the procedure.
 
 ## Codex app-server delivery sidecar
 
