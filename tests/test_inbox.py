@@ -736,7 +736,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
         self.assertNotIn(secret, result.stdout)
 
-    def test_exact_session_refuses_a_stale_self_target_packet_generation(self) -> None:
+    def test_exact_session_reports_and_skips_a_stale_self_target_packet_generation(self) -> None:
         self.add_exact_session(
             binding_id="binding-exact",
             binding_generation=3,
@@ -761,6 +761,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
 
         self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout)["messages"])
         self.assertEqual(
             [stale],
             [
@@ -831,15 +832,21 @@ class InboxMarkAllReadTest(unittest.TestCase):
                     [entry["path"] for entry in payload.get("repo_scope_refused", [])],
                 )
 
-    def test_exact_read_fails_closed_on_a_wrong_binding_id_with_a_routable_packet(
+    def test_exact_read_skips_a_wrong_binding_id_and_returns_the_routable_packets(
         self,
     ) -> None:
-        # GH-417 P1: a wrong target_binding_id also returns route_ambiguous, but it is
-        # a BINDING-identity refusal, NOT repo-scope — it must still fail closed (exit
-        # 75, messages suppressed), even alongside a routable packet. Classifying by
-        # the reason string alone would wrongly skip it.
+        # GH-631: a wrong target_binding_id remains excluded, but it must not suppress
+        # the routable remainder of the batch.
         self.add_exact_session(binding_id="binding-current", binding_generation=3)
-        self.add_exact_message("routable", repo_targets=["app"])
+        routable = [
+            self.add_exact_message(
+                f"routable-{index}",
+                repo_targets=["app"],
+                target_binding_id="binding-current",
+                target_binding_generation=3,
+            )
+            for index in range(2)
+        ]
         wrong_binding = self.add_exact_message(
             "wrongbinding",
             repo_targets=["app"],
@@ -854,13 +861,24 @@ class InboxMarkAllReadTest(unittest.TestCase):
             env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
         )
 
-        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual([], payload["messages"])
-        self.assertIn(
-            wrong_binding,
-            [entry["path"] for entry in payload["repo_scope_refused"]],
+        self.assertEqual(routable, [message["path"] for message in payload["messages"]])
+        self.assertEqual(
+            [{"path": wrong_binding, "reason": "route_ambiguous"}],
+            payload["repo_scope_refused"],
         )
+
+        human = self.run_inbox(
+            "--project", "amiga", "--chat", "CHAT-EXACT",
+            "--session", "SESSION-EXACT", "--repo-target", "app", "--peek",
+            env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
+        )
+        self.assertEqual(0, human.returncode, human.stderr)
+        self.assertNotIn(wrong_binding, human.stdout)
+        self.assertIn("[inbox] Exact-session refused", human.stderr)
+        self.assertIn(wrong_binding, human.stderr)
+        self.assertIn("route_ambiguous", human.stderr)
 
     def test_wrong_binding_packet_is_not_consumed_on_acknowledge(self) -> None:
         # GH-457 proof 2 (same-project isolation, real consume path): worker B
@@ -869,6 +887,15 @@ class InboxMarkAllReadTest(unittest.TestCase):
         # too, leaving the foreign-binding packet in B's unread — never moved to
         # read. --peek coverage is insufficient because it never marks state.
         self.add_exact_session(binding_id="binding-current", binding_generation=3)
+        routable = [
+            self.add_exact_message(
+                f"routable-{index}",
+                repo_targets=["app"],
+                target_binding_id="binding-current",
+                target_binding_generation=3,
+            )
+            for index in range(2)
+        ]
         foreign = self.add_exact_message(
             "foreign-target",
             repo_targets=["app"],
@@ -886,10 +913,18 @@ class InboxMarkAllReadTest(unittest.TestCase):
             env={"LLM_COLLAB_READER_RUNTIME_ID": "pi-exact"},
         )
 
-        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(routable, payload["acknowledged"])
+        self.assertEqual(routable, [message["path"] for message in payload["messages"]])
+        self.assertEqual(
+            [{"path": foreign, "reason": "route_ambiguous"}],
+            payload["repo_scope_refused"],
+        )
         after = self.load_inbox()
         self.assertIn(foreign, after["unread"], "foreign-binding packet must stay unread")
         self.assertNotIn(foreign, after.get("read", []), "must not be marked read")
+        self.assertTrue(set(routable).issubset(after["read"]))
 
     def test_exact_session_refuses_malformed_repo_targets_before_rendering(self) -> None:
         self.add_exact_session()

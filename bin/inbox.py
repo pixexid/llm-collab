@@ -972,31 +972,26 @@ def main():
                     file=sys.stderr,
                 )
             sys.exit(75)
-        # GH-417: only a REPO-SCOPE (route_ambiguous) refusal is non-fatal — those
-        # packets are simply not for this repo scope, so skip them and return the
-        # routable messages (the non-exact path already does this). Any refusal whose
-        # source is NOT repo scope (a wrong target_binding_id, or a stale binding
-        # generation) still fails closed: a superseded/foreign binding must never fall
-        # through to the current session. `repo_scope_only` was set by re-checking the
-        # repo scope, not by the overloaded reason string.
-        fatal_refusals = [
-            refusal
-            for refusal in repo_scope_refused
-            if not refusal.get("repo_scope_only")
-        ]
+        # Refused packets stay excluded from messages and are reported below. A
+        # superseded/foreign binding must never fall through to the current session;
+        # skipping it here lets the routable packets through without weakening that
+        # selection fence.
+        binding_refused = any(
+            not refusal.get("repo_scope_only") for refusal in repo_scope_refused
+        )
         # Surface refusals as {path, reason}; drop the internal source flag.
         repo_scope_refused = [
             {"path": refusal["path"], "reason": refusal["reason"]}
             for refusal in repo_scope_refused
         ]
-        if fatal_refusals:
+        if binding_refused and not messages:
             payload = {"messages": [], "repo_scope_refused": repo_scope_refused}
             if args.json_output:
                 print(json.dumps(payload, indent=2))
             else:
                 for refusal in repo_scope_refused:
                     print(
-                        f"[inbox] Repo-scope refused {refusal['path']}: "
+                        f"[inbox] Exact-session refused {refusal['path']}: "
                         f"{refusal['reason']}",
                         file=sys.stderr,
                     )
@@ -1026,6 +1021,12 @@ def main():
             else:
                 for index, message in enumerate(messages):
                     print(format_message(message, index))
+                for refusal in repo_scope_refused:
+                    print(
+                        f"[inbox] Exact-session refused {refusal['path']}: "
+                        f"{refusal['reason']}",
+                        file=sys.stderr,
+                    )
                 print(f"[inbox] Acknowledged {len(acknowledged)} exact-session packet(s).")
             mark_messages_read(args.me, acknowledged)
             return
@@ -1171,8 +1172,9 @@ def main():
         if refused_gates:
             _print_refused_gates(refused_gates)
         for refused in repo_scope_refused:
+            scope = "Exact-session" if exact_requested else "Repo-scope"
             print(
-                f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
+                f"[inbox] {scope} refused {refused['path']}: {refused['reason']}",
                 file=sys.stderr,
             )
 
