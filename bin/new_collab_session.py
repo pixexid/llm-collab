@@ -21,11 +21,12 @@ It:
   2. Preflights the initiator's native session against existing dispatchable
      scopes, before any chat directory or file is written.
   3. Creates the chat.
-  4. Registers ONLY the initiator's own, explicitly-supplied native session.
-  5. Prints the initiator's own pickup command, branched by its wake channel
+  4. Establishes the initiator's transport first when dispatch requires one.
+  5. Registers ONLY the initiator's own, explicitly-supplied native session.
+  6. Prints the initiator's own pickup command, branched by its wake channel
      (every watcher-backed initiator arms an inbox watcher, Codex included) — do
      it, a packet you never see is a packet you never answer.
-  6. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
+  7. Emits a per-co-worker setup prompt: the exact `session_autobridge register`
      plus the pickup command for that worker's real wake channel. Contract v12:
      routine exact-session dispatch is the wake for every watcher-backed worker,
      and AX is only the fallback deliver.py selects.
@@ -185,6 +186,18 @@ def register_session(session, agent, project, chat, repo_target, family, rsid, h
         raise RuntimeError(f"registering {agent} session failed:\n{r.stderr or r.stdout}")
 
 
+def ensure_codex_transport() -> None:
+    r = subprocess.run(
+        [sys.executable, str(BIN / "pm2_watchers.py"), "ensure",
+         "--agent", "codex-appserver"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"ensuring Codex app-server transport failed:\n{r.stderr or r.stdout}"
+        )
+
+
 def preflight_starter_binding(*, agent: str, project: str, runtime_session_id: str,
                               runtime_family: str) -> None:
     """Refuse a new chat before creation when the starter native is already routed."""
@@ -256,15 +269,7 @@ def pickup_block(channel, agent, project, chat, session, repo_target, rsid, fami
     ever wakes it."""
     if channel == "watcher" and needs_dispatch:
         return [
-            "# 1) Ensure the TRANSPORT first. A binding that dispatches while",
-            "#    the app-server sidecar is missing suppresses AX and has",
-            "#    nowhere to send the turn — that is the 20-hour silent outage",
-            "#    of 2026-08-05. This fails closed (exit 2) with the exact",
-            "#    remedy when the token is absent or insecure, so a failure",
-            "#    here means STOP, not continue:",
-            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
-            "",
-            "# 2) Then ensure the MANAGED dispatching watcher (one per agent,",
+            "# Ensure the MANAGED dispatching watcher (one per agent,",
             "#    not per chat). Your turn is started by autobridge dispatch,",
             "#    and watch_inbox only dispatches when --session is absent —",
             "#    but a raw second poller alongside the PM2 one would",
@@ -311,10 +316,21 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family,
         "#    unexpired parked) in a different (project_id, chat_id) scope — the",
         "#    exact-dispatch key, so two projects reusing one chat_id are also",
         "#    refused (GH-468); deactivate the old lease first.",
-        "#    Use the session_id AND home this prints in step 2:",
+        "#    Use the session_id AND home this prints when registering below:",
         f"{LAUNCH} session_autobridge.py discover-runtime --runtime-family {family}{discover_scope} --json",
+    ]
+    register_step = 2
+    if needs_dispatch:
+        lines += [
+            "",
+            "# 2. Establish the App Server transport before registration. STOP",
+            "#    if this fails; no binding may become dispatchable without it:",
+            f"{LAUNCH} pm2_watchers.py ensure --agent codex-appserver",
+        ]
+        register_step = 3
+    lines += [
         "",
-        "# 2. Register THAT id + THAT home (never guess, never substitute a default):",
+        f"# {register_step}. Register THAT id + THAT home (never guess, never substitute a default):",
         f"{LAUNCH} session_autobridge.py register \\",
         f"  --session {session} --agent {agent} \\",
         f"  --project {project} --chat {chat} --repo-target {repo_target} \\",
@@ -322,7 +338,7 @@ def coworker_prompt(agent, channel, project, chat, repo_target, family,
         f"  --runtime-family {family} --runtime-session-id <YOUR_ID> \\",
         f"  --runtime-home <YOUR_HOME_FROM_STEP_1> --runtime-session-source first_read",
         "",
-        "# 3. Pick up packets on YOUR wake channel:",
+        f"# {register_step + 1}. Pick up packets on YOUR wake channel:",
     ]
     lines += pickup_block(channel, agent, project, chat, session, repo_target, "<YOUR_ID>",
                           family, needs_dispatch)
@@ -430,7 +446,10 @@ def main():
 
     my_session = f"SESSION-{args.me.upper()}-{suffix}"
     my_home = args.my_runtime_home or DEFAULT_HOMES.get(args.my_runtime_family, f"~/.{args.me}")
+    my_activation = agent_activation(agents, args.me)
     try:
+        if needs_dispatch_wake(my_activation):
+            ensure_codex_transport()
         register_session(my_session, args.me, args.project, chat, args.repo_target,
                          args.my_runtime_family, args.my_runtime_session_id, my_home)
     except RuntimeError as exc:
@@ -441,7 +460,6 @@ def main():
 
     print(f"chat_id: {chat}")
     print(f"initiator session: {my_session} ({args.me} / {args.my_runtime_session_id})")
-    my_activation = agent_activation(agents, args.me)
     my_channel = wake_channel(my_activation)
     print("\n=== YOUR OWN PICKUP (do this now) ===")
     print("\n".join(pickup_block(my_channel, args.me, args.project, chat,

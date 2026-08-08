@@ -289,8 +289,9 @@ recovery clauses exclude canonical Claude; its mailbox watcher is the only wake
 path. Inbound Claude-to-Codex AX remains permitted.
 
 Computer Use is a serialized control and recovery plane, not a replacement
-doorbell. Once Codex has restored a safe target/thread, normal delivery returns
-to a verified AX ring: composer content and `AXValue` readability remain never
-a hold for Codex, so the ring overrides and sends regardless. An
+doorbell. Once Codex has restored a safe target/thread, wake routing resumes
+under the [canonical contract-v12 rule](../../AGENTS.md#recent-contract-changes).
+On the doorbell path it selects, composer content and `AXValue` readability
+remain never a hold for Codex, so the ring overrides and sends regardless. An
 opaque/unresolved **target** — a composer AX cannot safely confirm belongs to
 the intended recipient — remains on the attended recovery path.
