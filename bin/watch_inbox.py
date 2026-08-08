@@ -141,9 +141,16 @@ def send_notification(title: str, body: str) -> None:
         pass
 
 
-DETAIL_ONLY_TEXT_EVENTS = frozenset(
-    {"autobridge_refusal_summary", "bb_observation"}
+TEXT_REPEAT_CACHE_MAX_KEYS = 256
+_TEXT_REPEAT_KEY_FIELDS = (
+    "event",
+    "project_id",
+    "agent",
+    "session_id",
+    "chat_id",
+    "message_path",
 )
+_last_text_payloads: dict[tuple[Any, ...], dict] = {}
 
 
 def emit(msg: dict, json_output: bool) -> None:
@@ -153,9 +160,15 @@ def emit(msg: dict, json_output: bool) -> None:
         ts = msg.get("ts", "")
         event = msg.get("event", "")
         detail = msg.get("detail", "")
-        # Only unchanged per-poll summaries stay lean. Every other event defaults
-        # to complete data so new diagnostics cannot disappear silently.
-        data = {} if event in DETAIL_ONLY_TEXT_EVENTS else {
+        payload = {
+            key: value for key, value in msg.items() if key not in {"ts", "event"}
+        }
+        repeat_key = tuple(msg.get(key) for key in _TEXT_REPEAT_KEY_FIELDS)
+        previous = _last_text_payloads.pop(repeat_key, None)
+        _last_text_payloads[repeat_key] = payload
+        if len(_last_text_payloads) > TEXT_REPEAT_CACHE_MAX_KEYS:
+            _last_text_payloads.pop(next(iter(_last_text_payloads)))
+        data = {} if previous == payload else {
             key: value for key, value in msg.items() if key not in {"ts", "event", "detail"}
         }
         suffix = f" data={json.dumps(data, separators=(',', ':'))}" if data else ""
