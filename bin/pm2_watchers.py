@@ -188,9 +188,21 @@ def enabled_sidecar_ids() -> list[str]:
 NON_CREATING_COMMANDS = frozenset({"stop", "delete", "status", "logs"})
 
 
-def sidecar_is_pm2_registered(agent_id: str) -> bool:
-    """True when PM2 actually knows this app, so cleanup can reach an orphan."""
+def sidecar_is_pm2_registered(agent_id: str, *, snapshot=None) -> bool:
+    """True when PM2 actually knows this app, so cleanup can reach an orphan.
+
+    When a jlist snapshot is available (the status command reads one bounded
+    snapshot for the whole run), answer from it: `pm2 describe` is a separate,
+    unbounded read, and running it before the snapshot would let a large response
+    exhaust memory before the jlist bound applies (GH-682). Without a snapshot
+    (start/restart/etc.) it falls back to describe -- the GH-684 residual.
+    """
     name = app_name(agent_id)
+    if snapshot is not None:
+        result, entries = snapshot
+        if not isinstance(entries, list):
+            return False
+        return any(isinstance(entry, dict) and entry.get("name") == name for entry in entries)
     result = pm2_run(["describe", name], capture_output=True)
     text = f"{getattr(result, 'stdout', '') or ''}{getattr(result, 'stderr', '') or ''}".lower()
     if "doesn't exist" in text or "not found" in text:
@@ -198,7 +210,7 @@ def sidecar_is_pm2_registered(agent_id: str) -> bool:
     return name.lower() in text
 
 
-def sidecar_ids_for_command(command: str) -> list[str]:
+def sidecar_ids_for_command(command: str, *, snapshot=None) -> list[str]:
     """Targets for one command.
 
     start/ensure use the security gate. Cleanup and inspection must additionally reach
@@ -211,7 +223,7 @@ def sidecar_ids_for_command(command: str) -> list[str]:
     enabled = set(enabled_sidecar_ids())
     return [
         name for name in SIDECAR_APP_IDS
-        if name in enabled or sidecar_is_pm2_registered(name)
+        if name in enabled or sidecar_is_pm2_registered(name, snapshot=snapshot)
     ]
 
 
@@ -618,23 +630,32 @@ def main():
                 continue
             print(format_ax_status(probe_ax_trust(get_agent(agent_id)), agent_id=agent_id))
 
+    # Sidecar discovery has two halves ordered around the jlist snapshot. The
+    # token-gated half (enabled_sidecar_ids) needs no PM2 read, so for status a
+    # sidecar whose token is present is reported BEFORE the snapshot -- a PM2
+    # failure must not suppress its [sidecar] line (collaborator [ax] lines are
+    # already safe above). The registration half (a process left running after its
+    # token was removed, reachable by cleanup/inspection but never invented on a
+    # clean install) needs PM2 data, which for status comes from the one bounded
+    # jlist snapshot read below -- so no unbounded `pm2 describe` precedes the
+    # budget (AGENTS.md: begin at the earliest parse boundary AND stay cumulative).
+    # start/restart --all still discover via describe (GH-684).
+    token_sidecars = set(enabled_sidecar_ids()) if defer_sidecars else set()
+    if args.command == "status":
+        for name in token_sidecars:
+            print(f"[sidecar] target={name} (no AX surface)")
+
+    status_snapshot = _read_jlist_snapshot() if args.command == "status" else None
+
     if defer_sidecars:
         # safe now: every collaborator AX line is already on stdout
-        sidecars = sidecar_ids_for_command(args.command)
+        sidecars = sidecar_ids_for_command(args.command, snapshot=status_snapshot)
         targets.extend(sidecars)
         if args.command == "status":
             for name in sidecars:
-                print(f"[sidecar] target={name} (no AX surface)")
+                if name not in token_sidecars:
+                    print(f"[sidecar] target={name} (no AX surface)")
 
-    # `status --all` reads `pm2 jlist` ONCE for the whole batch under a single
-    # cumulative bound for the run (AGENTS.md "Bounded work fails closed"), then
-    # every target extracts its pm2_env.status from that shared snapshot. Reading
-    # once per target was N bounded reads of the same process table, which is not
-    # cumulative. Status is read-only, so one consistent snapshot is also the
-    # correct view; start/restart mutate between reads and stay per-target.
-    status_snapshot = (
-        _read_jlist_snapshot() if args.command == "status" and targets else None
-    )
     status_exit_code = 0
     for agent_id in targets:
         name = app_name(agent_id)

@@ -315,6 +315,79 @@ class PM2WatchersTest(unittest.TestCase):
         self.assertIn("exceeds", err.getvalue())
         self.assertNotIn("not found", out.getvalue())
 
+    def test_status_all_discovers_sidecar_from_snapshot_without_unbounded_describe(self) -> None:
+        # Head 2 (GH-682). Without a usable sidecar token, sidecar discovery fell
+        # back to sidecar_is_pm2_registered -> `pm2 describe` (UNBOUNDED), which
+        # ran BEFORE the bounded jlist snapshot. A large describe response could
+        # exhaust memory before the jlist bound applied, so the PR's "one source,
+        # one bound, one parse" was false while an unbounded read ran earlier.
+        # Registration must now be answered from the shared snapshot.
+        #
+        # MUTATION PROOF: restore the unbounded describe (sidecar_is_pm2_registered
+        # ignores the snapshot) and `describe` appears in pm2_calls before/after
+        # jlist; assertEqual(["jlist"], pm2_calls) fails. Could this pass in a
+        # world where a PM2 read in this command is still unbounded? NO -- the
+        # describe IS that read, and this asserts the only PM2 read is jlist.
+        pm2_calls: list[str] = []
+
+        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
+            pm2_calls.append(args_list[0])
+            if args_list[0] == "jlist":
+                # Sidecar is registered in the table; discovery must find it here.
+                payload = json.dumps([
+                    {"name": "llm-collab-alpha", "pm2_env": {"status": "online"}},
+                    {"name": "llm-collab-codex-appserver", "pm2_env": {"status": "online"}},
+                ])
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout=payload, stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["pm2_watchers.py", "status", "--all"]), \
+             contextlib.redirect_stdout(out):
+            with patch.object(pm2_watchers, "watcher_enabled_agents", return_value=[{"id": "alpha"}]), \
+                 patch.object(pm2_watchers, "agent_ids", return_value=["alpha"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=[]), \
+                 patch.object(pm2_watchers, "is_sidecar", side_effect=lambda aid: aid == "codex-appserver"), \
+                 patch.object(pm2_watchers, "format_ax_status", return_value=""), \
+                 patch.object(pm2_watchers, "probe_ax_trust", return_value=None), \
+                 patch.object(pm2_watchers, "get_agent", return_value={}), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+                pm2_watchers.main()
+        # The ONLY PM2 read is the bounded jlist snapshot; no describe precedes it.
+        self.assertEqual(["jlist"], pm2_calls)
+        # Discovery still works: the registered sidecar is reported from the snapshot.
+        self.assertIn("llm-collab-codex-appserver: online", out.getvalue())
+
+    def test_status_all_unregistered_sidecar_not_discovered_and_no_describe(self) -> None:
+        # Head 2 (GH-682), other direction. With no token and a sidecar absent
+        # from the jlist snapshot, discovery must NOT invent it (no phantom
+        # target) and still must not fall back to an unbounded describe.
+        pm2_calls: list[str] = []
+
+        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
+            pm2_calls.append(args_list[0])
+            if args_list[0] == "jlist":
+                return subprocess.CompletedProcess(args=args_list, returncode=0, stdout="[]", stderr="")
+            return subprocess.CompletedProcess(args=args_list, returncode=0)
+
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["pm2_watchers.py", "status", "--all"]), \
+             contextlib.redirect_stdout(out):
+            with patch.object(pm2_watchers, "watcher_enabled_agents", return_value=[{"id": "alpha"}]), \
+                 patch.object(pm2_watchers, "agent_ids", return_value=["alpha"]), \
+                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
+                 patch.object(pm2_watchers, "enabled_sidecar_ids", return_value=[]), \
+                 patch.object(pm2_watchers, "is_sidecar", side_effect=lambda aid: aid == "codex-appserver"), \
+                 patch.object(pm2_watchers, "format_ax_status", return_value=""), \
+                 patch.object(pm2_watchers, "probe_ax_trust", return_value=None), \
+                 patch.object(pm2_watchers, "get_agent", return_value={}), \
+                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+                with self.assertRaises(SystemExit):
+                    pm2_watchers.main()
+        self.assertEqual(["jlist"], pm2_calls)
+        self.assertNotIn("codex-appserver", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
