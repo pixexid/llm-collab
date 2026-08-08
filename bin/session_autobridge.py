@@ -658,7 +658,9 @@ def register_session(args) -> dict:
     if args.runtime_session_source is not None:
         runtime["session_source"] = args.runtime_session_source
     explicit_runtime_home = canonical_runtime_home(getattr(args, "runtime_home", None))
-    runtime_home = explicit_runtime_home
+    runtime_home = explicit_runtime_home or canonical_runtime_home(runtime.get("home"))
+    if runtime_home is None and runtime.get("family") == "claude_app":
+        runtime_home = canonical_runtime_home(str(claude_home()))
     if runtime_home is None and runtime.get("family") and runtime.get("session_source"):
         # The derived fallback must pass through the SAME invariant as an explicit
         # --runtime-home. Stored raw, a relative or non-normalized source produced a home
@@ -686,30 +688,31 @@ def register_session(args) -> dict:
     gh468_native_session_id = runtime.get("session_id") if runtime else None
     gh468_native_family = runtime.get("family") if runtime else None
 
-    # An explicitly named Claude session is registrable only when its own artifact
+    # Any Claude identity this registration will persist -- newly supplied or
+    # carried from the existing lease -- is registrable only when its own artifact
     # proves membership in the target checkout. The project slug is only a lookup
     # hint (it can collide), so the existing evidence reader validates cwd + native
     # identity together before any binding/session write.
-    if args.runtime_session_id is not None and gh468_native_family == "claude_app":
+    if gh468_native_session_id and gh468_native_family == "claude_app":
         project_path = resolve_project_repo_path(str(args.project), "app")
         evidence = "unprovable"
         if project_path is not None:
             artifact_home = (
-                Path(explicit_runtime_home)
-                if explicit_runtime_home is not None
+                Path(str(runtime["home"]))
+                if runtime.get("home")
                 else claude_home()
             )
             artifact = (
                 artifact_home
                 / "projects"
                 / str(claude_project_slug(str(project_path)))
-                / f"{args.runtime_session_id}.jsonl"
+                / f"{gh468_native_session_id}.jsonl"
             )
             evidence = _claude_session_evidence(
                 artifact,
                 MAX_CLAUDE_RECORD_PREFIX_BYTES,
                 os.path.realpath(project_path),
-                str(args.runtime_session_id),
+                str(gh468_native_session_id),
             )
         if evidence != "match":
             detail = (

@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import session_bootstrap
+import _session_autobridge as session_autobridge_lib
 
 
 def completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
@@ -393,7 +394,7 @@ class BindingDriftBannerTest(unittest.TestCase):
             report = session_bootstrap.binding_drifts("claude")
         self.assertEqual("detected", report["status"])
         resolve.assert_called_once_with(
-            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new"
+            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new", strict=True
         )
         self.assertNotIn("SESSION-CLAUDE-PEER", json.dumps(report))
         self.assertNotIn("repair_command", report)
@@ -417,6 +418,54 @@ class BindingDriftBannerTest(unittest.TestCase):
             session_bootstrap.announce_binding_drifts(report)
         self.assertIn("CHECK UNAVAILABLE", output.getvalue())
         self.assertNotEqual([], report)
+
+    def test_unreadable_canonical_ledger_is_explicitly_unavailable(self) -> None:
+        class FakePaths:
+            @staticmethod
+            def derive(*_args):
+                return object()
+
+        class BrokenStore:
+            @staticmethod
+            def open_reader(_paths):
+                raise OSError("canonical ledger is corrupt")
+
+        fake_ledger = SimpleNamespace(LedgerPaths=FakePaths, LedgerStore=BrokenStore)
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(session_autobridge_lib, "config_get", return_value="ws_alpha"),
+            patch.object(session_autobridge_lib, "project_state_root", return_value=Path("/tmp")),
+            patch.object(
+                session_autobridge_lib.importlib,
+                "import_module",
+                return_value=fake_ledger,
+            ),
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("unavailable", report["status"])
+        self.assertIn("canonical ledger is corrupt", report["reason"])
+        output = StringIO()
+        with redirect_stdout(output):
+            session_bootstrap.announce_binding_drifts(report)
+        self.assertIn("CHECK UNAVAILABLE", output.getvalue())
+
+    def test_missing_canonical_binding_is_a_legitimate_clear_result(self) -> None:
+        with (
+            patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "runtime-new"}, clear=True),
+            patch.object(session_bootstrap, "iter_sessions", return_value=[self.SESSION]),
+            patch.object(
+                session_bootstrap,
+                "resolve_active_canonical_binding",
+                return_value=None,
+            ) as resolve,
+        ):
+            report = session_bootstrap.binding_drifts("claude")
+        self.assertEqual("clear", report["status"])
+        self.assertFalse(report["canonical_binding_resolved"])
+        resolve.assert_called_once_with(
+            "llm-collab", "CHAT-DRIFT", "claude", "runtime-new", strict=True
+        )
 
 
 if __name__ == "__main__":

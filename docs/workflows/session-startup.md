@@ -54,7 +54,9 @@ ambiguity without naming a supersession target. There is currently no
 self-service repair command for a non-Pi canonical binding: ordinary
 `register --supersedes-session` updates the session and file binding but not the
 canonical ledger, so bootstrap deliberately does not print that ineffective and
-potentially destructive command.
+potentially destructive command. If either the session scan or canonical ledger
+read cannot complete, bootstrap continues but reports the drift check as
+unavailable rather than claiming the binding is clear.
 
 Rebinding does not recover packets already addressed to the dead runtime id.
 Those packets stay invisible to exact reads because the exact-read target filter

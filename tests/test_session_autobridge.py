@@ -4902,6 +4902,60 @@ class SessionAutobridgeTest(unittest.TestCase):
                 )
                 self.assertEqual(runtime_id, json.loads(binding.read_text())["runtime_session_id"])
 
+        def reregister(project: str, chat: str):
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "register",
+                    "--session",
+                    "SESSION-same-amiga",
+                    "--agent",
+                    "claude",
+                    "--project",
+                    project,
+                    "--chat",
+                    chat,
+                    "--repo-target",
+                    "app",
+                    "--mode",
+                    "notify",
+                    "--json",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+        same_project = reregister("amiga", "CHAT-CARRY-SAME")
+        self.assertEqual(0, same_project.returncode, same_project.stderr)
+        carried_path = (
+            root
+            / "State"
+            / "session_autobridge"
+            / "sessions"
+            / "SESSION-same-amiga.json"
+        )
+        self.assertEqual("CHAT-CARRY-SAME", json.loads(carried_path.read_text())["chat_id"])
+
+        cross_project = reregister("nuvyr", "CHAT-CARRY-CROSS")
+        self.assertNotEqual(0, cross_project.returncode)
+        self.assertIn("project membership could not be proven", cross_project.stderr)
+        carried = json.loads(carried_path.read_text())
+        self.assertEqual(("amiga", "CHAT-CARRY-SAME"), (carried["project_id"], carried["chat_id"]))
+        self.assertFalse(
+            (
+                root
+                / "State"
+                / "session_autobridge"
+                / "bindings"
+                / "nuvyr"
+                / "CHAT-CARRY-CROSS"
+                / "claude.json"
+            ).exists()
+        )
+
         cross_id = "cross-project"
         amiga_slug = str(amiga.resolve()).replace("/", "-")
         write_claude_session_jsonl(

@@ -339,7 +339,7 @@ def binding_drifts(agent_id: str) -> dict:
     project_id, chat_id = next(iter(correlated_scopes))
     try:
         canonical = resolve_active_canonical_binding(
-            project_id, chat_id, agent_id, current_runtime_id
+            project_id, chat_id, agent_id, current_runtime_id, strict=True
         )
     except CanonicalBindingNativeMismatch as mismatch:
         return {
@@ -349,6 +349,11 @@ def binding_drifts(agent_id: str) -> dict:
             "bound_runtime_id": mismatch.canonical_native_session_id,
             "current_runtime_id": current_runtime_id,
             "repair_available": False,
+        }
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "reason": f"{type(error).__name__}: {error}",
         }
     return {
         "status": "clear",
