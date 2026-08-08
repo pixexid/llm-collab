@@ -887,8 +887,8 @@ def dispatch_autobridge(
                     "session_id": session_id,
                     "message_path": action["message_path"],
                 }
-                if action.get("diagnostic_error"):
-                    consumed_event["diagnostic_error"] = action["diagnostic_error"]
+                if action.get("diagnostic_errors"):
+                    consumed_event["diagnostic_errors"] = action["diagnostic_errors"]
                 emit(consumed_event, json_output)
             elif (
                 action.get("effective_action") == "runtime_trigger"

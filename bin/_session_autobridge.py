@@ -4383,6 +4383,25 @@ def dispatch_session(
     repo_targets: list[str] | None = None,
     skip_paths: set[str] | None = None,
 ) -> dict[str, Any]:
+    settled_actions: list[dict[str, Any]] = []
+
+    def record_event(event: dict[str, Any], *, settled: bool = False) -> None:
+        # Every dispatch diagnostic goes through this seam so a later write
+        # cannot discard an action whose packet is already settled.
+        try:
+            append_event(session_id, event)
+        except Exception as error:
+            target = event if settled else settled_actions[-1] if settled_actions else None
+            if target is None:
+                raise
+            target.setdefault("diagnostic_errors", []).append(
+                {
+                    "operation": "append_event",
+                    "error_type": type(error).__name__,
+                    "detail": str(error),
+                }
+            )
+
     session = load_session(session_id)
     if session.get("binding_id"):
         # The watcher gate validates an existing file binding before calling this
@@ -4392,8 +4411,7 @@ def dispatch_session(
     else:
         binding_ok, resolved_binding = resolve_session_receive_binding(session)
     if not binding_ok:
-        append_event(
-            session_id,
+        record_event(
             {
                 "event": "session_skipped",
                 "reason": "stale_or_foreign_canonical_binding",
@@ -4412,8 +4430,7 @@ def dispatch_session(
     # this read-only resolver into a second session-file authority.
     routing_session = session if resolved_binding is None else {**session, **resolved_binding}
     if project_id is not None and session.get("project_id") != project_id:
-        append_event(
-            session_id,
+        record_event(
             {
                 "event": "session_skipped",
                 "reason": "project_scope_mismatch",
@@ -4429,8 +4446,7 @@ def dispatch_session(
         }
     dispatchable, reason = session_is_dispatchable(session)
     if not dispatchable:
-        append_event(
-            session_id,
+        record_event(
             {
                 "event": "session_skipped",
                 "reason": reason,
@@ -4468,8 +4484,7 @@ def dispatch_session(
             invocation_repo_targets=repo_targets,
         )
         if not target_match:
-            append_event(
-                session_id,
+            record_event(
                 {
                     "event": "message_skipped",
                     "message_path": message["path"],
@@ -4479,8 +4494,7 @@ def dispatch_session(
             continue
         skip, skip_reason = should_skip_for_loop_protection(session, message)
         if skip:
-            append_event(
-                session_id,
+            record_event(
                 {
                     "event": "message_skipped",
                     "message_path": message["path"],
@@ -4497,8 +4511,7 @@ def dispatch_session(
                 KeyError,
                 ValueError,
             ) as error:
-                append_event(
-                    session_id,
+                record_event(
                     {
                         "event": "message_skipped_unprocessed",
                         "message_path": message["path"],
@@ -4514,10 +4527,9 @@ def dispatch_session(
                 mutation=lambda: mark_message_processed(session, message["path"]),
             )
             if assertion_event is not None:
-                append_event(session_id, assertion_event)
+                record_event(assertion_event)
             if not fenced:
-                append_event(
-                    session_id,
+                record_event(
                     {
                         "event": "message_skipped_unprocessed",
                         "message_path": message["path"],
@@ -4540,8 +4552,9 @@ def dispatch_session(
             "reason": "already_processed",
             "runtime_result": {"returncode": 0, "skipped": True},
         }
-        append_event(session_id, event)
+        record_event(event, settled=True)
         actions.append(event)
+        settled_actions.append(event)
     materialization_slot_available = True
     for message in matched:
         activation_kind, activation_detail = classify_activation(
@@ -4549,8 +4562,7 @@ def dispatch_session(
             target_agent=str(session["agent_id"]),
         )
         if activation_kind == "malformed":
-            append_event(
-                session_id,
+            record_event(
                 {
                     "event": "activation_refused",
                     "message_path": message["path"],
@@ -4579,12 +4591,12 @@ def dispatch_session(
                 "reason": "session_capacity_refused",
                 "detail": str(error),
             }
-            append_event(session_id, event)
+            record_event(event)
             actions.append(event)
             continue
         activation_allowed, activation_event = claim_message_activation(session, message)
         if activation_event is not None:
-            append_event(session_id, activation_event)
+            record_event(activation_event)
         if not activation_allowed:
             continue
         action, action_reason = resolve_effective_action(session, message)
@@ -4609,7 +4621,7 @@ def dispatch_session(
             ):
                 event["reason"] = EXACT_BINDING_REQUIRED_REASON
                 should_mark_processed = False
-                append_event(session_id, event)
+                record_event(event)
                 actions.append(event)
                 continue
             if message_needs_canonical_materialization(routing_session, message):
@@ -4623,7 +4635,7 @@ def dispatch_session(
                         "canonical_write_started": False,
                     }
                     should_mark_processed = False
-                    append_event(session_id, event)
+                    record_event(event)
                     actions.append(event)
                     continue
                 asserted, assertion_event, materialization_result = activation_fenced_mutation(
@@ -4640,7 +4652,7 @@ def dispatch_session(
                         if assertion_event
                         else "activation_assert_refused"
                     )
-                    append_event(session_id, event)
+                    record_event(event)
                     actions.append(event)
                     continue
                 event["canonical_materialization_result"] = materialization_result
@@ -4651,7 +4663,7 @@ def dispatch_session(
                         "reason",
                         ROUTE_AMBIGUOUS_REASON,
                     )
-                    append_event(session_id, event)
+                    record_event(event)
                     actions.append(event)
                     continue
                 if (
@@ -4660,7 +4672,7 @@ def dispatch_session(
                     and runtime.get("family") != "bb"
                 ):
                     event["reason"] = "pull_pending"
-                    append_event(session_id, event)
+                    record_event(event)
                     actions.append(event)
                     continue
                 if (
@@ -4668,7 +4680,7 @@ def dispatch_session(
                     and not materialization_result.get("materialized")
                 ):
                     event["reason"] = "pull_pending"
-                    append_event(session_id, event)
+                    record_event(event)
                     actions.append(event)
                     continue
                 if message["path"] not in canonical_settled_message_paths(session):
@@ -4695,7 +4707,7 @@ def dispatch_session(
                             if assertion_event
                             else "activation_assert_refused"
                         )
-                        append_event(session_id, event)
+                        record_event(event)
                         actions.append(event)
                         continue
                 prepared_candidate = {
@@ -4728,7 +4740,7 @@ def dispatch_session(
                 event.setdefault("activation_assertions", []).append(assertion_event)
             if not asserted:
                 event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
-                append_event(session_id, event)
+                record_event(event)
                 actions.append(event)
                 continue
             event["runtime_result"] = runtime_result
@@ -4771,7 +4783,7 @@ def dispatch_session(
                             else "activation_assert_refused"
                         )
                         should_mark_processed = False
-                        append_event(session_id, event)
+                        record_event(event)
                         actions.append(event)
                         continue
                     event["ui_refresh_result"] = ui_refresh_result
@@ -4792,7 +4804,7 @@ def dispatch_session(
                 event.setdefault("activation_assertions", []).append(assertion_event)
             if not asserted:
                 event["reason"] = assertion_event["reason"] if assertion_event else "activation_assert_refused"
-                append_event(session_id, event)
+                record_event(event)
                 actions.append(event)
                 continue
             event["relay_result"] = relay_result
@@ -4820,21 +4832,13 @@ def dispatch_session(
                     message["path"],
                     prepared=prepared_result,
                 )
-        try:
-            append_event(session_id, event)
-        except Exception as error:
-            if not should_mark_processed:
-                raise
-            event["diagnostic_error"] = {
-                "operation": "append_event",
-                "error_type": type(error).__name__,
-                "detail": str(error),
-            }
+        record_event(event, settled=should_mark_processed)
         actions.append(event)
+        if should_mark_processed:
+            settled_actions.append(event)
 
     for refusal in repo_scope_refusals:
-        append_event(
-            session_id,
+        record_event(
             {
                 "event": "message_skipped",
                 "message_path": refusal["path"],
