@@ -17,6 +17,7 @@ import bb_spawn  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     REFUSAL_IDENTITY_MISMATCH,
     REFUSAL_ORPHANED_THREAD,
+    REFUSAL_TRANSPORT_FAILED,
     REFUSAL_VERSION_MISMATCH,
     BbClient,
     BbProfile,
@@ -39,13 +40,22 @@ from llm_collab.spawn_gate import (  # noqa: E402
 SHA = "a" * 40
 ORIGIN_SHA = "b" * 40
 REPO = Path("/registered/project/repo")
-REGISTRY = {"id": "llm-collab", "repos": {"app": REPO}}
+REGISTRY = {
+    "id": "llm-collab",
+    "default_branch_base": "main",
+    "repos": {"app": REPO},
+    "bb": {
+        "enabled": True,
+        "project_id": "proj_llm_collab",
+        "executable": ["/configured/bb", "--wrapper"],
+        "timeout_seconds": 17.0,
+    },
+}
 PROFILE = BbProfile("codex", "gpt-5.6-luna", "medium")
 CLI_ARGS = [
     "--assignment-kind", "read-only",
     "--collab-project", "llm-collab",
     "--repo-target", "app",
-    "--project", "proj_llm_collab",
     "--provider", PROFILE.provider,
     "--model", PROFILE.model,
     "--reasoning-level", PROFILE.reasoning_level,
@@ -69,7 +79,7 @@ class GitTransport:
             return BbTransportResult(0, "", "")
         if command[-1] == f"{SHA}^{{commit}}":
             return BbTransportResult(0, SHA + "\n", "")
-        if command[-1] == "origin/main^{commit}":
+        if command[-1].startswith("origin/") and command[-1].endswith("^{commit}"):
             return BbTransportResult(0, self.origin_sha + "\n", "")
         if command[:2] == ["merge-base", "--is-ancestor"]:
             return BbTransportResult(0, "", "")
@@ -81,7 +91,6 @@ class GitTransport:
 def planned(*, transport=None, **overrides):
     values = {
         "assignment_kind": "read-only",
-        "project_id": "proj_llm_collab",
         "registry_entry": REGISTRY,
         "repo_target": "app",
         "base_sha": SHA,
@@ -133,6 +142,23 @@ class PreflightRefusalTest(unittest.TestCase):
 
 
 class GitBoundaryTest(unittest.TestCase):
+    def test_non_main_default_branch_is_used_for_every_origin_lookup(self) -> None:
+        transport = GitTransport(origin_sha=ORIGIN_SHA)
+        registry = {**REGISTRY, "default_branch_base": "stable"}
+        outcome = planned(registry_entry=registry, transport=transport)
+        self.assertIsInstance(outcome, SpawnPlan)
+        commands = [call[2:] for call in transport.calls]
+        self.assertEqual(["fetch", "--quiet", "origin", "stable"], commands[0])
+        self.assertEqual(
+            ["rev-parse", "--verify", "origin/stable^{commit}"], commands[2]
+        )
+        self.assertEqual(
+            ["merge-base", "--is-ancestor", SHA, ORIGIN_SHA], commands[3]
+        )
+        self.assertEqual(
+            ["rev-list", "--count", f"{SHA}..{ORIGIN_SHA}"], commands[4]
+        )
+
     def test_every_git_argv_is_scoped_with_dash_c(self) -> None:
         transport = GitTransport()
         outcome = planned(transport=transport)
@@ -167,6 +193,7 @@ class PlanConstructionTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "plan_spawn"):
             SpawnPlan(
                 "project",
+                "native-project",
                 REPO,
                 SHA,
                 NewWorktree(),
@@ -183,7 +210,7 @@ class PersistenceTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def test_valid_id_persists_distinct_requested_and_executed_profiles(self) -> None:
+    def test_valid_id_persists_distinct_projects_and_profiles(self) -> None:
         plan = planned()
         self.assertIsInstance(plan, SpawnPlan)
         thread = BbThread(
@@ -198,6 +225,8 @@ class PersistenceTest(unittest.TestCase):
             )
             record = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual("thr_worker1.json", path.name)
+        self.assertEqual("llm-collab", record["project_id"])
+        self.assertEqual("proj_llm_collab", record["native_project_id"])
         self.assertEqual(PROFILE.model, record["requested_profile"]["model"])
         self.assertEqual(PROFILE.model, record["executed_profile"]["model"])
         self.assertIn("requested_profile", record)
@@ -332,7 +361,7 @@ class CliPhaseTest(unittest.TestCase):
         with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
             bb_spawn, "resolve_project_repo_path", return_value=REPO
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=refusal), mock.patch.object(
-            bb_spawn, "BbClient"
+            bb_spawn, "_configured_client"
         ) as client, mock.patch.object(bb_spawn, "_emit") as emit:
             self.assertEqual(1, bb_spawn.main(CLI_ARGS))
         client.assert_not_called()
@@ -351,7 +380,7 @@ class CliPhaseTest(unittest.TestCase):
             bb_spawn, "resolve_project_repo_path", return_value=REPO
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
-        ), mock.patch.object(bb_spawn, "BbClient", return_value=client), mock.patch.object(
+        ), mock.patch.object(bb_spawn, "_configured_client", return_value=client), mock.patch.object(
             bb_spawn, "_emit"
         ) as emit:
             self.assertEqual(1, bb_spawn.main(CLI_ARGS))
@@ -373,7 +402,7 @@ class CliPhaseTest(unittest.TestCase):
             bb_spawn, "resolve_project_repo_path", return_value=REPO
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
-        ), mock.patch.object(bb_spawn, "BbClient", return_value=client), mock.patch.object(
+        ), mock.patch.object(bb_spawn, "_configured_client", return_value=client), mock.patch.object(
             bb_spawn, "_emit"
         ) as emit:
             self.assertEqual(2, bb_spawn.main(CLI_ARGS))
@@ -393,7 +422,7 @@ class CliPhaseTest(unittest.TestCase):
             bb_spawn, "resolve_project_repo_path", return_value=REPO
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
-        ), mock.patch.object(bb_spawn, "BbClient", return_value=client), mock.patch.object(
+        ), mock.patch.object(bb_spawn, "_configured_client", return_value=client), mock.patch.object(
             bb_spawn, "persist_assignment", return_value=Path("/state/thr_worker1.json")
         ), mock.patch("builtins.print", side_effect=BrokenPipeError("closed")), mock.patch.object(
             bb_spawn, "_emit"
@@ -401,6 +430,66 @@ class CliPhaseTest(unittest.TestCase):
             self.assertEqual(2, bb_spawn.main(CLI_ARGS))
         client.spawn.assert_called_once()
         self.assertIn("native_thread_id=thr_worker1", emit.call_args.args[0])
+
+    def test_configured_bb_executable_timeout_and_native_project_are_used(self) -> None:
+        plan = planned()
+        self.assertIsInstance(plan, SpawnPlan)
+        transport, calls = bb_transport()
+        timeouts = []
+
+        def configured_transport(argv, timeout):  # noqa: ANN001 - transport protocol
+            timeouts.append(timeout)
+            return transport(argv, timeout)
+
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path("/state")
+        ), mock.patch(
+            "llm_collab.bb_client.subprocess_transport",
+            return_value=configured_transport,
+        ) as factory, mock.patch.object(
+            bb_spawn, "persist_assignment", return_value=Path("/state/thr_worker1.json")
+        ), mock.patch("builtins.print"):
+            self.assertEqual(0, bb_spawn.main(CLI_ARGS))
+        factory.assert_called_once_with(["/configured/bb", "--wrapper"])
+        spawn_argv = next(call for call in calls if call[:2] == ["thread", "spawn"])
+        self.assertEqual(
+            "proj_llm_collab", spawn_argv[spawn_argv.index("--project") + 1]
+        )
+        self.assertTrue(timeouts)
+        self.assertEqual({17.0}, set(timeouts))
+
+    def test_disabled_project_refuses_before_client_construction(self) -> None:
+        disabled = {**REGISTRY, "bb": {**REGISTRY["bb"], "enabled": False}}
+        with mock.patch.object(bb_spawn, "get_project", return_value=disabled), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            self.assertEqual(1, bb_spawn.main(CLI_ARGS))
+        client.assert_not_called()
+        self.assertIn("bb adapter is not enabled", emit.call_args.args[0])
+
+    def test_pre_task_launch_failure_is_retryable_exit_one(self) -> None:
+        plan = planned()
+        self.assertIsInstance(plan, SpawnPlan)
+
+        def missing_executable(_argv, _timeout):  # noqa: ANN001 - transport protocol
+            raise FileNotFoundError("configured bb is missing")
+
+        client = BbClient(missing_executable, enabled=True)
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path("/state")
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), mock.patch.object(bb_spawn, "_emit") as emit:
+            self.assertEqual(1, bb_spawn.main(CLI_ARGS))
+        rendered = emit.call_args.args[0]
+        self.assertIn(REFUSAL_TRANSPORT_FAILED, rendered)
+        self.assertNotIn("DO NOT RETRY", rendered)
 
 
 if __name__ == "__main__":

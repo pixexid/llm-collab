@@ -55,6 +55,7 @@ class SpawnPlan:
     """A spawn whose profile, isolation, and exact current base are proven."""
 
     project_id: str
+    native_project_id: str
     repo_path: Path
     base_sha: str
     environment: NewWorktree | Attached
@@ -100,7 +101,6 @@ def _git_read(
 def plan_spawn(
     *,
     assignment_kind: str,
-    project_id: str,
     registry_entry: Mapping[str, Any] | None,
     repo_target: str | None,
     base_sha: str,
@@ -148,7 +148,25 @@ def plan_spawn(
             f"base {base_sha!r} is a branch name or malformed revision; expected 40 hex",
         )
 
-    repos = registry_entry.get("repos") if isinstance(registry_entry, Mapping) else None
+    if not isinstance(registry_entry, Mapping):
+        return GateRefusal("registry_project_invalid", "registered project is not an object")
+    project_id = registry_entry.get("id")
+    if not isinstance(project_id, str) or not project_id:
+        return GateRefusal("registry_project_invalid", "registered project has no id")
+    base_ref = registry_entry.get("default_branch_base")
+    if not isinstance(base_ref, str) or not base_ref.strip():
+        return GateRefusal(
+            "registry_base_missing", "registered project has no default_branch_base"
+        )
+    base_ref = base_ref.strip()
+    bb = registry_entry.get("bb")
+    if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
+        return GateRefusal("bb_disabled", "bb adapter is not enabled for this project")
+    native_project_id = bb.get("project_id", project_id)
+    if not isinstance(native_project_id, str) or not native_project_id:
+        return GateRefusal("registry_bb_project_invalid", "bb.project_id is invalid")
+
+    repos = registry_entry.get("repos")
     keys = sorted(key for key in repos if isinstance(key, str) and key) if isinstance(repos, Mapping) else []
     if not keys:
         return GateRefusal("registry_repo_missing", "registered project has no repositories")
@@ -183,23 +201,26 @@ def plan_spawn(
 
     exact_base = base_sha.lower()
     try:
-        git(["fetch", "--quiet", "origin", "main"])
+        git(["fetch", "--quiet", "origin", base_ref])
         resolved = git(["rev-parse", "--verify", f"{exact_base}^{{commit}}"])
         if resolved.stdout.strip().lower() != exact_base:
             return GateRefusal("invalid_base_sha", f"base {exact_base} did not resolve exactly")
-        origin = git(["rev-parse", "--verify", "origin/main^{commit}"])
-        origin_main = origin.stdout.strip().lower()
-        if _SHA_RE.fullmatch(origin_main) is None:
-            return GateRefusal("git_read_failed", "git returned a malformed origin/main SHA")
+        origin_ref = f"origin/{base_ref}"
+        origin = git(["rev-parse", "--verify", f"{origin_ref}^{{commit}}"])
+        origin_base = origin.stdout.strip().lower()
+        if _SHA_RE.fullmatch(origin_base) is None:
+            return GateRefusal(
+                "git_read_failed", f"git returned a malformed {origin_ref} SHA"
+            )
         ancestor = git(
-            ["merge-base", "--is-ancestor", exact_base, origin_main], allowed=(0, 1)
+            ["merge-base", "--is-ancestor", exact_base, origin_base], allowed=(0, 1)
         )
         if ancestor.exit_code == 1:
             return GateRefusal(
                 "base_not_ancestor",
-                f"base {exact_base} is not an ancestor of origin/main {origin_main}",
+                f"base {exact_base} is not an ancestor of {origin_ref} {origin_base}",
             )
-        drift = git(["rev-list", "--count", f"{exact_base}..{origin_main}"])
+        drift = git(["rev-list", "--count", f"{exact_base}..{origin_base}"])
     except _GateFailure as error:
         return error.refusal
     try:
@@ -210,10 +231,11 @@ def plan_spawn(
         return GateRefusal(
             "base_behind_origin",
             f"base {exact_base} is {behind} commit{'s' if behind != 1 else ''} "
-            f"behind origin/main {origin_main}",
+            f"behind {origin_ref} {origin_base}",
         )
     return SpawnPlan(
         project_id,
+        native_project_id,
         repo_path,
         exact_base,
         environment,
@@ -291,6 +313,7 @@ def persist_assignment(
         "version": 1,
         "recorded_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project_id": plan.project_id,
+        "native_project_id": plan.native_project_id,
         "repo_path": str(plan.repo_path),
         "base_sha": plan.base_sha,
         "environment": environment,

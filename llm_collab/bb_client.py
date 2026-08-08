@@ -380,7 +380,16 @@ class BbClient:
                 ),
                 task_attempted=False,
             )
-        refusal = self._gate()
+        try:
+            refusal = self._gate()
+        except Exception as error:
+            return classified(
+                BbRefusal(
+                    REFUSAL_TRANSPORT_FAILED,
+                    f"pre-task bb gate failed: {error or type(error).__name__}",
+                ),
+                task_attempted=False,
+            )
         if refusal is not None:
             return classified(refusal, task_attempted=False)
         argv = [

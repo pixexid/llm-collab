@@ -20,7 +20,11 @@ from _helpers import (  # noqa: E402
     resolve_project_repo_path,
     write_file_durably,
 )
-from llm_collab.bb_client import BbClient, subprocess_transport  # noqa: E402
+from llm_collab.bb_client import BbClient  # noqa: E402
+from llm_collab.bb_continuation import (  # noqa: E402
+    BbContinuationRefused,
+    client_from_project,
+)
 from llm_collab.spawn_gate import (  # noqa: E402
     Attached,
     GateRefusal,
@@ -36,7 +40,6 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--assignment-kind", choices=("read-only", "writing"), required=True)
     result.add_argument("--collab-project", required=True)
     result.add_argument("--repo-target")
-    result.add_argument("--project", required=True, help="BB project ID")
     result.add_argument("--provider")
     result.add_argument("--model")
     result.add_argument("--reasoning-level")
@@ -57,6 +60,13 @@ def _emit(message: str) -> None:
         sys.stderr.flush()
     except (BrokenPipeError, OSError):
         pass
+
+
+def _configured_client(registry_entry: dict) -> BbClient | GateRefusal:
+    try:
+        return client_from_project(registry_entry)
+    except BbContinuationRefused as error:
+        return GateRefusal("bb_config_invalid", str(error))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,7 +90,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     plan = plan_spawn(
         assignment_kind=args.assignment_kind,
-        project_id=args.project,
         registry_entry=registry_entry,
         repo_target=args.repo_target,
         base_sha=args.base_sha,
@@ -96,12 +105,15 @@ def main(argv: list[str] | None = None) -> int:
         _emit(f"REFUSED: {plan.reason}: {plan.detail}")
         return 1
 
-    client = BbClient(subprocess_transport(["bb"]), enabled=True, timeout_seconds=60.0)
-    state_dir = project_state_dir(args.collab_project) / "bb-assignments"
+    client = _configured_client(registry_entry)
+    if isinstance(client, GateRefusal):
+        _emit(f"REFUSED: {client.reason}: {client.detail}")
+        return 1
+    state_dir = project_state_dir(plan.project_id) / "bb-assignments"
     outcome: object = None
     try:
         outcome = client.spawn(
-            project_id=plan.project_id,
+            project_id=plan.native_project_id,
             prompt=plan.prompt,
             profile=plan.profile,
             environment=(
