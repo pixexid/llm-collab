@@ -29,7 +29,7 @@ def answers(values: list[str]):
 
 
 class InitWorkspaceIdTest(unittest.TestCase):
-    def run_minimal_init(self, root: Path, supplied: list[str]) -> dict:
+    def run_minimal_init(self, root: Path, supplied: list[str]) -> tuple[dict, str]:
         agents = [
             {
                 "id": "operator",
@@ -42,15 +42,16 @@ class InitWorkspaceIdTest(unittest.TestCase):
             with patch.object(init_script, "_local_config", {}):
                 with patch.object(init_script, "collect_agents", return_value=agents):
                     with patch.object(init_script, "collect_projects", return_value=[]):
-                        with redirect_stdout(StringIO()):
+                        output = StringIO()
+                        with redirect_stdout(output):
                             init_script.main(input_fn=answers(supplied))
-        return json.loads((root / "collab.config.json").read_text())
+        return json.loads((root / "collab.config.json").read_text()), output.getvalue()
 
     def test_fresh_init_generates_and_persists_workspace_id(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch.object(init_script, "generate_workspace_id", return_value="ws_fresh123"):
-                config = self.run_minimal_init(
+                config, _ = self.run_minimal_init(
                     root,
                     ["test", str(root / "repos"), str(root / "state"), "15", "n"],
                 )
@@ -67,11 +68,28 @@ class InitWorkspaceIdTest(unittest.TestCase):
                 "generate_workspace_id",
                 side_effect=AssertionError("existing workspace identity must not rotate"),
             ):
-                config = self.run_minimal_init(
+                config, _ = self.run_minimal_init(
                     root,
                     ["y", "test", str(root / "repos"), str(root / "state"), "15", "n"],
                 )
             self.assertEqual(config["workspace_id"], "ws_existing123")
+
+    def test_fresh_init_prints_bounded_pm2_log_rotation_setup(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, output = self.run_minimal_init(
+                root,
+                ["test", str(root / "repos"), str(root / "state"), "15", "n"],
+            )
+
+        for command in (
+            "pm2 install pm2-logrotate",
+            "pm2 set pm2-logrotate:max_size 10M",
+            "pm2 set pm2-logrotate:retain 7",
+            "pm2 set pm2-logrotate:compress true",
+            "pm2 set pm2-logrotate:rotateInterval '0 0 * * *'",
+        ):
+            self.assertIn(command, output)
 
     def test_add_workspace_id_is_backup_protected_atomic_and_non_destructive(self) -> None:
         with TemporaryDirectory() as tmp:

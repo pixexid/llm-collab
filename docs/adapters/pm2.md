@@ -301,9 +301,37 @@ After this, PM2 and all running watchers restart automatically on reboot.
 
 ## Log locations
 
-Logs are written to `Logs/watchers/{agent}.pm2.{out,err}.log`.
+Apps defined by `pm2/ecosystem.config.cjs` write to
+`Logs/watchers/{agent}.pm2.{out,err}.log`. Apps started ad hoc without explicit
+`out_file` and `error_file` settings use PM2's default `~/.pm2/logs/` directory,
+so inspect both locations when accounting for disk usage.
 
 These files are gitignored.
+
+### Rotation and retention
+
+Use one `pm2-logrotate` instance for both locations. The module follows each
+active PM2 app's resolved output and error paths, including explicit ecosystem
+paths and PM2 defaults:
+
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 7
+pm2 set pm2-logrotate:compress true
+pm2 set pm2-logrotate:rotateInterval '0 0 * * *'
+```
+
+The retention policy is the current file plus seven gzip-compressed generations
+per PM2 log, with a 10 MiB size trigger and a daily rotation. Ordinary logs keep
+about one week of history; a noisy process may rotate sooner, deliberately
+bounding a crash loop instead of guaranteeing seven days at any write rate.
+
+Existing logs need an operator-owned disposition before rotation is enabled.
+Archive any history needed for diagnosis, especially unique crash-loop evidence,
+outside the live PM2 paths; do not blindly delete or truncate it. The module
+follows active app paths, so separately inspect orphaned files left by deleted
+PM2 entries.
 
 ## Codex app-server delivery sidecar
 

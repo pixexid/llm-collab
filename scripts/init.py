@@ -792,7 +792,12 @@ def main(*, input_fn: Callable[[str], str] | None = None):
         if a.get("activation", {}).get("type") not in ("human",):
             print(f"   bin/llm-collab init_agent_memory.py --agent {a['id']} --target generic")
     print()
-    print("3. Start PM2 watchers (optional, requires pm2):")
+    print("3. Configure PM2 log rotation, then start watchers (optional, requires pm2):")
+    print("   pm2 install pm2-logrotate")
+    print("   pm2 set pm2-logrotate:max_size 10M")
+    print("   pm2 set pm2-logrotate:retain 7")
+    print("   pm2 set pm2-logrotate:compress true")
+    print("   pm2 set pm2-logrotate:rotateInterval '0 0 * * *'")
     print("   bin/llm-collab pm2_watchers.py start --all")
     print()
     print("4. Create your first chat:")
