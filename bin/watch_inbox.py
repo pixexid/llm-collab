@@ -65,8 +65,8 @@ from _session_autobridge import (
 from inbox import (
     MAX_EXACT_SESSION_BYTES,
     ExactReadBudget,
-    exact_read_messages,
     exact_read_session,
+    select_exact_read_messages,
 )
 
 # The deployed launcher runs this file from ``bin/``; the provider packages live
@@ -191,14 +191,21 @@ def exact_session_messages(args) -> list[dict]:
             session = exact_read_session(args, budget)
         except Exception as error:
             raise ExactWatcherAuthorityError(str(error)) from error
-        messages, refusals = exact_read_messages(args, session, budget)
-        fatal_refusals = [
-            refusal for refusal in refusals if not refusal.get("repo_scope_only")
-        ]
-        if fatal_refusals:
-            raise ExactWatcherAuthorityError(
-                "exact_session_repo_scope_refused: "
-                f"{json.dumps(fatal_refusals, sort_keys=True)}"
+        messages, refusals, _refusal_only = select_exact_read_messages(
+            args, session, budget
+        )
+        for refusal in refusals:
+            emit(
+                {
+                    "ts": utc_now_str(),
+                    "event": "exact_session_refused",
+                    "detail": refusal["path"],
+                    "agent": args.me,
+                    "session_id": args.session,
+                    "message_path": refusal["path"],
+                    "reason": refusal["reason"],
+                },
+                args.json_output,
             )
     return messages
 

@@ -468,6 +468,24 @@ def exact_read_messages(
     return messages, refusals
 
 
+def select_exact_read_messages(
+    args, session: dict, budget: ExactReadBudget
+) -> tuple[list[dict], list[dict], bool]:
+    """Return routable messages, public refusals, and refusal-only status."""
+    messages, refusals = exact_read_messages(args, session, budget)
+    refusal_only = not messages and any(
+        not refusal.get("repo_scope_only") for refusal in refusals
+    )
+    return (
+        messages,
+        [
+            {"path": refusal["path"], "reason": refusal["reason"]}
+            for refusal in refusals
+        ],
+        refusal_only,
+    )
+
+
 def filter_messages(
     messages: list[dict],
     project: str | None,
@@ -952,7 +970,7 @@ def main():
         try:
             with active_read_budget(budget):
                 exact_session = exact_read_session(args, budget)
-                messages, repo_scope_refused = exact_read_messages(
+                messages, repo_scope_refused, refusal_only = select_exact_read_messages(
                     args, exact_session, budget
                 )
         except (
@@ -976,15 +994,7 @@ def main():
         # superseded/foreign binding must never fall through to the current session;
         # skipping it here lets the routable packets through without weakening that
         # selection fence.
-        binding_refused = any(
-            not refusal.get("repo_scope_only") for refusal in repo_scope_refused
-        )
-        # Surface refusals as {path, reason}; drop the internal source flag.
-        repo_scope_refused = [
-            {"path": refusal["path"], "reason": refusal["reason"]}
-            for refusal in repo_scope_refused
-        ]
-        if binding_refused and not messages:
+        if refusal_only:
             payload = {"messages": [], "repo_scope_refused": repo_scope_refused}
             if args.json_output:
                 print(json.dumps(payload, indent=2))
