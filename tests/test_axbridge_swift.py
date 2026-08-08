@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,24 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class AxbridgeSwiftBridgeTest(unittest.TestCase):
+    def test_cache_key_changes_with_source_content(self) -> None:
+        if shutil.which("shasum") is None:
+            self.skipTest("shasum not available")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "fixture.swift"
+            source.write_text("first", encoding="utf-8")
+            command = [
+                "bash",
+                str(ROOT / "tools" / "axbridge" / "test.sh"),
+                "--cache-key",
+                "swiftc -O fixture.swift -o",
+                str(source),
+            ]
+            first = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+            source.write_text("second", encoding="utf-8")
+            second = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        self.assertNotEqual(first, second)
+
     def test_axbridge_swift_fixtures_pass(self) -> None:
         if sys.platform != "darwin":
             self.skipTest("AX doorbell fixtures are macOS-only")

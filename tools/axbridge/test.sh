@@ -1,14 +1,50 @@
 #!/bin/bash
 # Focused axbridge tests (issue #77 / PR78): pure send-resolution + window
 # selection unit tests, plus the axsend-ensure wrapper argv-forwarding test.
+# Set AXBRIDGE_FORCE_REBUILD=1 to recompile both cached Swift fixtures.
 set -euo pipefail
+
+cache_key() {
+  local invocation="$1"
+  shift
+  {
+    printf '%s\n' "$invocation"
+    shasum -a 256 "$@" | awk '{print $1}'
+  } | shasum -a 256 | awk '{print $1}'
+}
+
+if [[ "${1:-}" == "--cache-key" ]]; then
+  [[ $# -ge 3 ]] || exit 64
+  cache_key "$2" "${@:3}"
+  exit
+fi
+
 here="$(cd "$(dirname "$0")" && pwd)"
-out="$(mktemp -t axsend-tests.XXXXXX)"
-cli="$(mktemp -t axsend-cli.XXXXXX)"
-trap 'rm -f "$out" "$cli"' EXIT
-swiftc -O -parse-as-library "$here/send-resolution.swift" "$here/send-resolution-tests.swift" -o "$out"
+cache_dir="${AXBRIDGE_CACHE_DIR:-${TMPDIR:-/tmp}/llm-collab-axbridge-swift-$UID}"
+mkdir -p -m 700 "$cache_dir"
+
+compile_cached() {
+  local name="$1"
+  shift
+  local -a command=(swiftc -O -parse-as-library "$@")
+  local invocation key cached building
+  printf -v invocation '%q ' "${command[@]}" -o
+  key="$(cache_key "$invocation" "$@")"
+  cached="$cache_dir/$name-$key"
+  if [[ "${AXBRIDGE_FORCE_REBUILD:-0}" == "1" || ! -x "$cached" ]]; then
+    building="$(mktemp "$cache_dir/.$name.$key.XXXXXX")"
+    if ! "${command[@]}" -o "$building"; then
+      rm -f "$building"
+      return 1
+    fi
+    mv -f "$building" "$cached"
+  fi
+  printf '%s\n' "$cached"
+}
+
+out="$(compile_cached send-resolution-tests "$here/send-resolution.swift" "$here/send-resolution-tests.swift")"
 "$out"
-swiftc -O -parse-as-library "$here/axsend.swift" "$here/send-resolution.swift" -o "$cli"
+cli="$(compile_cached axsend "$here/axsend.swift" "$here/send-resolution.swift")"
 for command in ring type; do
   set +e
   refusal="$("$cli" "$command" --app Claude --text probe 2>&1)"
