@@ -317,12 +317,20 @@ is expected to inspect each active PM2 app's `pm_out_log_path` and
 Treat that source-derived expectation as unverified until the post-enable
 coverage check below passes on the host.
 
+Before running `pm2 install pm2-logrotate`, complete the operator-owned
+disposition of existing logs. Installation starts the module and rotation
+immediately, so archive any history needed for diagnosis, especially unique
+crash-loop evidence, outside the live PM2 paths first; do not blindly delete or
+truncate it. The module target-list check covers active app paths only, so
+separately inspect orphaned files left by deleted PM2 entries.
+
 ```bash
 pm2 install pm2-logrotate
 pm2 set pm2-logrotate:max_size 10M
 pm2 set pm2-logrotate:retain 7
 pm2 set pm2-logrotate:compress true
 pm2 set pm2-logrotate:rotateInterval '0 0 * * *'
+bin/llm-collab pm2_watchers.py start --all
 ```
 
 Enabling is not complete until both path classes are verified. After waiting at
@@ -342,12 +350,6 @@ The retention policy is the current file plus seven gzip-compressed generations
 per PM2 log, with a 10 MiB size trigger and a daily rotation. Ordinary logs keep
 about one week of history; a noisy process may rotate sooner, deliberately
 bounding a crash loop instead of guaranteeing seven days at any write rate.
-
-Existing logs need an operator-owned disposition before rotation is enabled.
-Archive any history needed for diagnosis, especially unique crash-loop evidence,
-outside the live PM2 paths; do not blindly delete or truncate it. The module
-target-list check covers active app paths only, so separately inspect orphaned
-files left by deleted PM2 entries.
 
 ## Codex app-server delivery sidecar
 

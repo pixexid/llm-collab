@@ -792,7 +792,11 @@ def main(*, input_fn: Callable[[str], str] | None = None):
         if a.get("activation", {}).get("type") not in ("human",):
             print(f"   bin/llm-collab init_agent_memory.py --agent {a['id']} --target generic")
     print()
-    print("3. Configure PM2 log rotation, start watchers, then verify both log paths (optional, requires pm2):")
+    print("3. Preserve existing PM2 evidence, then configure and verify rotation (optional, requires pm2):")
+    print("   # SAFETY: installing pm2-logrotate starts rotation immediately.")
+    print("   # BEFORE installing it: complete the operator-owned disposition of existing logs.")
+    print("   # Archive needed diagnostic history outside live PM2 paths; do not delete or truncate blindly.")
+    print("   # Inspect orphaned files from deleted PM2 entries separately.")
     print("   pm2 install pm2-logrotate")
     print("   pm2 set pm2-logrotate:max_size 10M")
     print("   pm2 set pm2-logrotate:retain 7")

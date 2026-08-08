@@ -83,7 +83,11 @@ class InitWorkspaceIdTest(unittest.TestCase):
             )
 
         expected_flow = (
-            "Configure PM2 log rotation, start watchers, then verify both log paths",
+            "Preserve existing PM2 evidence, then configure and verify rotation",
+            "installing pm2-logrotate starts rotation immediately",
+            "BEFORE installing it: complete the operator-owned disposition of existing logs",
+            "Archive needed diagnostic history outside live PM2 paths; do not delete or truncate blindly",
+            "Inspect orphaned files from deleted PM2 entries separately",
             "pm2 install pm2-logrotate",
             "pm2 set pm2-logrotate:max_size 10M",
             "pm2 set pm2-logrotate:retain 7",
