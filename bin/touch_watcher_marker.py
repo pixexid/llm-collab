@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """touch_watcher_marker.py — the ONE writing shape for watcher liveness markers.
 
-Watcher templates call this once per cycle:
+Standalone callers can write the same marker contract with:
 
     python3.11 bin/touch_watcher_marker.py --project <project-id> \
         --name <worker-lifecycle|pr-artifacts|heartbeat> --session <session-id>
 
-The session id is supplied explicitly by the template: the session that
-launched the watcher knows its own Claude session id and passes it down, so
+The session id is supplied explicitly: the session that launched the watcher
+knows its own session id and passes it down, so
 ownership is recorded, never inferred (GH-726 I3). Freshness is the marker's
 mtime; `started_at` is preserved across rewrites by the same session. The
 reading side (and the format definition) lives in bin/_watcher_liveness.py.

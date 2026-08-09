@@ -1,0 +1,317 @@
+"""Discriminating tests for the standard orchestrator watchers (GH-727)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bin"))
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location(
+        "orchestrator_watch", ROOT / "bin" / "orchestrator_watch.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+watch = load_module()
+
+
+def config() -> watch.WatcherConfig:
+    return watch.WatcherConfig(
+        bb_executable=("configured-bb", "--wrapper"),
+        bb_project_id="native-project",
+        github_repo="owner/repo",
+        timeout_seconds=5.0,
+    )
+
+
+def signature(*, state: str = "open", merged: bool = False, head: str = "a" * 40):
+    return {"state": state, "merged": merged, "head": head, "timeline": []}
+
+
+class ProbeShapeTest(unittest.TestCase):
+    def test_wrong_shape_valid_json_is_not_a_worker_sample_or_marker_refresh(self) -> None:
+        for payload in ({}, {"error": "backend unavailable"}):
+            with self.subTest(payload=payload), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "worker-lifecycle",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.worker_cycle(
+                        config(), {}, call=lambda *_: payload, emit=lambda _line: None
+                    ),
+                    emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "wrong-shape valid JSON must not be a successful worker sample",
+            )
+            writer.assert_not_called()
+
+    def test_wrong_shape_valid_json_is_not_a_heartbeat_sample_or_marker_refresh(self) -> None:
+        def call(_executable, argv, _timeout):
+            return {} if argv[:2] == ("settings", "version") else {"threads": []}
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: watch.heartbeat_cycle(
+                    config(),
+                    call=call,
+                    enumerate_open=lambda *_: [],
+                    emit=lambda _line: None,
+                ),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(
+            completed,
+            "wrong-shape valid JSON must not be a successful heartbeat sample",
+        )
+        writer.assert_not_called()
+
+    def test_failed_probe_does_not_refresh_marker(self) -> None:
+        def failed(*_args):
+            raise watch.ProbeError("probe failed")
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "worker-lifecycle",
+                "project-a",
+                "session-a",
+                lambda: watch.worker_cycle(config(), {}, call=failed),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(completed, "a failed probe must skip marker refresh")
+        writer.assert_not_called()
+
+
+class EnumerationTest(unittest.TestCase):
+    def test_gh_pr_list_failure_skips_cycle_without_marker_refresh(self) -> None:
+        state = {"signatures": {}, "terminal_left": {}}
+
+        def failed(*_args):
+            raise watch.ProbeError("gh failed")
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: watch.pr_cycle(config(), state, enumerate_prs=failed),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(completed, "gh pr list failure must skip the cycle")
+        writer.assert_not_called()
+
+    def test_enumeration_over_cap_is_detected_and_does_not_refresh_marker(self) -> None:
+        payload = [{"number": 11}, {"number": 12}, {"number": 13}]
+
+        def over_cap(_kind, _repo, _cap):
+            return watch.open_numbers(
+                "pr", "owner/repo", 2, call=lambda *_: payload
+            )
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: watch.pr_cycle(
+                    config(),
+                    {"signatures": {}, "terminal_left": {}},
+                    enumerate_prs=over_cap,
+                    signature=lambda *_: signature(),
+                ),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(
+            completed,
+            "over-cap enumeration must be detected and skip the cycle",
+        )
+        writer.assert_not_called()
+
+    def test_gh_enumeration_requests_one_past_the_cap(self) -> None:
+        seen = []
+
+        def call(_executable, argv, _timeout):
+            seen.append(argv)
+            return [{"number": 1}, {"number": 2}]
+
+        self.assertEqual([1, 2], watch.open_numbers("issue", "owner/repo", 2, call=call))
+        self.assertIn("3", seen[0])
+
+    def test_heartbeat_count_over_cap_skips_marker_refresh(self) -> None:
+        def call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            return {"threads": []}
+
+        payload = [{"number": 21}, {"number": 22}, {"number": 23}]
+        for capped_kind in ("pr", "issue"):
+            def enumerate_open(kind, _repo, _cap):
+                if kind == capped_kind:
+                    return watch.open_numbers(kind, "owner/repo", 2, call=lambda *_: payload)
+                return []
+
+            with self.subTest(kind=capped_kind), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "heartbeat",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.heartbeat_cycle(
+                        config(),
+                        call=call,
+                        enumerate_open=enumerate_open,
+                        emit=lambda _line: None,
+                    ),
+                )
+                self.assertFalse(
+                    completed,
+                    f"an over-cap heartbeat {capped_kind} count must skip marker refresh",
+                )
+                writer.assert_not_called()
+
+
+class PrTerminalWindowTest(unittest.TestCase):
+    def test_first_open_pr_is_armed_from_empty_state(self) -> None:
+        state = {}
+        watch.pr_cycle(
+            config(),
+            state,
+            enumerate_prs=lambda *_: [3],
+            signature=lambda *_: signature(),
+            emit=lambda _line: None,
+        )
+        self.assertIn("3", state["signatures"])
+
+    def test_reopen_resets_terminal_countdown(self) -> None:
+        original = json.dumps(signature(state="closed"), sort_keys=True, separators=(",", ":"))
+        state = {"signatures": {"7": original}, "terminal_left": {"7": 1}}
+        samples = iter(
+            [signature(state="open"), *[signature(state="closed") for _ in range(29)]]
+        )
+        for cycle in range(30):
+            watch.pr_cycle(
+                config(),
+                state,
+                enumerate_prs=(lambda *_: [7]) if cycle == 0 else (lambda *_: []),
+                signature=lambda *_: next(samples),
+                emit=lambda _line: None,
+            )
+        self.assertIn(
+            "7",
+            state["signatures"],
+            "a reopened PR must receive a fresh full terminal countdown",
+        )
+        self.assertEqual(1, state["terminal_left"]["7"])
+
+    def test_merged_pr_is_polled_for_full_window_before_retiring(self) -> None:
+        encoded = json.dumps(signature(), sort_keys=True, separators=(",", ":"))
+        state = {"signatures": {"9": encoded}, "terminal_left": {}}
+        polls = 0
+
+        def merged(*_args):
+            nonlocal polls
+            polls += 1
+            return signature(state="closed", merged=True)
+
+        for _ in range(29):
+            watch.pr_cycle(
+                config(), state, enumerate_prs=lambda *_: [], signature=merged, emit=lambda _line: None
+            )
+        self.assertIn(
+            "9",
+            state["signatures"],
+            "a merged PR must remain armed through the full post-merge window",
+        )
+        watch.pr_cycle(
+            config(), state, enumerate_prs=lambda *_: [], signature=merged, emit=lambda _line: None
+        )
+        self.assertEqual(30, polls)
+        self.assertNotIn("9", state["signatures"])
+
+    def test_failed_per_pr_poll_does_not_commit_partial_state_or_refresh_marker(self) -> None:
+        encoded = json.dumps(signature(), sort_keys=True, separators=(",", ":"))
+        state = {"signatures": {"1": encoded, "2": encoded}, "terminal_left": {}}
+        before = json.loads(json.dumps(state))
+
+        def sample(_repo, number):
+            if number == 2:
+                raise watch.ProbeError("poll failed")
+            return signature(head="b" * 40)
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: watch.pr_cycle(
+                    config(), state, enumerate_prs=lambda *_: [], signature=sample
+                ),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(completed, "a failed per-PR poll must make the cycle incomplete")
+        self.assertEqual(before, state, "a failed cycle must not commit partial PR state")
+        writer.assert_not_called()
+
+
+class MarkerRefreshTest(unittest.TestCase):
+    def test_every_watcher_refreshes_only_after_a_completed_cycle(self) -> None:
+        for name in watch._watcher_liveness.WATCHER_NAMES:
+            with self.subTest(name=name), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    name,
+                    "project-a",
+                    "session-a",
+                    lambda: False,
+                    emit=lambda _line: None,
+                )
+                self.assertFalse(
+                    completed,
+                    f"failed cycles must not refresh the {name} marker",
+                )
+                writer.assert_not_called()
+
+    def test_every_watcher_writes_through_existing_project_scoped_writer(self) -> None:
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            for name in watch._watcher_liveness.WATCHER_NAMES:
+                self.assertTrue(
+                    watch.run_once(
+                        name,
+                        "project-a",
+                        "session-a",
+                        lambda: True,
+                        emit=lambda _line: None,
+                    )
+                )
+        self.assertEqual(
+            [
+                mock.call("project-a", "worker-lifecycle", "session-a"),
+                mock.call("project-a", "pr-artifacts", "session-a"),
+                mock.call("project-a", "heartbeat", "session-a"),
+            ],
+            writer.call_args_list,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
