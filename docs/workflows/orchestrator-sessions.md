@@ -6,6 +6,18 @@ Keep an orchestrator session observable, economical, and recoverable across a
 session boundary. This document owns the orchestrator watcher set, succession,
 supervisor relationship, model routing, and bb-update procedure.
 
+**Standing direction: bb is the workbench, and we adapt it to fit.** Use a
+builtin where it genuinely fits and build a custom plugin or runtime-side tool
+where it does not, so that each round leaves worker operation easier and harder
+to get wrong. Apply the ladder per instance — builtin as-is, builtin plus a
+guardrail, custom plugin, runtime-side tooling — and stop at the first rung that
+holds. Two constraints keep this from becoming plugin sprawl: every adopt-or-build
+decision rests on a hands-on probe of what the builtin actually does rather than
+on its documentation, and every customization must name a failure it makes
+impossible or a manual step it deletes. When a lane hits bb friction, capture it
+as a candidate with its rung rather than working around it silently; the running
+list lives on [GH-562](https://github.com/pixexid/llm-collab/issues/562).
+
 It does not own worker provisioning, profile availability, delegation, lane
 limits, or PR gates. Use
 [`bb-workers.md`](bb-workers.md),

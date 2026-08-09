@@ -50,14 +50,26 @@ create the environment here and attach to it.
 
 BB has no read-only permission mode: `accept-edits`, `auto`, and `full` are all
 write-capable. `accept-edits` below is the least-permissive available mode, not
-an enforcement control. The `pi` provider rejects `accept-edits` and supports
-only `full`; provision with a provider that currently accepts `accept-edits`,
-then attach the `pi` writer to the verified environment. Check current metadata
-after initializing `bb_cmd` below with
+an enforcement control.
+
+**`full` is the intended mode for a worker, by operator policy.** A restricted
+mode prompts for permission on trivial actions, which defeats the point of
+delegating. Containment does not come from the permission mode and never did: it
+comes from worktree isolation, the frozen delegation contract's MUST and MUST
+NOT clauses, and the review gates. Permission mode is therefore not a control,
+and not a factor when routing a lane to a profile. Choose `accept-edits` for a
+preflight because a probe has nothing to write, not because it is safer.
+
+That matters here because the `pi` provider rejects `accept-edits` and supports
+only `full`, so a `pi` preflight is impossible: provision with a provider that
+currently accepts `accept-edits`, then attach the `pi` writer to the verified
+environment. Check current metadata after initializing `bb_cmd` below with
 `"${bb_cmd[@]}" provider models <provider> --environment <id> --json`, and treat
-the spawn's own HTTP 400 as authoritative. The no-write prompt bounds the
-preflight; the exact post-turn checks below provide the proof. Resolve and
-record the requested base SHA before spawning:
+the spawn's own HTTP 400 as authoritative. Do not freeze a provider-to-mode
+table here; that is live provider metadata.
+
+The no-write prompt bounds the preflight; the exact post-turn checks below
+provide the proof. Resolve and record the requested base SHA before spawning:
 
 Resolve it **in the selected repository**, not in whatever checkout you happen to
 be standing in. Unscoped `git` reads the current checkout's `origin`, so on any
