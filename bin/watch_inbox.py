@@ -1074,6 +1074,25 @@ def dispatch_autobridge(
                     action_event["event"] = "autobridge_consumed"
                 elif (
                     action.get("effective_action") == "runtime_trigger"
+                    and runtime_result.get("timed_out")
+                ):
+                    # GH-688 P2: a timed-out generic wake is ambiguous -- the
+                    # command ran for the full budget and the outcome was lost --
+                    # so it reports returncode 0 (retry-suppressing) but is NOT a
+                    # clean wake. Emit a DISTINCT event that preserves timed_out
+                    # and the unobserved terminal status, so the recovery workflow
+                    # sees an explicitly ambiguous delivery rather than an
+                    # apparent success. This channel already reported success
+                    # while nothing dispatched; an ambiguous outcome that logs as
+                    # a wake is the same failure of signal.
+                    action_event.update(
+                        event="autobridge_wake_timed_out_ambiguous",
+                        returncode=runtime_result.get("returncode"),
+                        terminal_status=runtime_result.get("terminal_status"),
+                        delivery_observed=runtime_result.get("delivery_observed"),
+                    )
+                elif (
+                    action.get("effective_action") == "runtime_trigger"
                     and runtime_ok
                     and not runtime_result.get("skipped")
                 ):

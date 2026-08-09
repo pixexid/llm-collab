@@ -1533,6 +1533,230 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertNotEqual(0, result["actions"][0]["runtime_result"]["returncode"])
 
+    def test_timed_out_wake_stays_suppressed_when_a_downstream_settlement_step_fails(self):
+        """GH-688 P1: the suppression is a property of durable state, not a dict.
+
+        A timed-out wake is ambiguous (the command may have landed), so once the
+        outcome is ambiguous every downstream failure must be retry-suppressing.
+        In HEAD 1 the seam returned returncode 0 but the processed state was only
+        written later, AFTER the operator-turn-summary and UI-refresh lease
+        assertions and the standard mark. If the UI-refresh lease refused (or
+        save_session failed) the packet stayed unprocessed and the next poll ran
+        the command again -- a second execution of a non-idempotent call whose
+        first outcome may have landed. The fix persists the processed state at the
+        execution boundary, before those steps, so a failing downstream
+        settlement step cannot make the timeout retryable. Parameterized over
+        Amiga and Nuvyr because this changes dispatch/retry behaviour in a shared
+        seam, and the mutation proof must fail on the non-Amiga path too.
+        """
+        real_fenced = session_autobridge_lib.activation_fenced_mutation
+
+        def fenced(_session, msg, *, boundary, mutation):
+            # The UI-refresh lease assertion is the failing downstream settlement
+            # step: it refuses AFTER the execution boundary. Under the defect it
+            # resets should_mark_processed and `continue`s past the mark, so the
+            # packet stays unprocessed and the next poll re-runs the command.
+            if boundary == "runtime_ui_refresh":
+                return False, {
+                    "event": "activation_assert_refused",
+                    "message_path": msg["path"],
+                    "boundary": boundary,
+                    "reason": "lease_refused_test",
+                    "owner": None,
+                }, None
+            return real_fenced(_session, msg, boundary=boundary, mutation=mutation)
+
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                session = {
+                    "session_id": f"SESSION-TIMEOUT-DURABLE-{project.upper()}",
+                    "agent_id": "claude",
+                    "project_id": project,
+                    "mode": "auto-read",
+                    "wake_strategy": "runtime_trigger",
+                    "runtime": {
+                        "family": "claude_app",
+                        "session_id": f"thread-{project}",
+                        "command": ["wake-cli", "--prompt"],
+                        "timeout_seconds": 1,
+                    },
+                }
+                message = {
+                    "path": f"Chats/timeout-durable-{project}/packet.md",
+                    "frontmatter": {"from": "codex", "to": "claude"},
+                }
+                prepared = ({**session, "processed_messages": [message["path"]]}, "{}")
+
+                def settle(_session, path, *, prepared=None):
+                    _session.setdefault("processed_messages", [])
+                    if path not in _session["processed_messages"]:
+                        _session["processed_messages"].append(path)
+
+                run_mock = Mock(
+                    side_effect=session_autobridge_lib.subprocess.TimeoutExpired(
+                        cmd=session["runtime"]["command"], timeout=1
+                    )
+                )
+                with patch.object(
+                    session_autobridge_lib, "load_session", return_value=session
+                ), patch.object(
+                    session_autobridge_lib, "session_is_dispatchable",
+                    return_value=(True, "ok"),
+                ), patch.object(
+                    session_autobridge_lib, "matching_unread_messages",
+                    return_value=[message],
+                ), patch.object(
+                    session_autobridge_lib, "processed_messages",
+                    side_effect=lambda s: set(s.get("processed_messages", [])),
+                ), patch.object(
+                    session_autobridge_lib, "message_targets_session",
+                    return_value=(True, "test"),
+                ), patch.object(
+                    session_autobridge_lib, "should_skip_for_loop_protection",
+                    return_value=(False, "ok"),
+                ), patch.object(
+                    session_autobridge_lib, "resolve_effective_action",
+                    return_value=("runtime_trigger", "test"),
+                ), patch.object(
+                    session_autobridge_lib, "resolve_session_receive_binding",
+                    return_value=(True, None),
+                ), patch.object(
+                    session_autobridge_lib, "message_needs_canonical_materialization",
+                    return_value=False,
+                ), patch.object(
+                    session_autobridge_lib, "claim_message_activation",
+                    return_value=(True, None),
+                ), patch.object(
+                    session_autobridge_lib, "reserve_message_result",
+                    return_value=prepared,
+                ), patch.object(
+                    session_autobridge_lib.subprocess, "run", new=run_mock
+                ), patch.object(
+                    session_autobridge_lib, "activation_fenced_mutation",
+                    side_effect=fenced,
+                ), patch.object(
+                    session_autobridge_lib, "refresh_runtime_ui", return_value={}
+                ), patch.object(
+                    session_autobridge_lib, "write_operator_turn_summary",
+                    return_value={},
+                ), patch.object(
+                    session_autobridge_lib, "append_event"
+                ), patch.object(
+                    session_autobridge_lib, "mark_message_processed",
+                    side_effect=settle,
+                ) as mark_processed:
+                    # Poll 1: the wake times out, then the downstream UI-refresh
+                    # lease refuses.
+                    session_autobridge_lib.dispatch_session(
+                        session["session_id"], project_id=project
+                    )
+                    first_poll_marks = mark_processed.call_count
+                    first_poll_runs = run_mock.call_count
+                    # Poll 2: the packet is durably processed, so the command must
+                    # NOT be executed a second time after an ambiguous outcome.
+                    session_autobridge_lib.dispatch_session(
+                        session["session_id"], project_id=project
+                    )
+
+                self.assertEqual(
+                    1,
+                    first_poll_marks,
+                    f"{project}: the timed-out wake must be durably marked processed at "
+                    "the execution boundary even when a downstream settlement step fails",
+                )
+                self.assertEqual(
+                    first_poll_runs,
+                    run_mock.call_count,
+                    f"{project}: a timed-out wake must not be executed a second time after "
+                    "an ambiguous outcome, even when a downstream settlement step fails",
+                )
+
+    def test_watch_inbox_emits_a_distinct_ambiguous_event_for_a_timed_out_wake(self):
+        """GH-688 P2: an ambiguous wake must not log as a successful wake.
+
+        A timed-out generic wake reports returncode 0 (retry-suppressing) but is
+        NOT a clean wake -- the command ran for the full budget and the outcome
+        was lost. watch_inbox must emit a DISTINCT event preserving timed_out and
+        the unobserved terminal_status, not autobridge_wake_signaled, so the
+        recovery workflow sees an explicitly ambiguous delivery rather than an
+        apparent success. This channel already reported success while nothing
+        dispatched; an ambiguous outcome that logs as a wake is the same failure
+        of signal.
+        """
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                session_id = f"SESSION-TIMEOUT-LOG-{project.upper()}"
+                timed_out_action = {
+                    "event": "message_dispatched",
+                    "message_path": f"Chats/timeout-log-{project}/packet.md",
+                    "effective_action": "runtime_trigger",
+                    "runtime_result": {
+                        "returncode": 0,
+                        "timed_out": True,
+                        "terminal_status": "unobserved",
+                        "delivery_observed": False,
+                        "delivery_accepted": False,
+                    },
+                }
+                dispatch_result = {
+                    "session_id": session_id,
+                    "dispatchable": True,
+                    "reason": "ok",
+                    "matched_messages": 1,
+                    "actions": [timed_out_action],
+                }
+                emitted: list[dict] = []
+                with patch.object(
+                    watch_inbox_lib, "autobridge_session_ids", return_value=[session_id]
+                ), patch.object(
+                    watch_inbox_lib, "load_session",
+                    return_value={"session_id": session_id, "project_id": project},
+                ), patch.object(
+                    watch_inbox_lib, "session_has_exact_canonical_binding",
+                    return_value=True,
+                ), patch.object(
+                    watch_inbox_lib, "_observe_bb_session", return_value=None,
+                ), patch.object(
+                    watch_inbox_lib, "_bootstrap_bb_before_dispatch", return_value=[],
+                ), patch.object(
+                    watch_inbox_lib, "dispatch_session", return_value=dispatch_result,
+                ), patch.object(
+                    watch_inbox_lib, "emit",
+                    side_effect=lambda event, _json: emitted.append(event),
+                ), patch.object(
+                    watch_inbox_lib, "mark_messages_read"
+                ):
+                    watch_inbox_lib.dispatch_autobridge(
+                        "claude", json_output=False, project_id=project
+                    )
+
+                wake_events = [
+                    e for e in emitted
+                    if e.get("event") in {
+                        "autobridge_wake_signaled",
+                        "autobridge_wake_timed_out_ambiguous",
+                    }
+                ]
+                self.assertEqual(
+                    1,
+                    len(wake_events),
+                    f"{project}: expected exactly one wake-class event, got {emitted}",
+                )
+                self.assertEqual(
+                    "autobridge_wake_timed_out_ambiguous",
+                    wake_events[0]["event"],
+                    f"{project}: a timed-out wake must not log as autobridge_wake_signaled",
+                )
+                self.assertEqual(
+                    "unobserved",
+                    wake_events[0]["terminal_status"],
+                    f"{project}: the ambiguous event must preserve terminal_status",
+                )
+                self.assertFalse(
+                    wake_events[0]["delivery_observed"],
+                    f"{project}: the ambiguous event must preserve delivery_observed",
+                )
+
     def test_inbox_persistence_uses_the_durable_writer(self):
         with patch.object(helpers_lib, "write_file_durably") as durable:
             helpers_lib.save_agent_inbox("codex", {"agent": "codex", "unread": [], "read": []})

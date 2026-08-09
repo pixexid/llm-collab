@@ -4588,6 +4588,13 @@ def dispatch_session(
             "target_session_id": message["frontmatter"].get("target_session_id"),
         }
         should_mark_processed = True
+        # A timed-out generic wake is ambiguous (the command may have landed), so
+        # its retry-suppression must be DURABLE at the execution boundary, not
+        # held only in the returned dict. When set, the processed state was
+        # persisted immediately after the trigger and the later standard mark is
+        # skipped -- the UI-refresh lease assertion and save_session that follow
+        # the boundary can no longer make the ambiguous outcome retryable.
+        ambiguous_wake_settled_early = False
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
@@ -4722,6 +4729,24 @@ def dispatch_session(
                 continue
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
+            # GH-688 P1: a timed-out wake is ambiguous (the command may have
+            # landed), so its retry-suppression is a property of DURABLE state,
+            # not the returned dict. Persist the processed state NOW, at the
+            # execution boundary, before the operator-turn-summary and UI-refresh
+            # lease assertions and before the standard mark -- any of those can
+            # fail (lease refused, save_session error) and, before this mark,
+            # leave the packet unprocessed so the next poll runs the command
+            # again: a second execution of a non-idempotent call whose first
+            # outcome may have landed. The command already ran, so the mark is
+            # unconditional (ungated): lease state cannot make an ambiguous
+            # outcome retryable. The standard mark below is skipped for this
+            # message because the settlement is already durable.
+            if runtime_result.get("timed_out"):
+                mark_message_processed(
+                    session, message["path"], prepared=prepared_result
+                )
+                ambiguous_wake_settled_early = True
+                event["ambiguous_wake_settled_early"] = True
             if runtime_delivery_accepted(runtime_result):
                 asserted, assertion_event, _ = activation_fenced_mutation(
                     session,
@@ -4786,7 +4811,7 @@ def dispatch_session(
                 continue
             event["relay_result"] = relay_result
 
-        if should_mark_processed:
+        if should_mark_processed and not ambiguous_wake_settled_early:
             if message.get("activation_lease"):
                 asserted, assertion_event, _ = activation_fenced_mutation(
                     session,
