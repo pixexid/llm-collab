@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 18 -->
+<!-- CONTRACT_VERSION: 19 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,14 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v19 (2026-08-09) makes a named inbox owner a prerequisite before a
+project's first lane; the per-project orchestrator owns that project's drain.
+This changes what a worker may start. Inbox readers are already project-exact,
+so a missing owner produces no refusal or error: a lane can run while nobody
+drains its project and stall silently. A cached worker cannot discover this
+prerequisite unless the version signal tells it to reread the contract. Related
+GH-726.
 
 Contract v18 (2026-08-09) adds
 [`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md) to Required
