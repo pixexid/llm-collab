@@ -6,12 +6,13 @@ import unittest
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from llm_collab.bb_client import BbEvent, BbEventPage, BbQueued, BbRefusal
+from llm_collab.bb_client import BbEvent, BbEventPage, BbQueued, BbRefusal, REFUSAL_TIMED_OUT
 from llm_collab.bb_continuation import (
     BB_CONTINUATION_AMBIGUOUS,
     BB_CONTINUATION_COMPLETED,
     BB_CONTINUATION_DUPLICATE,
     BB_CONTINUATION_QUEUED,
+    BB_CONTINUATION_REFUSED,
     BbContinuationRefused,
     continue_bb_thread,
     observe_bb_thread,
@@ -467,7 +468,27 @@ class BbContinuationTest(unittest.TestCase):
             store.close()
             tmp.cleanup()
 
-    def test_clean_native_refusal_is_durable_and_not_retried(self):
+    def test_clean_pre_acceptance_refusal_is_retried_across_polls_not_stranded(self):
+        """GH-691 head 2: a clean pre-acceptance refusal must stay retryable on the
+        SECOND poll, not just the first.
+
+        Head 1 made the CURRENT poll return nonzero, but the refusal had already
+        appended a rejected_before_acceptance receipt, so the NEXT poll hit the
+        selected_receipt branch and returned "duplicate" -- which the seam treats
+        as delivery_accepted -- and the packet was marked processed without ever
+        calling bb again: stranded after one extra poll. This test INVERTS the
+        assertion that the prior test (test_clean_native_refusal_is_durable_
+        and_not_retried) used to pin that stranding: that test asserted
+        second.state == DUPLICATE and len(sent) == 1, encoding the defect rather
+        than catching it. A duplicate of a rejected_before_acceptance receipt is
+        not a delivery (codex_delivery.py: that state "would authorize a blind
+        retry"), so the duplicate branch now consults the receipt STATE and falls
+        through to re-send.
+
+        The receipt is still durable evidence (outcome stays
+        rejected_before_acceptance); what changed is that the reader no longer
+        treats it as proof of delivery.
+        """
         tmp, store, session, materialized = self.open_fixture()
         try:
             client = FailingBbClient()
@@ -486,9 +507,20 @@ class BbContinuationTest(unittest.TestCase):
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
-            self.assertEqual("failed", first.state)
-            self.assertEqual(BB_CONTINUATION_DUPLICATE, second.state)
-            self.assertEqual(1, len(client.sent))
+            self.assertEqual(BB_CONTINUATION_REFUSED, first.state)
+            self.assertEqual(
+                BB_CONTINUATION_REFUSED,
+                second.state,
+                "a pre-acceptance refusal must NOT strand as 'duplicate' on the "
+                "second poll; the rejected_before_acceptance receipt authorizes a "
+                "retry, so the call re-sends and stays retryable",
+            )
+            self.assertEqual(
+                2,
+                len(client.sent),
+                "the second poll re-sends to bb (genuine retry) -- INVERTED from the "
+                "prior test's len==1, which pinned the no-resend stranding",
+            )
             delivery = store.read_canonical_delivery(
                 workspace_id=WORKSPACE,
                 scope_kind="project",
@@ -496,10 +528,173 @@ class BbContinuationTest(unittest.TestCase):
                 message_id=str(materialized["message_id"]),
                 delivery_id=str(materialized["delivery_id"]),
             )
-            self.assertEqual("rejected_before_acceptance", delivery["outcome"])
             self.assertEqual(
                 "rejected_before_acceptance",
-                delivery["selected_receipt"]["state"],
+                delivery["outcome"],
+                "the refusal receipt is still durable evidence that nothing was "
+                "delivered; the fix is that the reader no longer treats it as a delivery",
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_pre_acceptance_refusal_retry_holds_for_amiga_and_nuvyr_scopes(self):
+        """GH-691 shared contract: the cross-poll retry must hold for Amiga AND a
+        registered non-Amiga project.
+
+        continue_bb_thread is scoped by project_id (it is the ledger
+        scope_identity), so the duplicate-branch fix is exercised under each
+        project's own scope. This is the project-aware mutation proof: a fix that
+        strands the packet on the second poll would fail on BOTH projects, not
+        just Amiga -- the exact clause missed on GH-689 and caught at review.
+
+        Both directions, across polls, per project:
+          * refusal  -- re-sent on poll 2 (retryable, NOT stranded).
+          * accepted -- suppresses on poll 2 (a genuine duplicate of an ACCEPTED
+            delivery still does not re-send; the fix narrows the short-circuit,
+            it does not remove it).
+        """
+        import sys
+        module = sys.modules[__name__]
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project, direction="refusal"):
+                with patch.multiple(
+                    module,
+                    PROJECT=project,
+                    CHAT=f"CHAT-{project}",
+                    NATIVE_THREAD=f"thread-{project}",
+                ):
+                    tmp, store, session, materialized = self.open_fixture()
+                try:
+                    client = FailingBbClient()
+                    with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                        first = continue_bb_thread(
+                            store, client=client, session=session,
+                            materialized=materialized, observed_at_utc=NOW,
+                        )
+                        second = continue_bb_thread(
+                            store, client=client, session=session,
+                            materialized=materialized, observed_at_utc=NOW,
+                        )
+                    self.assertEqual(BB_CONTINUATION_REFUSED, first.state)
+                    self.assertEqual(
+                        BB_CONTINUATION_REFUSED, second.state,
+                        f"{project}: a pre-acceptance refusal must not strand as "
+                        "'duplicate' on the second poll",
+                    )
+                    self.assertEqual(
+                        2, len(client.sent),
+                        f"{project}: the second poll re-sends to bb (genuine retry)",
+                    )
+                finally:
+                    store.close()
+                    tmp.cleanup()
+
+            with self.subTest(project=project, direction="accepted"):
+                with patch.multiple(
+                    module,
+                    PROJECT=project,
+                    CHAT=f"CHAT-{project}",
+                    NATIVE_THREAD=f"thread-{project}",
+                ):
+                    tmp, store, session, materialized = self.open_fixture()
+                try:
+                    client = FakeBbClient()  # BbQueued -> accepted
+                    with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                        first = continue_bb_thread(
+                            store, client=client, session=session,
+                            materialized=materialized, observed_at_utc=NOW,
+                        )
+                        second = continue_bb_thread(
+                            store, client=client, session=session,
+                            materialized=materialized, observed_at_utc=NOW,
+                        )
+                    self.assertEqual(BB_CONTINUATION_QUEUED, first.state)
+                    self.assertEqual(
+                        BB_CONTINUATION_DUPLICATE, second.state,
+                        f"{project}: a genuine duplicate of an ACCEPTED delivery "
+                        "still suppresses on poll 2",
+                    )
+                    self.assertEqual(
+                        1, len(client.sent),
+                        f"{project}: an accepted duplicate does not re-send",
+                    )
+                finally:
+                    store.close()
+                    tmp.cleanup()
+
+    def test_pre_acceptance_refusal_is_refused_but_timed_out_is_ambiguous(self):
+        """GH-691: the two refusal outcomes must be distinct tokens, not one
+        "failed" string. This is the module-level mirror of GH-688's two-direction
+        rule: everything past the success-or-ambiguity boundary is
+        retry-suppressing, and a CLEAN pre-acceptance refusal is the carve-out that
+        must NOT be suppressed.
+
+        A clean refusal (reason neither ambiguous nor timed out) means bb refused
+        the message BEFORE accepting it -- nothing was delivered -- so it returns
+        BB_CONTINUATION_REFUSED, never the bare "failed" that observe_bb_thread
+        reuses for a post-delivery terminal. A timed-out refusal is ambiguous (the
+        send may have landed) so it stays BB_CONTINUATION_AMBIGUOUS and
+        retry-suppressing. One token cannot carry both contracts; a test asserting
+        only the refused direction cannot tell this fix from one that suppresses
+        every refusal.
+        """
+        # Direction 1: a clean pre-acceptance refusal returns the distinct
+        # "refused" token, not "failed".
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            clean = FailingBbClient()  # BbRefusal("bb_transport_failed", ...)
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                result = continue_bb_thread(
+                    store,
+                    client=clean,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+            self.assertEqual(
+                BB_CONTINUATION_REFUSED,
+                result.state,
+                "a clean pre-acceptance refusal is a distinct token from the "
+                "post-delivery \"failed\" terminal; nothing was delivered",
+            )
+            self.assertNotEqual(
+                "failed",
+                result.state,
+                "the bare \"failed\" string carries the post-delivery contract in "
+                "observe_bb_thread and must not reach the dispatch seam here",
+            )
+            self.assertEqual(1, len(clean.sent), "the native send ran exactly once")
+        finally:
+            store.close()
+            tmp.cleanup()
+
+        # Direction 2: a timed-out refusal is ambiguous and retry-suppressing --
+        # the opposite half of the same rule, unchanged by this fix.
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            class TimedOutBbClient(FakeBbClient):
+                def send(self, *, thread_id, message, mode="queue-if-active"):
+                    self.sent.append((thread_id, message, mode))
+                    return BbRefusal(REFUSAL_TIMED_OUT, "native send timed out")
+
+            timed_out = TimedOutBbClient()
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                result = continue_bb_thread(
+                    store,
+                    client=timed_out,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+            self.assertEqual(
+                BB_CONTINUATION_AMBIGUOUS,
+                result.state,
+                "a timed-out refusal is ambiguous (the send may have landed) and "
+                "stays retry-suppressing, the opposite half of the rule",
+            )
+            self.assertEqual(
+                1, len(timed_out.sent), "the native send ran exactly once and is not retried"
             )
         finally:
             store.close()

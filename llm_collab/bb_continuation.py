@@ -39,7 +39,15 @@ from llm_collab.session_lifecycle import BbLifecycleProvider
 BB_CONTINUATION_QUEUED = "queued"
 BB_CONTINUATION_DUPLICATE = "duplicate"
 BB_CONTINUATION_AMBIGUOUS = "ambiguous"
+# A pre-acceptance refusal: the native send was refused BEFORE bb accepted the
+# message, so nothing was delivered (receipt_state "rejected_before_acceptance").
+# This is distinct from BB_CONTINUATION_FAILED, which observe_bb_thread emits
+# via _terminal_state for a thread that already STARTED and then failed/cancelled
+# -- a genuinely post-delivery terminal. One token must not carry both contracts
+# at the dispatch seam (GH-691): continue_bb_thread returns "refused", never
+# "failed"; observe_bb_thread returns "failed", never "refused".
 BB_CONTINUATION_FAILED = "failed"
+BB_CONTINUATION_REFUSED = "refused"
 BB_CONTINUATION_COMPLETED = "completed"
 
 _MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
@@ -363,7 +371,7 @@ def continue_bb_thread(
     if delivery is None:
         raise BbContinuationRefused("canonical delivery is missing")
     selected = delivery.get("selected_receipt")
-    if isinstance(selected, Mapping):
+    if isinstance(selected, Mapping) and selected.get("state") != "rejected_before_acceptance":
         return BbContinuationResult(
             BB_CONTINUATION_DUPLICATE,
             "canonical delivery already has a receipt",
@@ -372,6 +380,15 @@ def continue_bb_thread(
             attempt_id=attempt_id,
             receipt_id=str(selected["receipt_id"]),
         )
+    # A rejected_before_acceptance receipt is a pre-acceptance refusal: the send
+    # was refused BEFORE bb accepted it, nothing was delivered, and the receipt
+    # authorizes a retry (see codex_delivery.py -- that state "would authorize a
+    # blind retry"). It must NOT short-circuit as a duplicate, or the packet is
+    # stranded on the next poll: the watcher would mark it processed without ever
+    # calling bb again. Fall through and re-send so the packet stays retryable
+    # across polls (GH-691). accepted/completed/ambiguous receipts still short-
+    # circuit above -- a duplicate of those is a real delivery (or, for ambiguous,
+    # a send that may have landed and must not be re-sent).
 
     row = _observation(store, context, observed_at_utc)
     pending_ids = (
@@ -467,7 +484,7 @@ def continue_bb_thread(
             ids=(message_id, delivery_id, attempt_id),
         )
         return BbContinuationResult(
-            BB_CONTINUATION_AMBIGUOUS if ambiguous else BB_CONTINUATION_FAILED,
+            BB_CONTINUATION_AMBIGUOUS if ambiguous else BB_CONTINUATION_REFUSED,
             native.detail,
             message_id=message_id,
             delivery_id=delivery_id,
@@ -782,6 +799,7 @@ __all__ = [
     "BB_CONTINUATION_DUPLICATE",
     "BB_CONTINUATION_FAILED",
     "BB_CONTINUATION_QUEUED",
+    "BB_CONTINUATION_REFUSED",
     "BbContinuationRefused",
     "BbContinuationResult",
     "BbObservationResult",

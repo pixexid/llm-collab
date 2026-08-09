@@ -40,6 +40,7 @@ import inbox as inbox_lib
 import session_autobridge as session_autobridge_cli
 import watch_inbox as watch_inbox_lib
 from _helpers import parse_frontmatter
+from llm_collab.bb_continuation import BbContinuationResult
 from llm_collab.ledger import LedgerPaths, LedgerStore
 import llm_collab.ledger.store as store_module
 from llm_collab.session_lifecycle import (
@@ -1720,6 +1721,109 @@ class SessionAutobridgeTest(unittest.TestCase):
                         (session_id, message_path),
                         session_autobridge_lib._UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS,
                         f"{project}: a successful replay clears the in-process refusal",
+                    )
+
+    def _bb_continuation_runtime_result(self, project, continuation_state):
+        """Drive the REAL execute_runtime_trigger for the bb family against a
+        controlled continue_bb_thread return, so the dispatch seam's
+        state -> (returncode, delivery_accepted) mapping is exercised directly.
+
+        The seam is the shared contract this change touches, so AGENTS.md's
+        Project Boundary requires it to hold for both projects; project_id is
+        threaded onto the session so the boundary check runs for real.
+        """
+        session = {
+            "session_id": f"SESSION-BB-REFUSAL-{project.upper()}",
+            "agent_id": "glmpi",
+            "project_id": project,
+            "runtime": {"family": "bb"},
+        }
+        message = {"path": f"Chats/bb-{project}/packet.md"}
+        materialized = {
+            "materialized": True,
+            "message_id": "msg_" + "a" * 64,
+            "delivery_id": "delivery_" + "b" * 64,
+            "attempt_id": "attempt_" + "c" * 64,
+            "registry_revision": "sha256:" + "d" * 64,
+        }
+        result_obj = BbContinuationResult(state=continuation_state, detail="controlled")
+        with patch.object(
+            session_autobridge_lib, "bb_bootstrap_enabled", return_value=True
+        ), patch.object(
+            session_autobridge_lib, "config_get", return_value="ws-test"
+        ), patch.object(
+            session_autobridge_lib, "project_state_root", return_value="/tmp/unused"
+        ), patch.object(
+            session_autobridge_lib, "get_project", return_value={"id": project}
+        ), patch.object(
+            session_autobridge_lib, "now_utc"
+        ), patch.object(
+            LedgerPaths, "derive", return_value=object()
+        ), patch(
+            "llm_collab.bb_continuation.continue_bb_thread", return_value=result_obj
+        ), patch(
+            "llm_collab.bb_continuation.client_from_project", return_value=object()
+        ), patch.object(
+            store_module.LedgerStore, "open_writer"
+        ) as open_writer:
+            open_writer.return_value.__enter__ = lambda self_: object()
+            open_writer.return_value.__exit__ = lambda *args: None
+            return session_autobridge_lib.execute_runtime_trigger(
+                session, message, canonical_materialization=materialized
+            )
+
+    def test_pre_acceptance_bb_refusal_is_not_delivery_accepted_on_amiga_and_nuvyr(self):
+        """GH-691: a pre-acceptance bb refusal must not be reported as
+        delivery_accepted, on BOTH projects.
+
+        The dispatch seam (execute_runtime_trigger in bin/) maps a
+        continue_bb_thread result state to (returncode, delivery_accepted), and
+        under the defect the pre-acceptance refusal state sat inside the accepted
+        set, so a packet that provably never left was marked processed and never
+        retried -- with a receipt recording that it was rejected before
+        acceptance.
+
+        Two-direction proof (a test that only suppresses cannot distinguish this
+        fix from one that retries everything):
+          * refusal states ("failed", "refused", "ambiguous") are NOT accepted --
+            at this seam "failed" can ONLY be a pre-acceptance refusal: the
+            post-delivery "failed" travels through BbObservationResult on a call
+            path (observe_bb_thread) this seam never invokes. "refused" is its
+            disambiguated token; "ambiguous" is the unchanged retry-suppressing
+            half.
+          * "queued" and "duplicate" stay accepted, proving the set was narrowed
+            rather than emptied.
+
+        Mutation proof: reverting the seam to {"queued","duplicate","failed"}
+        makes the "failed" sub-case return delivery_accepted=True, failing the
+        assertion below on BOTH amiga and nuvyr -- exactly the world where a
+        packet that never left is marked processed and never retried.
+        """
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                for refusal_state in ("failed", "refused", "ambiguous"):
+                    result = self._bb_continuation_runtime_result(project, refusal_state)
+                    self.assertNotEqual(
+                        0,
+                        result["returncode"],
+                        f"{project}: a pre-acceptance refusal ({refusal_state}) must "
+                        "not produce the mark-processed (returncode 0) surface",
+                    )
+                    self.assertFalse(
+                        result["delivery_accepted"],
+                        f"{project}: a pre-acceptance refusal ({refusal_state}) must "
+                        "not be reported as delivery_accepted -- nothing was delivered",
+                    )
+                for accepted_state in ("queued", "duplicate"):
+                    result = self._bb_continuation_runtime_result(project, accepted_state)
+                    self.assertEqual(
+                        0,
+                        result["returncode"],
+                        f"{project}: {accepted_state} stays the mark-processed surface",
+                    )
+                    self.assertTrue(
+                        result["delivery_accepted"],
+                        f"{project}: {accepted_state} continues to be accepted",
                     )
 
     def test_watch_inbox_emits_a_distinct_ambiguous_event_for_a_timed_out_wake(self):
