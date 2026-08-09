@@ -27,11 +27,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _watcher_liveness import FRESH, check_markers, foreign_fresh  # noqa: E402
+from _watcher_liveness import FRESH, check_markers, foreign_fresh, handoff_file  # noqa: E402
 from llm_collab.bb_client import PINNED_BB_VERSION  # noqa: E402
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
-HANDOFF_FILE = "scratchpad/orchestrator-handoff.md"
 HOOK_PROJECT_ID = "llm-collab"  # this hook is llm-collab's own repo hook
 
 BB_PROBE_TIMEOUT_SECONDS = 10.0
@@ -189,6 +188,24 @@ def run_checks(own_session_id: str | None = None) -> bool:
     return clean
 
 
+def handoff_line() -> str:
+    """The handoff pointer — the project-scoped runtime path, and whether it exists.
+
+    An absent handoff at session start is worth knowing immediately and is not
+    a hook failure, so absence is stated on the line rather than implied by a
+    path the reader must stat themselves. An unresolvable state root says so
+    instead of printing nothing.
+    """
+    try:
+        path = handoff_file(HOOK_PROJECT_ID)
+        exists = path.exists()
+    except (Exception, SystemExit) as error:
+        return f"handoff:  <path unresolvable: {type(error).__name__}: {error}>"
+    if exists:
+        return f"handoff:  {path}"
+    return f"handoff:  {path} (ABSENT — no handoff written yet)"
+
+
 def main() -> int:
     print("[session-gate] session-setup checks (results and pointers only):")
     # I5: coverage must be observable. A reader in ANY checkout must be able to
@@ -204,7 +221,7 @@ def main() -> int:
         _line("session-gate itself", UNKNOWN, f"probe broke: {type(error).__name__}: {error}")
         print("[session-gate] the checks above are INCOMPLETE — no setup claim was verified")
     print(f"[session-gate] protocol: {ORCHESTRATOR_DOC}")
-    print(f"[session-gate] handoff:  {HANDOFF_FILE}")
+    print(f"[session-gate] {handoff_line()}")
     if not clean:
         print("━" * 60)
         print("⚠️  SESSION SETUP INCOMPLETE — see the ✗/? lines above and the pointers")

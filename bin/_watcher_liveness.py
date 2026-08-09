@@ -58,6 +58,15 @@ def markers_dir(project_id):
     return project_state_dir(project_id) / "watchers"
 
 
+def handoff_file(project_id):
+    """The orchestrator handoff path — project runtime state, not a checkout
+    document (GH-726 S6, amended): two registered projects can coordinate the
+    same product checkout, so a checkout-relative path would have both
+    orchestrators overwrite one succession file.
+    """
+    return project_state_dir(project_id) / "orchestrator-handoff.md"
+
+
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

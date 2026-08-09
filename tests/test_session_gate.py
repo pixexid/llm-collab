@@ -463,7 +463,28 @@ class SessionGateTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertNotIn("SESSION SETUP INCOMPLETE", out)
         self.assertIn(session_gate.ORCHESTRATOR_DOC, out)
-        self.assertIn(session_gate.HANDOFF_FILE, out)
+        self.assertIn("handoff:", out)
+
+    def test_handoff_pointer_is_project_scoped_and_reports_absence(self) -> None:
+        """The handoff signpost resolves through the project state root (GH-726
+        S6 amended: runtime state, not a checkout document), and an absent file
+        is stated on the line rather than implied."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected = root / "llm-collab" / "orchestrator-handoff.md"
+            with mock.patch.object(
+                _watcher_liveness,
+                "project_state_dir",
+                side_effect=lambda project_id: root / project_id,
+            ):
+                absent_line = session_gate.handoff_line()
+                expected.parent.mkdir(parents=True)
+                expected.write_text("# handoff\n", encoding="utf-8")
+                present_line = session_gate.handoff_line()
+        self.assertIn(str(expected), absent_line)
+        self.assertIn("ABSENT", absent_line)
+        self.assertIn(str(expected), present_line)
+        self.assertNotIn("ABSENT", present_line)
 
     def test_a_broken_gate_probe_is_loud_and_never_fails_the_session(self) -> None:
         with mock.patch.object(
