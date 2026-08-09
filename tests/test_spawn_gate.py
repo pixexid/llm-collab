@@ -591,10 +591,11 @@ class WatcherGateCliTest(unittest.TestCase):
             bb_spawn, "resolve_project_repo_path", return_value=REPO
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
             bb_spawn, "check_markers", return_value=marker_report("absent")
-        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+        ) as markers, mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
             bb_spawn, "persist_assignment"
         ) as persist, mock.patch.object(bb_spawn, "_emit") as emit:
             exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        markers.assert_called_once_with("llm-collab")
         # Order matters: assert the never-reached calls BEFORE the exit code. With
         # the exit-code check first, a regression that spawns and then fails some
         # other way trips that assertion instead, and the test reports a failure

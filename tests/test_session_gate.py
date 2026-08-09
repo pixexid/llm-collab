@@ -34,13 +34,41 @@ class MarkerFreshnessTest(unittest.TestCase):
         with mock.patch.object(
             _watcher_liveness, "markers_dir", return_value=Path(directory)
         ):
-            return check_markers(now=now)
+            return check_markers("proj-under-test", now=now)
 
     def _write_markers(self, directory: str, *, mtime: float) -> None:
         for name in WATCHER_NAMES:
             marker = Path(directory) / f"{name}.alive"
             marker.write_text("alive\n", encoding="utf-8")
             os.utime(marker, (mtime, mtime))
+
+    def test_fresh_marker_under_project_a_does_not_make_project_b_fresh(self) -> None:
+        """The discriminating scoping test: markers are per-project.
+
+        project_state_dir is mocked onto one temporary root, so the result does
+        not depend on whether this tree has a collab.config.json. If markers_dir
+        ever ignores its project argument again (any hardcode), project A's own
+        check reads the wrong directory and the fresh assertion fails.
+        """
+        now = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markers_a = root / "project-a" / "watchers"
+            markers_a.mkdir(parents=True)
+            for name in WATCHER_NAMES:
+                marker = markers_a / f"{name}.alive"
+                marker.write_text("alive\n", encoding="utf-8")
+                os.utime(marker, (now - 30, now - 30))
+            with mock.patch.object(
+                _watcher_liveness,
+                "project_state_dir",
+                side_effect=lambda project_id: root / project_id,
+            ):
+                report_a = check_markers("project-a", now=now)
+                report_b = check_markers("project-b", now=now)
+        self.assertEqual(["fresh"] * len(WATCHER_NAMES), [e["status"] for e in report_a])
+        self.assertEqual(["absent"] * len(WATCHER_NAMES), [e["status"] for e in report_b])
+        self.assertEqual(len(WATCHER_NAMES), len(not_fresh(report_b)))
 
     def test_fresh_markers_classify_fresh(self) -> None:
         now = time.time()

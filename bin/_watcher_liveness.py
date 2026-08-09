@@ -3,11 +3,13 @@
 The marker convention is owned by docs/workflows/orchestrator-sessions.md: each
 standard orchestrator watcher touches
 
-    {project_state_root}/llm-collab/watchers/<name>.alive
+    {project_state_root}/<project-id>/watchers/<name>.alive
 
 every cycle. Both bin/session_gate.py (SessionStart hook) and bin/bb_spawn.py
 (delegation-time gate) read through this module; a second implementation of the
-path rule is how these drift.
+path rule is how these drift. The project id is the caller's explicit choice —
+there is deliberately no default, so a caller that forgets it fails rather than
+silently reading another project's markers (AGENTS.md → "Project Boundary").
 """
 
 from __future__ import annotations
@@ -34,11 +36,11 @@ ABSENT = "absent"
 UNREADABLE = "unreadable"
 
 
-def markers_dir():
-    return project_state_dir("llm-collab") / "watchers"
+def markers_dir(project_id):
+    return project_state_dir(project_id) / "watchers"
 
 
-def check_markers(now=None, stale_after=WATCHER_MARKER_STALE_AFTER_SECONDS):
+def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_SECONDS):
     """Classify every standard watcher's marker by mtime freshness.
 
     A broken probe reports UNREADABLE, never fresh: a marker that cannot be
@@ -46,7 +48,7 @@ def check_markers(now=None, stale_after=WATCHER_MARKER_STALE_AFTER_SECONDS):
     """
     moment = time.time() if now is None else now
     try:
-        directory = markers_dir()
+        directory = markers_dir(project_id)
     except (Exception, SystemExit) as error:
         # Resolving the state root can itself fail (e.g. a worktree without
         # collab.config.json makes load_config exit). That is UNREADABLE for

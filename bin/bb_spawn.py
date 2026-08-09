@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     watcher_gate: dict | None = None
     if args.assignment_kind == "writing":
         try:
-            marker_report = check_markers()
+            marker_report = check_markers(args.collab_project)
         except Exception as error:
             # A gate probe that breaks must not render as a pass.
             marker_report = [

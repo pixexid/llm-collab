@@ -88,7 +88,7 @@ def tooling_check() -> tuple[str, str]:
 def watcher_checks() -> list[tuple[str, str, str]]:
     """Watcher liveness markers; stale/absent/unreadable is FAIL, never a pass."""
     results = []
-    for entry in check_markers():
+    for entry in check_markers("llm-collab"):  # this hook is llm-collab's own repo hook
         if entry["status"] == FRESH:
             results.append((f"watcher {entry['name']}", PASS, f"marker {entry['age_seconds']}s old"))
         elif entry["status"] == "unreadable":
