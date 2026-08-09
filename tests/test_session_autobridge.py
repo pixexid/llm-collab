@@ -4829,14 +4829,31 @@ class SessionAutobridgeTest(unittest.TestCase):
         path = binding_root / "amiga" / "CHAT-BAD-BINDING" / "claude.json"
 
         with patch.object(session_autobridge_lib, "BINDINGS_DIR", binding_root):
+            # A present-but-corrupt binding is terminal: the same BindingUnreadable the
+            # oversized branch raises, never FileNotFoundError -- callers read THAT as
+            # "no binding exists" and would open the AX doorbell on an unreadable record.
             for payload in ("{", "[]"):
                 with self.subTest(payload=payload):
                     write(path, payload)
-                    with self.assertRaises(FileNotFoundError):
+                    with self.assertRaises(session_autobridge_lib.BindingUnreadable):
                         session_autobridge_lib.load_binding(
                             "amiga", "CHAT-BAD-BINDING", "claude"
                         )
             path.write_bytes(b"\xff")
+            with self.assertRaises(session_autobridge_lib.BindingUnreadable):
+                session_autobridge_lib.load_binding(
+                    "amiga", "CHAT-BAD-BINDING", "claude"
+                )
+
+    def test_load_binding_absent_still_raises_file_not_found(self):
+        """The other direction: a genuinely missing binding must NOT become unreadable.
+
+        Without this control the corrupt-binding tests above cannot distinguish the fix
+        from one that maps every missing binding to BindingUnreadable.
+        """
+        root = self.make_workspace()
+        binding_root = root / "State" / "session_autobridge" / "bindings"
+        with patch.object(session_autobridge_lib, "BINDINGS_DIR", binding_root):
             with self.assertRaises(FileNotFoundError):
                 session_autobridge_lib.load_binding(
                     "amiga", "CHAT-BAD-BINDING", "claude"
@@ -6011,10 +6028,18 @@ class SessionAutobridgeTest(unittest.TestCase):
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertTrue(result_payload["delivery_refused"])
         self.assertFalse(result_payload["durable_write"])
-        self.assertEqual(
+        # GH-687: a present-but-corrupt binding is terminal, not "no binding".
+        self.assertIn(
+            session_autobridge_lib.BINDING_UNREADABLE_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertNotIn(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
             result_payload["autobridge_refusal_reason"],
         )
+        self.assertTrue(result_payload["binding_unreadable_blocker"])
+        for flag in self.WAKE_FLAGS:
+            self.assertFalse(result_payload.get(flag), f"{flag} must be false")
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
 
     def test_expired_lease_does_not_write_permanently_unroutable_packet(self):
@@ -6762,6 +6787,105 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(payload["durable_write"])
         self.assertIn("REFUSED before durable write", done.stderr)
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
+
+    def codex_doorbell_workspace(self, *, register_codex=True, project="amiga",
+                                 chat_id="CHAT-CORRUPT-CODEX"):
+        """A claude->codex chat where codex is the only doorbell-capable recipient.
+
+        The AX doorbell exists only for a codex recipient (ax_doorbell_app), so the
+        consequence proof for a corrupt binding -- "the wake lane is CLOSED" -- needs
+        a recipient that would otherwise be rung.
+        """
+        root = self.make_workspace()
+        self.add_agent(root, {"id": "claude", "display_name": "Claude",
+                              "activation": {"type": "cli_session", "watcher_enabled": True}})
+        self.add_agent(root, {"id": "codex", "display_name": "Codex",
+                              "activation": {"type": "cli_session", "watcher_enabled": True,
+                                             "ax_app": "Codex"}})
+        chat_dir = self.create_chat(
+            root,
+            chat_dir_name=f"2026-08-08_corrupt-codex__{chat_id}",
+            chat_id=chat_id,
+            project_id=project,
+        )
+        if register_codex:
+            self.run_cli(root, "register", "--session", "SESSION-CODEX-BOUND", "--agent", "codex",
+                         "--project", project, "--chat", chat_id, "--mode", "notify",
+                         "--runtime-family", "codex_app",
+                         "--runtime-session-id", "codex-bound-session",
+                         "--runtime-session-source", "first_read")
+        return root, chat_dir
+
+    def deliver_to_codex(self, root, chat_id, *, project="amiga", expected_returncode=0):
+        argv = [
+            sys.executable, str(DELIVER_SCRIPT),
+            "--chat", chat_id, "--from", "claude", "--to", "codex",
+            "--project", project, "--title", "Corrupt binding probe",
+            "--sender-session-id", "claude-session-1", "--body-file", "-",
+        ]
+        done = subprocess.run(argv, cwd=root, text=True, input="corrupt binding probe",
+                              capture_output=True, check=False)
+        if done.returncode != expected_returncode:
+            self.fail(f"deliver.py exited {done.returncode}\n"
+                      f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
+        return json.loads(done.stdout.split("\n\n", 1)[0]), done.stderr
+
+    def corrupt_codex_binding(self, root, content, chat_id="CHAT-CORRUPT-CODEX"):
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / chat_id
+                / "codex.json")
+        self.assertTrue(path.exists(), f"expected a binding at {path}")
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_a_corrupt_codex_binding_refuses_before_write_and_closes_the_doorbell(self):
+        """GH-687: a present-but-corrupt binding is terminal, like the oversized branch.
+
+        Before the fix load_binding collapsed corrupt JSON and a non-dict payload into
+        FileNotFoundError, which resolve_exact_dispatch_pair reads as "no binding":
+        binding_unreadable stayed False, dispatch_scope_refused stayed False, and
+        wake_fallback_allowed evaluated True -- the AX doorbell opened on a recipient
+        whose authoritative record could not be read.
+        """
+        for content in ("{not json", "[1, 2]"):
+            with self.subTest(content=content):
+                root, chat_dir = self.codex_doorbell_workspace()
+                self.corrupt_codex_binding(root, content)
+                payload, stderr = self.deliver_to_codex(
+                    root, "CHAT-CORRUPT-CODEX", expected_returncode=2)
+                self.assertFalse(payload["autobridge_ready"])
+                self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+                self.assertNotIn("exact_binding_required", payload["autobridge_refusal_reason"],
+                                 "a corrupt binding EXISTS; it must not report as absent")
+                self.assertTrue(payload["binding_unreadable_blocker"])
+                self.assertTrue(payload["delivery_refused"])
+                self.assertFalse(payload["durable_write"])
+                # The consequence, not the exception type: every wake lane is closed,
+                # above all the AX doorbell this recipient would otherwise get.
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(payload.get(flag),
+                                     f"{flag} must be false on an unreadable binding")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(payload.get(prompt))
+                self.assertIn("REFUSED before durable write", stderr)
+                self.assertNotIn("Traceback", stderr)
+                self.assertFalse(list(chat_dir.glob("*_to-codex_*.md")))
+
+    def test_an_absent_codex_binding_still_reports_no_binding_and_rings(self):
+        """The control direction: a genuinely ABSENT binding must not turn terminal.
+
+        A refusal-only corrupt-binding test cannot distinguish this fix from one that
+        treats every missing binding as unreadable. Here the doorbell must stay OPEN
+        and the refusal reason must stay exact_binding_required.
+        """
+        root, chat_dir = self.codex_doorbell_workspace(register_codex=False)
+        payload, _stderr = self.deliver_to_codex(root, "CHAT-CORRUPT-CODEX")
+        self.assertFalse(payload["binding_unreadable_blocker"],
+                         "an absent binding is not an unreadable one")
+        self.assertEqual("exact_binding_required", payload["autobridge_refusal_reason"])
+        self.assertTrue(payload["ax_doorbell_required"],
+                        "the AX fallback stays available for an unbound recipient")
+        self.assertEqual("ax_doorbell", payload["routing_mode"])
+        self.assertTrue(list(chat_dir.glob("*_to-codex_*.md")))
 
     def test_a_readable_binding_is_unaffected(self):
         """The control: this must still dispatch, or the tests above prove only that I broke it."""

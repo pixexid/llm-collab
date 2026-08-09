@@ -204,12 +204,13 @@ BINDING_UNREADABLE_REASON = "binding_unreadable"
 
 
 class BindingUnreadable(RuntimeError):
-    """An oversized or I/O-failed binding.
+    """A binding that EXISTS but cannot be trusted: oversized, I/O-failed, or corrupt.
 
     Deliberately NOT a FileNotFoundError. Callers catch that to mean "there is no such binding" and
-    turn it into exact_binding_required or "no live session" -- so collapsing an oversized or
-    permission-denied binding into it would report a present-but-unreadable record as an absent one,
-    hiding the real fault. RuntimeError is outside every (FileNotFoundError, OSError, ValueError)
+    turn it into exact_binding_required or "no live session" -- so collapsing an oversized,
+    permission-denied, or corrupt binding into it would report a present-but-unreadable record as an
+    absent one, hiding the real fault and (in deliver.py) leaving the AX doorbell open on a record
+    that must be terminal. RuntimeError is outside every (FileNotFoundError, OSError, ValueError)
     tuple in this codebase, so it propagates instead of being absorbed.
     """
 
@@ -252,14 +253,16 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
         )
     except UnreadableFile as exc:
         raise BindingUnreadable(str(exc)) from exc
+    # Present but not parseable as a binding object: the record EXISTS, so this is terminal like
+    # the oversized branch above, never FileNotFoundError (which callers read as "no binding").
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise FileNotFoundError(
-            f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
+        raise BindingUnreadable(
+            f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}: {exc}"
         ) from exc
     if not isinstance(payload, dict):
-        raise FileNotFoundError(
+        raise BindingUnreadable(
             f"Malformed binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
     return payload
