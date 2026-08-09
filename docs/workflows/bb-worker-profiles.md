@@ -58,14 +58,16 @@ pilot used one byte-identical, read-only source-audit task per model.
 | Reach for | BB model | Measured result | Disqualifying boundary |
 |---|---|---|---|
 | Fast, exact source analysis | `codex / gpt-5.6-luna` | 136s; 7/7 citations exact; correct judgment; clean output | Authoring and reasoning-level-specific behavior are unmeasured. Analysis only; not a sole gate. |
-| Deep source analysis or a competing diagnosis | `pi / kimi-coding/k3` | 324s; about 15/15 citations exact; deepest analysis; alone caught a subtle wrong-fix direction and checked `agents.json` for empirical proof | Authoring and reasoning-level-specific behavior are unmeasured. Analysis only; not a sole gate. |
+| Deep source analysis or a competing diagnosis | `pi / kimi-coding/k3` | 324s; about 15/15 citations exact; deepest analysis; alone caught a subtle wrong-fix direction and checked `agents.json` for empirical proof | Authoring is measured and qualified at `high` only (GH-596/GH-705); other reasoning levels remain unmeasured. Not a sole gate. |
 | Hard-excluded | `pi / zai/glm-5.2` | 508s; reasoning and conclusions correct | Citation coordinates drifted by 150 and 11 lines; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
 | Hard-excluded | `pi / meta/muse-spark-1.2-contributor` | About 120s; citations and judgment were initially correct | Output degenerated mid-answer: repetition, a corrupted glyph, emoji burst, and one unreadable item; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
 
 The timings are provisional: single runs confound capability with capacity and
 usage limits. The observed failure modes are actionable—load does not explain a
 150-line citation drift or degenerate glyphs. This pilot measured analysis, not
-authoring, so it places no model on an implementation lane.
+authoring. A later three-run authoring bake-off (GH-596) qualified exactly
+`pi / kimi-coding/k3 / high`, which GH-705 admits on the bootstrap path; every
+other coordinate here remains analysis-only.
 
 Prospective policy: no unmeasured or text-unstable model may own a gate, money
 path, authority path, or implementation lane. The measured hard exclusions

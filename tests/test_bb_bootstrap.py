@@ -304,17 +304,28 @@ class FirstDeliveryAssignmentTest(unittest.TestCase):
             )
         )
 
-    def test_authoring_qualification_is_shared_across_amiga_and_non_amiga(self):
-        from llm_collab.bb_client import BbProfile, SLICE_1A_PROFILE
+    def test_authoring_qualification_takes_no_project_input(self):
+        """The admission decision is project-invariant by signature, not by luck.
 
-        for project_id in ("amiga", "nuvyr"):
-            with self.subTest(project_id=project_id):
-                self.assertTrue(profile_is_authoring_qualified(SLICE_1A_PROFILE))
-                self.assertFalse(
-                    profile_is_authoring_qualified(
-                        BbProfile("pi", "kimi-coding/k3", "max")
-                    )
-                )
+        AGENTS.md requires an Amiga and a non-Amiga proof whenever a shared
+        contract changes. An earlier version of this test looped over two project
+        ids and asserted the same two project-agnostic facts in each iteration --
+        the loop variable was never used, so it would have stayed green even if
+        the bootstrap path behaved differently per project. A test that claims
+        coverage it does not provide is worse than none, so it is gone.
+
+        What is actually provable here: ``profile_is_authoring_qualified`` accepts
+        a ``BbProfile`` and nothing else, so no project value can reach the
+        decision. This asserts that directly. Cross-project coverage of the
+        *bootstrap seam*, which does take a project, is owed separately -- see the
+        follow-up issue referenced on GH-705.
+        """
+        import inspect
+
+        params = list(
+            inspect.signature(profile_is_authoring_qualified).parameters
+        )
+        self.assertEqual(["profile"], params)
 
     def test_a_non_mapping_is_read_only(self):
         self.assertEqual(ASSIGNMENT_READ_ONLY, classify_first_delivery_assignment(None))
