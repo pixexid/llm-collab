@@ -140,7 +140,24 @@ mkdir -p "$W"
 CYC=0
 while true; do
   CYC=$((CYC+1)); [ $((CYC % 20)) -eq 0 ] && echo "WATCHER LIVE (pr-artifacts) cycle $CYC"
-  open_prs=$(gh pr list --repo <OWNER/REPO> --state open --json number --jq '.[].number' 2>/dev/null)
+  # Fail closed on both halves. An errored `gh pr list` yields an empty list that
+  # is indistinguishable from "no open PRs", and its default cap is 30 items, so
+  # an unbounded call can silently truncate. Either way an unarmed PR is never
+  # polled and can reach a terminal state with no notification at all — a bound
+  # that claims completeness is the failure this repository's third review rule
+  # names. Ask for one more than the cap so hitting it is detectable.
+  PR_ENUM_CAP=200
+  if ! open_prs=$(gh pr list --repo <OWNER/REPO> --state open --limit $((PR_ENUM_CAP + 1)) --json number --jq '.[].number' 2>/dev/null); then
+    echo "PR ENUMERATION FAILED — gh pr list errored. This cycle polled nothing; it is NOT evidence that no PR changed."
+    sleep 45
+    continue
+  fi
+  open_count=$(printf '%s\n' "$open_prs" | grep -c '[0-9]')
+  if [ "$open_count" -gt "$PR_ENUM_CAP" ]; then
+    echo "PR ENUMERATION EXCEEDED $PR_ENUM_CAP open PRs — refusing to poll a truncated set rather than reporting a partial result as complete. Raise PR_ENUM_CAP."
+    sleep 45
+    continue
+  fi
   # Poll every armed PR, not just the open ones. A PR merged between two samples
   # otherwise leaves the open list and is never polled again, so the connector's
   # asynchronous post-merge re-pass produces no notification at all — the exact
@@ -177,7 +194,9 @@ done
 
 A merged or closed PR stays in the watch set through the post-merge re-pass
 window, then retires.
-An empty signature is an alert, never a quiet continuation. `pr_watch.py --once`
+A failed or over-cap enumeration skips the cycle without refreshing the marker,
+so the watcher's own liveness signal goes stale rather than advertising coverage
+it did not perform. An empty signature is an alert, never a quiet continuation. `pr_watch.py --once`
 covers the timeline, reactions, and check runs; in particular, a clean connector
 pass can be reaction-only. The meaning of connector artifacts and the required
 post-merge recheck remain canonical in
