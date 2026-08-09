@@ -700,6 +700,158 @@ class BbContinuationTest(unittest.TestCase):
             store.close()
             tmp.cleanup()
 
+    def test_refusal_whose_state_write_fails_re_sends_on_a_later_poll(self):
+        """GH-697: a refusal whose state write fails (after the receipt commits)
+        must not strand the packet. Single-poll and two-poll tests have EACH
+        already missed a defect on this seam, so this spans THREE polls with an
+        injected failure BETWEEN the receipt commit and the observation state
+        write.
+
+        The receipt (rejected_before_acceptance) and the observation
+        dispatch_state are two writes with no atomicity between them. Poll 1: the
+        refusal receipt commits, then _advance(dispatch_state="failed") raises
+        (injected). Before the fix the row stayed "queued" and the pending-row
+        guard returned "ambiguous" forever -- three polls, one send, bb never
+        called again. The receipt is now the single source of truth for whether a
+        delivery occurred: a rejection receipt proves the send was refused before
+        acceptance (nothing delivered), so it overrides the stale "queued" and the
+        call re-sends on polls 2 and 3. accepted/completed/ambiguous receipts still
+        short-circuit (a duplicate of those is a real delivery, or -- for ambiguous
+        -- a send that may have landed and must not be re-sent).
+
+        Shared contract (AGENTS.md Project Boundary): continue_bb_thread is scoped
+        by project_id, so the fix is exercised under Amiga AND a registered
+        non-Amiga project. The mutation proof fails on the non-Amiga path too.
+        """
+        import sqlite3
+        import sys
+        module = sys.modules[__name__]
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                with patch.multiple(
+                    module,
+                    PROJECT=project,
+                    CHAT=f"CHAT-{project}",
+                    NATIVE_THREAD=f"thread-{project}",
+                ):
+                    tmp, store, session, materialized = self.open_fixture()
+                try:
+                    client = FailingBbClient()  # pre-acceptance refusal (bb_transport_failed)
+                    real_advance = store.advance_bb_thread_observation
+                    failed_once: list[bool] = []
+
+                    def failing_advance(**kw):
+                        # Inject the divergence: fail ONLY the first post-refusal
+                        # state write (dispatch_state "failed"), i.e. the write that
+                        # happens AFTER the rejection receipt commits. The pre-send
+                        # "queued" advance and every later advance run normally, so
+                        # polls 2 and 3 exercise the read-path reconciliation.
+                        if (
+                            kw.get("dispatch_state") == "failed"
+                            and not failed_once
+                        ):
+                            failed_once.append(True)
+                            raise sqlite3.OperationalError(
+                                "injected: state write failed after receipt commit"
+                            )
+                        return real_advance(**kw)
+
+                    store.advance_bb_thread_observation = failing_advance
+                    with patch.dict(
+                        os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}
+                    ):
+                        # Poll 1: the receipt commits, then the state write raises.
+                        # The refusal surface is returned (the receipt is durable).
+                        first = continue_bb_thread(
+                            store,
+                            client=client,
+                            session=session,
+                            materialized=materialized,
+                            observed_at_utc=NOW,
+                        )
+                    self.assertEqual(
+                        BB_CONTINUATION_REFUSED,
+                        first.state,
+                        f"{project}: poll 1 returns the refusal surface (the receipt "
+                        "is durable) instead of raising on the failed state write",
+                    )
+                    self.assertEqual(
+                        1,
+                        len(client.sent),
+                        f"{project}: poll 1 sent exactly once before the refusal",
+                    )
+                    delivery = store.read_canonical_delivery(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=project,
+                        message_id=str(materialized["message_id"]),
+                        delivery_id=str(materialized["delivery_id"]),
+                    )
+                    self.assertEqual(
+                        "rejected_before_acceptance",
+                        delivery["outcome"],
+                        f"{project}: the rejection receipt committed before the "
+                        "failed state write -- it is the durable proof nothing landed",
+                    )
+                    row = store.read_bb_thread_observation(
+                        workspace_id=WORKSPACE,
+                        scope_kind="project",
+                        scope_identity=project,
+                        conversation_id=f"CHAT-{project}",
+                        participant_id=PARTICIPANT,
+                        binding_generation=1,
+                    )
+                    self.assertEqual(
+                        "queued",
+                        row["dispatch_state"],
+                        f"{project}: the state write failed, so the row is stuck at "
+                        "the pre-send 'queued' -- this is the divergence the receipt "
+                        "must override on the next poll",
+                    )
+
+                    with patch.dict(
+                        os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}
+                    ):
+                        # Poll 2: the rejection receipt overrides the stale 'queued';
+                        # the packet RE-SENDS rather than stranding as 'ambiguous'.
+                        second = continue_bb_thread(
+                            store,
+                            client=client,
+                            session=session,
+                            materialized=materialized,
+                            observed_at_utc=NOW,
+                        )
+                        # Poll 3: still retryable across polls.
+                        third = continue_bb_thread(
+                            store,
+                            client=client,
+                            session=session,
+                            materialized=materialized,
+                            observed_at_utc=NOW,
+                        )
+                    self.assertEqual(
+                        BB_CONTINUATION_REFUSED,
+                        second.state,
+                        f"{project}: a later poll must re-send (REFUSED), not strand "
+                        "as 'ambiguous' forever -- the rejection receipt proves the "
+                        "send was refused before acceptance",
+                    )
+                    self.assertEqual(
+                        BB_CONTINUATION_REFUSED,
+                        third.state,
+                        f"{project}: the third poll is still retryable, not stranded",
+                    )
+                    self.assertEqual(
+                        3,
+                        len(client.sent),
+                        f"{project}: polls 2 and 3 each re-send to bb (genuine "
+                        "retries) -- the stranding 'one send across three polls' is "
+                        "gone",
+                    )
+                finally:
+                    store.close()
+                    tmp.cleanup()
+
     def test_binding_generation_mismatch_refuses_before_native_io(self):
         tmp, store, session, materialized = self.open_fixture()
         try:

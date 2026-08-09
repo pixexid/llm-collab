@@ -396,8 +396,21 @@ def continue_bb_thread(
         row.get("last_delivery_id"),
         row.get("last_attempt_id"),
     )
-    if row.get("dispatch_state") in {"queued", "ambiguous"} and all(
-        isinstance(value, str) for value in pending_ids
+    # The receipt is the single source of truth for whether a delivery occurred;
+    # the observation dispatch_state is a parallel record that can disagree with it
+    # because a refusal's receipt and its state write are separate transactions
+    # (GH-697). At this point `selected` is either None (no receipt yet) or a
+    # rejected_before_acceptance receipt -- the accepted/completed/ambiguous ones
+    # short-circuited as DUPLICATE above. A rejection receipt proves the prior send
+    # was refused BEFORE bb accepted it, so nothing was delivered and a retry is
+    # safe; it must override a stale "queued" left by a refusal whose state write
+    # failed after the receipt committed, or the packet strands forever. The guard
+    # strands ONLY when there is no receipt -- a genuine in-flight send whose
+    # outcome is unknown and may have landed (ambiguous), which must not repeat.
+    if (
+        not isinstance(selected, Mapping)
+        and row.get("dispatch_state") in {"queued", "ambiguous"}
+        and all(isinstance(value, str) for value in pending_ids)
     ):
         return _ambiguous_without_retry(
             ids=(message_id, delivery_id, attempt_id),
@@ -475,14 +488,27 @@ def continue_bb_thread(
                 detail=f"bb refusal was durable but its receipt was not: {error}",
                 row=row,
             )
-        _advance(
-            store,
-            context,
-            event_seq=current_seq,
-            dispatch_state=dispatch_state,
-            now=observed_at_utc,
-            ids=(message_id, delivery_id, attempt_id),
-        )
+        # The refusal receipt is durable, so the delivery outcome is already
+        # known. The state write below is a SEPARATE transaction and can fail (a
+        # transient SQLite write failure is enough); if it does, the observation
+        # row stays "queued" from the pre-send advance and DISAGREES with the
+        # receipt. That disagreement must not strand the packet: the receipt is the
+        # single source of truth and the pending-row guard above derives the
+        # dispatch decision from it, so the next poll reconciles and re-sends.
+        # Return the refusal/ambiguous surface rather than raise -- the outcome is
+        # already durably recorded by the receipt (GH-697).
+        try:
+            _advance(
+                store,
+                context,
+                event_seq=current_seq,
+                dispatch_state=dispatch_state,
+                now=observed_at_utc,
+                ids=(message_id, delivery_id, attempt_id),
+            )
+        except Exception:
+            # Receipt committed; the stale state is reconciled from it next poll.
+            pass
         return BbContinuationResult(
             BB_CONTINUATION_AMBIGUOUS if ambiguous else BB_CONTINUATION_REFUSED,
             native.detail,
