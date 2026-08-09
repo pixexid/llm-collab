@@ -90,18 +90,72 @@ class RecordExecutedTripleTest(unittest.TestCase):
         self.assertEqual(2, len(rows), "two distinct threads => two rows")
         self.assertEqual({"thr_A", "thr_B"}, {r["thread_id"] for r in rows})
 
+    # -- N1: provenance immutable once resolved ---------------------------
+
+    def test_re_fire_same_resolved_triple_is_noop(self) -> None:
+        """A re-fire with the SAME resolved triple is a no-op: no rewrite, no duplicate."""
+        self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
+        before = state_file(self.workspace, "amiga").read_text(encoding="utf-8")
+        r = self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("noop", r.stdout)
+        self.assertEqual(before, state_file(self.workspace, "amiga").read_text(encoding="utf-8"),
+                         "a same-triple re-fire does not rewrite the file")
+        self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
+
+    def test_re_fire_different_resolved_triple_preserves_original_and_surfaces_conflict(self) -> None:
+        """A re-fire with a DIFFERENT resolved triple keeps the first and surfaces a
+        conflict — a later preset change cannot rewrite historical provenance."""
+        self._resolved("amiga", "thr_D", model="m_first", reasoning="low")
+        r = self._resolved("amiga", "thr_D", model="m_second", reasoning="high")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("conflict", r.stdout)
+        self.assertIn("model", r.stdout, "the conflict marker names what differs")
+        rows = rows_for(self.workspace, "amiga")
+        self.assertEqual(1, len(rows))
+        self.assertEqual("m_first", rows[0]["model"], "the original resolved value is preserved")
+
+    def test_unresolved_then_resolved_completes(self) -> None:
+        """unresolved -> resolved is the one legal write against an existing row."""
+        run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_C",
+                   "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
+        self.assertEqual("unresolved", rows_for(self.workspace, "amiga")[0]["status"])
+        r = self._resolved("amiga", "thr_C", model="m", reasoning="low")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("recorded resolved", r.stdout)
+        rows = rows_for(self.workspace, "amiga")
+        self.assertEqual(1, len(rows), "completion replaces, not duplicates")
+        self.assertEqual("resolved", rows[0]["status"])
+
+    def test_resolved_then_unresolved_preserves_resolved(self) -> None:
+        """A resolved->unresolved re-fire keeps the resolved row (the truth) and surfaces
+        a conflict; the failure does not overwrite established provenance."""
+        self._resolved("amiga", "thr_R", model="m", reasoning="low")
+        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_R",
+                       "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("conflict", r.stdout)
+        rows = rows_for(self.workspace, "amiga")
+        self.assertEqual(1, len(rows))
+        self.assertEqual("resolved", rows[0]["status"], "resolved provenance is preserved")
+
     def test_resolved_values_not_a_mutable_reference(self) -> None:
+        """GH-617: the row stores resolved VALUES (no preset name) and is IMMUTABLE once
+        resolved — a re-resolution with different values keeps the original and surfaces
+        a conflict, so a later preset edit cannot retroactively rewrite history (N1)."""
         self._resolved("amiga", "thr_X", model="pi/gpt-5.4-mini", reasoning="low")
         row = rows_for(self.workspace, "amiga")[0]
         self.assertNotIn("preset", json.dumps(row), "no preset-name reference is persisted")
         self.assertEqual("pi/gpt-5.4-mini", row["model"])
 
-        # Resolved value changes (preset edited / different resolution): the row
-        # reflects the NEW resolved value, still one row, still values not names.
-        self._resolved("amiga", "thr_X", model="zai/glm-5.2", reasoning="high")
+        # A different re-resolution does NOT replace the row: the original is kept
+        # and the conflict is surfaced on stdout (the plugin logs it at info).
+        r = self._resolved("amiga", "thr_X", model="zai/glm-5.2", reasoning="high")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("conflict", r.stdout)
         rows = rows_for(self.workspace, "amiga")
-        self.assertEqual(1, len(rows))
-        self.assertEqual("zai/glm-5.2", rows[0]["model"], "the resolved value replaced the prior one")
+        self.assertEqual(1, len(rows), "a conflicting re-fire does not add a row")
+        self.assertEqual("pi/gpt-5.4-mini", rows[0]["model"], "the original resolved value is preserved")
         self.assertNotIn("preset", json.dumps(rows[0]))
 
     def test_absent_provider_recorded_as_null(self) -> None:
@@ -196,6 +250,25 @@ class RecordExecutedTripleTest(unittest.TestCase):
                 self.assertNotEqual(0, r.returncode, f"{bad!r} should be refused")
         self.assertEqual([], any_record_file(self.workspace), "no record file created for a refused project")
 
+    # -- N2: exact identifiers, never normalized ---------------------------
+
+    def test_project_whitespace_variant_rejected_not_repaired(self) -> None:
+        """A whitespace-padded project id is NOT normalized to the registered id — an
+        exactness requirement cannot survive normalize-then-compare. Repairing operator
+        configuration silently is how a typo becomes authoritative state."""
+        for padded in (" amiga", "amiga ", " amiga ", "\tamiga"):
+            with self.subTest(padded=padded):
+                r = run_record(self.workspace, "--project", padded, "--thread-id", "thr",
+                               "--thread-project", "proj_amiga",
+                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+                self.assertNotEqual(0, r.returncode, f"padded {padded!r} must be refused, not repaired")
+        # The exact, un-padded id still records normally (control direction).
+        r_ok = self._resolved("amiga", "thr_ok")
+        self.assertEqual(0, r_ok.returncode, r_ok.stderr[:500])
+        self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
+        self.assertEqual([], any_record_file(self.workspace)[1:] if any_record_file(self.workspace) else [],
+                         "only the exact project's file exists")
+
     # -- F4: budget boundary ------------------------------------------------
 
     def test_boundary_crossing_write_refused_without_modifying(self) -> None:
@@ -207,7 +280,11 @@ class RecordExecutedTripleTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         def line_of_size(target: int) -> str:
-            row = {"thread_id": "old", "status": "resolved", "provider": "pi", "pad": "x" * 8}
+            # A COMPLETE resolved row (all identity fields) so a same-triple re-fire is
+            # a no-op under N1, which is how we prove the file stayed readable.
+            row = {"thread_id": "old", "status": "resolved", "provider": "pi",
+                   "model": "M", "reasoning_level": "low", "source": "client/turn/requested",
+                   "pad": "x" * 8}
             line = json.dumps(row, sort_keys=True, separators=(",", ":"))
             frame = len(line) - 8  # length minus the 8 pad chars
             pad_len = max(0, (target - 1) - frame)
@@ -225,14 +302,16 @@ class RecordExecutedTripleTest(unittest.TestCase):
         self.assertNotEqual(0, r.returncode, "a boundary-crossing write must fail closed")
         self.assertEqual(before, path.read_bytes(), "the file is not modified on refusal")
 
-        # The file remains readable: re-recording the SAME thread (upsert) shrinks the
-        # output below budget and succeeds, proving the project is not wedged.
-        r2 = self._resolved("amiga", "old")
+        # The file remains readable: a same-triple re-fire of the existing row is a
+        # no-op (it had to READ the file to decide the triple matches) and leaves the
+        # file untouched — proving the project is not wedged after the refusal.
+        r2 = self._resolved("amiga", "old", model="M", reasoning="low", source="client/turn/requested")
         self.assertEqual(0, r2.returncode, r2.stderr[:500])
+        self.assertIn("noop", r2.stdout)
+        self.assertEqual(before, path.read_bytes(), "a no-op does not rewrite")
         rows = rows_for(self.workspace, "amiga")
         self.assertEqual(1, len(rows))
         self.assertEqual("old", rows[0]["thread_id"])
-        self.assertNotIn("pad", rows[0])
 
     # -- read-side budget / corruption (fail closed) -----------------------
 

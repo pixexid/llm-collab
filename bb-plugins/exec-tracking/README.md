@@ -43,13 +43,24 @@ the CLI call sites.
 `thread.created` is server-wide, so the recorder refuses to mis-attribute:
 
 - **Registry binding.** `--project` must be an EXACT registered llm-collab project
-  in `projects.json`; an unregistered id is refused (it would reproduce the builtin
-  `tasks` self-declared-project defect). Refusal is observable (nonzero exit → warn).
+  in `projects.json`, matched RAW — whitespace variants are rejected, not repaired;
+  an unregistered or padded id is refused (it would reproduce the builtin `tasks`
+  self-declared-project defect). Refusal is observable (nonzero exit → warn).
 - **Scope match.** The thread's bb project (`thread.projectId`) must exactly match
   the configured project's `bb.project_id` scope (the same field `spawn_gate` uses).
   A thread for another llm-collab project is **ignored observably** (exit 0 +
   `ignored scope_mismatch` → info log) rather than recorded under the wrong file —
   mis-attribution would corrupt the exact provenance this plugin exists to preserve.
+
+## Immutability once resolved
+
+Provenance is immutable once resolved (GH-617). A `thread.created` re-fire never
+overwrites a resolved row: the only legal write against an existing row is
+`unresolved → resolved` (the record completing). A re-fire of the SAME resolved
+triple is a no-op; a re-fire of a DIFFERENT resolved triple (or `resolved →
+unresolved`) keeps the first and emits a `conflict` marker (info log) so a changed
+preset is visible rather than invisible. Each row stores the **resolved** values,
+never a preset name.
 
 ## State
 
@@ -57,9 +68,9 @@ the CLI call sites.
 the Project Boundary rule owns, **not** a second invented runtime-state root.
 Execution provenance is runtime state, not the git-backed/diffable task state a
 later slice carries (GH-630 lists git-backed task state separately), so it is not
-git-tracked here. Each row stores the **resolved** values, not a preset name. The
-writer is the authority: bounded read, exclusive flock, output-size check before
-the atomic temp+rename write, fail-closed on budget/corruption.
+git-tracked here. The writer is the authority: bounded read, exclusive flock,
+output-size check before the atomic temp+rename write, fail-closed on
+budget/corruption, and immutable-once-resolved rows (see above).
 
 ## Operator install + config (not done here)
 

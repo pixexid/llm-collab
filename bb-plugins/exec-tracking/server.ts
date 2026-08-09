@@ -169,18 +169,25 @@ function spawnRecorder(
     ...tripleArgs,
   ];
   let stderr = "";
+  let stdout = "";
   try {
     // unref(): the handler returns immediately and never waits on the child. The
     // bounded, durable write runs independently; killing the child mid-write
     // cannot corrupt state (the writer is temp+rename atomic).
     //
-    // stderr is piped (not ignored) and drained so a verbose failure cannot fill
-    // the pipe buffer and block the child. stdout is captured to distinguish an
-    // observable "ignored" event from a quiet "recorded" one. F5.
+    // Both streams are piped and drained so a verbose process cannot fill the
+    // pipe buffer and block. stdout is captured so an informational marker — a
+    // scope-mismatched thread that was correctly ignored (F1), or a conflicting
+    // re-resolution that was correctly rejected (N1) — is logged rather than
+    // silently dropped, and a recorder failure (nonzero) is logged with stderr.
+    // F5 / N3.
     const child = spawn(argv[0], argv.slice(1), {
       cwd: cfg.checkoutPath as string,
       stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
+    });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < STDOUT_CAP) stdout += chunk.toString("utf-8");
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length < STDERR_CAP) stderr += chunk.toString("utf-8");
@@ -189,13 +196,20 @@ function spawnRecorder(
       bb.log.warn(`exec-tracking: recorder spawn failed for thread ${threadId}: ${describe(error)}`);
     });
     child.on("close", (code) => {
-      // Async, on the event loop — never blocks. Nonzero => a refusal or failure
-      // (registry, scope config, budget, corruption, bad path): warn with stderr.
-      // Zero + "ignored" => a thread for another project (expected, but observable
-      // so a dropped event is never confused with one that was never seen).
+      // Async, on the event loop — never blocks.
       if (code !== 0) {
+        // A refusal or failure (registry, scope config, budget, corruption, bad
+        // path): warn with the stderr the recorder produced.
         bb.log.warn(`exec-tracking: recorder exited ${code} for thread ${threadId}: ${stderr.trim()}`);
+        return;
       }
+      const line = stdout.trim();
+      if (INFO_MARKERS.some((marker) => line.startsWith(marker))) {
+        // Observable but not a failure: a correctly-ignored or correctly-conflicted
+        // event. Logged so it is never indistinguishable from an event unseen (N3).
+        bb.log.info(`exec-tracking: ${line}`);
+      }
+      // A quiet "recorded"/"noop" line needs no log — the file row is the record.
     });
     child.unref();
   } catch (error) {

@@ -6,32 +6,37 @@ handler resolves the executed profile via ``bb.sdk.threads.defaultExecutionOptio
 and passes the *resolved primitive values* here as CLI args; this script is the
 write authority. Load-bearing design points:
 
-- **Resolved values, never a mutable reference.** GH-617's whole point is that
-  storing a preset name lets editing the preset retroactively rewrite what a
-  historical dispatch resolved to. The handler snapshots the resolved triple to
-  strings before invoking this script, which serializes them immediately — no
-  object reference survives that could later change meaning.
+- **Provenance is immutable once resolved.** GH-617's whole point is that storing
+  a reference lets a later edit retroactively change what a historical dispatch
+  resolved to; *replacing* a resolved row on a re-fire does the same thing by a
+  different route. So a row that is already ``resolved`` is never overwritten. The
+  only legal write against an existing row is ``unresolved -> resolved`` (the
+  record completing). A re-fire of the SAME resolved triple is a no-op; a re-fire
+  of a DIFFERENT resolved triple (or resolved -> unresolved) keeps the first and
+  surfaces a ``conflict`` marker so a changed preset is visible, not invisible.
+
+- **Resolved values, never a mutable reference.** Even on the completing write,
+  the row stores the resolved primitive values, never a preset name.
 
 - **Records, never gates.** A ``thread.created`` handler is fire-and-forget with
-  no veto hook (GH-630 probe). Enforcement stays at our CLI call sites; this only
-  records what ran.
+  no veto hook (GH-630 probe). Enforcement stays at our CLI call sites.
+
+- **Exact identifiers, never normalized.** ``--project`` is matched against
+  ``projects.json`` RAW — whitespace variants are rejected, not repaired, because
+  repairing operator configuration silently is how a typo becomes authoritative
+  state (GH-630 review, N2).
 
 - **Project-scoped, registry-bound.** ``--project`` must be an EXACT registered
-  llm-collab project (``projects.json``), reproducing neither the builtin tasks
-  plugin's self-declared projects nor a phantom authoritative file (GH-630). The
-  thread's bb project (``--thread-project``) must exactly match that project's
-  ``bb.project_id`` scope; a thread for another project is IGNORED observably
-  rather than mis-attributed — mis-attribution corrupts the exact provenance this
-  plugin exists to preserve (GH-630 review, finding 1).
+  llm-collab project; the thread's bb project (``--thread-project``) must exactly
+  match that project's ``bb.project_id`` scope. A thread for another project is
+  IGNORED observably rather than mis-attributed.
 
 - **Fail closed, observably.** Every refusal exits nonzero with a message on
   stderr so the plugin's async close-handler can log it; a silent refusal is
-  indistinguishable from an event that never happened (GH-630 review, finding 5).
+  indistinguishable from an event that never happened (GH-630 review, F5/N3).
 
 State lives at ``{project_state_root}/{project_id}/executed-triples.jsonl`` — the
-project state root the Project Boundary rule owns, not a second invented root.
-Execution provenance is runtime state, not the git-backed task state a later
-slice carries, so it is not git-tracked here (GH-630 review, finding 2).
+project state root the Project Boundary rule owns.
 """
 
 from __future__ import annotations
@@ -75,6 +80,11 @@ RECORD_FILE_BUDGET_BYTES = 8 * 1024 * 1024  # 8 MiB
 RESOLVED = "resolved"
 UNRESOLVED = "unresolved"
 
+# Fields that define a resolved triple's identity. Two resolved rows for the same
+# thread are the SAME triple iff all of these match; otherwise the second is a
+# conflicting re-resolution and the first is kept (N1).
+RESOLVED_IDENTITY_FIELDS = ("provider", "model", "reasoning_level", "source")
+
 # Typed failure reasons. An absent row and a failed resolution must be
 # distinguishable, so each shape a resolution can fail in gets a stable label.
 REASON_NOT_RESOLVED = "profile_not_resolved"  # defaultExecutionOptions returned null
@@ -94,16 +104,15 @@ def _lock_path(project_id: str) -> Path:
 
 @contextlib.contextmanager
 def _write_lock(project_id: str):
-    """Serialize the read-modify-write upsert on one project's record file.
+    """Serialize the read-modify-write on one project's record file.
 
     thread.created can fire for different threads near-simultaneously, and each
     spawns its own child running this script against the SAME project file. One
-    exclusive flock per file makes each upsert atomic against the others, so a
-    concurrent writer cannot lose another's row. ponytail: per-file lock, as
-    narrow as the contention (all writers to one project file)."""
+    exclusive flock per file makes each decision+write atomic against the others.
+    ponytail: per-file lock, as narrow as the contention (all writers to one file)."""
     lock = _lock_path(project_id)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -164,24 +173,35 @@ def _load_existing(path: Path) -> list[dict]:
 
 def _serialize(row: dict) -> str:
     # Canonical compact form with sorted keys: a row that did not change serializes
-    # to identical bytes across rewrites, so a re-write does not churn unchanged rows.
+    # to identical bytes, so a re-write does not churn unchanged rows.
     return json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _upsert_bounded(path: Path, rows: list[dict], new_row: dict) -> None:
-    """Replace any existing row for this thread_id, then append, but only if the
-    serialized output stays within budget. One row per thread.
+def _same_resolved(existing: dict, new_row: dict) -> bool:
+    """Two resolved rows are the SAME triple iff every identity field matches."""
+    if existing.get("status") != RESOLVED or new_row.get("status") != RESOLVED:
+        return False
+    return all(existing.get(f) == new_row.get(f) for f in RESOLVED_IDENTITY_FIELDS)
+
+
+def _diff_summary(existing: dict, new_row: dict) -> str:
+    for field in RESOLVED_IDENTITY_FIELDS:
+        if existing.get(field) != new_row.get(field):
+            return f"{field}: {existing.get(field)!r} -> {new_row.get(field)!r}"
+    return f"status: {existing.get('status')!r} -> {new_row.get('status')!r}"
+
+
+def _write_bounded(path: Path, rows: list[dict], thread_id: str) -> None:
+    """Serialize + atomically replace, but only if the output stays within budget.
 
     The output-size check happens BEFORE the atomic replace, so a boundary-crossing
     write refuses without landing oversized state (F4). The file is left untouched
     and remains readable for later invocations."""
-    kept = [row for row in rows if row.get("thread_id") != new_row["thread_id"]]
-    kept.append(new_row)
-    content = "".join(_serialize(row) + "\n" for row in kept)
+    content = "".join(_serialize(row) + "\n" for row in rows)
     encoded = content.encode("utf-8")
     if len(encoded) > RECORD_FILE_BUDGET_BYTES:
         raise SystemExit(
-            f"recording thread {new_row['thread_id']} would grow {path} to "
+            f"recording thread {thread_id} would grow {path} to "
             f"{len(encoded)} bytes over the {RECORD_FILE_BUDGET_BYTES}-byte budget; "
             "refusing without writing (a wedge is worse than a refusal)"
         )
@@ -219,7 +239,7 @@ def _build_unresolved_row(project_id: str, thread_id: str, provider: str | None,
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    result.add_argument("--project", required=True, help="registered llm-collab project_id (scopes the record file)")
+    result.add_argument("--project", required=True, help="registered llm-collab project_id (matched RAW; scopes the record file)")
     result.add_argument("--thread-id", required=True, help="BB thread id whose profile executed")
     result.add_argument("--thread-project", required=True, help="bb projectId from the thread.created event DTO (scope match)")
     result.add_argument("--provider", default=None, help="providerId from the thread.created event DTO (may be omitted)")
@@ -234,24 +254,27 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
 
-    project_id = args.project.strip()
+    # N2: identifiers are matched RAW — a whitespace variant is rejected by the
+    # registry/scope check, never repaired. `.strip()` is used ONLY to test for an
+    # empty value; the raw value is what flows downstream.
+    project_id = _reject_nul("project", args.project)  # RAW; registry enforces exactness (N2)
     thread_id = _reject_nul("thread-id", args.thread_id)
     if not thread_id.strip():
         raise SystemExit("--thread-id is empty")
-    thread_project = _reject_nul("thread-project", args.thread_project).strip()
+    thread_project = _reject_nul("thread-project", args.thread_project)
+    if not thread_project.strip():
+        raise SystemExit("--thread-project is empty")
     provider = _reject_nul("provider", args.provider) if args.provider else None
 
     # F3: exact registry match BEFORE the lock or any record. An unregistered id
-    # must not create a phantom authoritative file — that is the builtin tasks
-    # defect this plugin replaces. Refusal is observable (nonzero + stderr).
+    # must not create a phantom authoritative file. Refusal is observable.
     entry = get_project(project_id)
     if entry is None:
         raise SystemExit(f"project {project_id!r} is not registered in projects.json; refusing to record")
 
     # F1: the thread's bb project must exactly match this project's scope. A thread
-    # for another llm-collab project is IGNORED observably (exit 0 + stdout) rather
-    # than mis-attributed; the plugin logs ignored events at info. Mis-attribution
-    # corrupts the exact provenance this plugin exists to preserve.
+    # for another llm-collab project is IGNORED observably (exit 0 + stdout marker)
+    # rather than mis-attributed. The plugin captures this marker and logs it (N3).
     native = _resolve_native_bb_project(entry)
     if thread_project != native:
         print(f"ignored scope_mismatch {thread_id}: thread project {thread_project!r} != {project_id!r} scope {native!r}")
@@ -277,11 +300,40 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with _write_lock(project_id):
             rows = _load_existing(path)
-            _upsert_bounded(path, rows, row)
+            existing = next((r for r in rows if r.get("thread_id") == thread_id), None)
+
+            if existing is None or existing.get("status") == UNRESOLVED:
+                # No prior row, or a pending failure completing/refining: write.
+                # Unresolved is not established provenance, so replacing it is the
+                # legal ``unresolved -> resolved`` completion (N1).
+                kept = []
+                replaced = False
+                for r in rows:
+                    if r.get("thread_id") == thread_id:
+                        kept.append(row)
+                        replaced = True
+                    else:
+                        kept.append(r)
+                if not replaced:
+                    kept.append(row)
+                _write_bounded(path, kept, thread_id)
+                print(f"recorded {row['status']} {thread_id} -> {path}")
+            elif _same_resolved(existing, row):
+                # Resolved already, and the re-fire is the SAME triple: a no-op.
+                # Do not rewrite or duplicate (N1).
+                print(f"noop {thread_id}: identical resolved triple; provenance immutable")
+            else:
+                # Resolved already, and the re-fire DIFFERS (a changed preset, or a
+                # resolved -> unresolved regression). Keep the first — provenance is
+                # immutable once resolved — and surface the conflict so the change is
+                # visible rather than invisible (N1). No write.
+                print(
+                    f"conflict {thread_id}: kept resolved provenance; rejected re-resolution "
+                    f"({_diff_summary(existing, row)}); provenance is immutable once resolved"
+                )
     except UnreadableFile as error:
         raise SystemExit(str(error)) from error
 
-    print(f"recorded {row['status']} {thread_id} -> {path}")
     return 0
 
 
