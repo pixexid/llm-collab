@@ -6,12 +6,13 @@ import unittest
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from llm_collab.bb_client import BbEvent, BbEventPage, BbQueued, BbRefusal
+from llm_collab.bb_client import BbEvent, BbEventPage, BbQueued, BbRefusal, REFUSAL_TIMED_OUT
 from llm_collab.bb_continuation import (
     BB_CONTINUATION_AMBIGUOUS,
     BB_CONTINUATION_COMPLETED,
     BB_CONTINUATION_DUPLICATE,
     BB_CONTINUATION_QUEUED,
+    BB_CONTINUATION_REFUSED,
     BbContinuationRefused,
     continue_bb_thread,
     observe_bb_thread,
@@ -486,7 +487,7 @@ class BbContinuationTest(unittest.TestCase):
                     materialized=materialized,
                     observed_at_utc=NOW,
                 )
-            self.assertEqual("failed", first.state)
+            self.assertEqual(BB_CONTINUATION_REFUSED, first.state)
             self.assertEqual(BB_CONTINUATION_DUPLICATE, second.state)
             self.assertEqual(1, len(client.sent))
             delivery = store.read_canonical_delivery(
@@ -500,6 +501,83 @@ class BbContinuationTest(unittest.TestCase):
             self.assertEqual(
                 "rejected_before_acceptance",
                 delivery["selected_receipt"]["state"],
+            )
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_pre_acceptance_refusal_is_refused_but_timed_out_is_ambiguous(self):
+        """GH-691: the two refusal outcomes must be distinct tokens, not one
+        "failed" string. This is the module-level mirror of GH-688's two-direction
+        rule: everything past the success-or-ambiguity boundary is
+        retry-suppressing, and a CLEAN pre-acceptance refusal is the carve-out that
+        must NOT be suppressed.
+
+        A clean refusal (reason neither ambiguous nor timed out) means bb refused
+        the message BEFORE accepting it -- nothing was delivered -- so it returns
+        BB_CONTINUATION_REFUSED, never the bare "failed" that observe_bb_thread
+        reuses for a post-delivery terminal. A timed-out refusal is ambiguous (the
+        send may have landed) so it stays BB_CONTINUATION_AMBIGUOUS and
+        retry-suppressing. One token cannot carry both contracts; a test asserting
+        only the refused direction cannot tell this fix from one that suppresses
+        every refusal.
+        """
+        # Direction 1: a clean pre-acceptance refusal returns the distinct
+        # "refused" token, not "failed".
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            clean = FailingBbClient()  # BbRefusal("bb_transport_failed", ...)
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                result = continue_bb_thread(
+                    store,
+                    client=clean,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+            self.assertEqual(
+                BB_CONTINUATION_REFUSED,
+                result.state,
+                "a clean pre-acceptance refusal is a distinct token from the "
+                "post-delivery \"failed\" terminal; nothing was delivered",
+            )
+            self.assertNotEqual(
+                "failed",
+                result.state,
+                "the bare \"failed\" string carries the post-delivery contract in "
+                "observe_bb_thread and must not reach the dispatch seam here",
+            )
+            self.assertEqual(1, len(clean.sent), "the native send ran exactly once")
+        finally:
+            store.close()
+            tmp.cleanup()
+
+        # Direction 2: a timed-out refusal is ambiguous and retry-suppressing --
+        # the opposite half of the same rule, unchanged by this fix.
+        tmp, store, session, materialized = self.open_fixture()
+        try:
+            class TimedOutBbClient(FakeBbClient):
+                def send(self, *, thread_id, message, mode="queue-if-active"):
+                    self.sent.append((thread_id, message, mode))
+                    return BbRefusal(REFUSAL_TIMED_OUT, "native send timed out")
+
+            timed_out = TimedOutBbClient()
+            with patch.dict(os.environ, {"LLM_COLLAB_CANONICAL_CONTROL": "enabled"}):
+                result = continue_bb_thread(
+                    store,
+                    client=timed_out,
+                    session=session,
+                    materialized=materialized,
+                    observed_at_utc=NOW,
+                )
+            self.assertEqual(
+                BB_CONTINUATION_AMBIGUOUS,
+                result.state,
+                "a timed-out refusal is ambiguous (the send may have landed) and "
+                "stays retry-suppressing, the opposite half of the rule",
+            )
+            self.assertEqual(
+                1, len(timed_out.sent), "the native send ran exactly once and is not retried"
             )
         finally:
             store.close()

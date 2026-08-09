@@ -39,7 +39,15 @@ from llm_collab.session_lifecycle import BbLifecycleProvider
 BB_CONTINUATION_QUEUED = "queued"
 BB_CONTINUATION_DUPLICATE = "duplicate"
 BB_CONTINUATION_AMBIGUOUS = "ambiguous"
+# A pre-acceptance refusal: the native send was refused BEFORE bb accepted the
+# message, so nothing was delivered (receipt_state "rejected_before_acceptance").
+# This is distinct from BB_CONTINUATION_FAILED, which observe_bb_thread emits
+# via _terminal_state for a thread that already STARTED and then failed/cancelled
+# -- a genuinely post-delivery terminal. One token must not carry both contracts
+# at the dispatch seam (GH-691): continue_bb_thread returns "refused", never
+# "failed"; observe_bb_thread returns "failed", never "refused".
 BB_CONTINUATION_FAILED = "failed"
+BB_CONTINUATION_REFUSED = "refused"
 BB_CONTINUATION_COMPLETED = "completed"
 
 _MESSAGE_ID = re.compile(r"msg_[0-9a-f]{64}\Z")
@@ -467,7 +475,7 @@ def continue_bb_thread(
             ids=(message_id, delivery_id, attempt_id),
         )
         return BbContinuationResult(
-            BB_CONTINUATION_AMBIGUOUS if ambiguous else BB_CONTINUATION_FAILED,
+            BB_CONTINUATION_AMBIGUOUS if ambiguous else BB_CONTINUATION_REFUSED,
             native.detail,
             message_id=message_id,
             delivery_id=delivery_id,
@@ -782,6 +790,7 @@ __all__ = [
     "BB_CONTINUATION_DUPLICATE",
     "BB_CONTINUATION_FAILED",
     "BB_CONTINUATION_QUEUED",
+    "BB_CONTINUATION_REFUSED",
     "BbContinuationRefused",
     "BbContinuationResult",
     "BbObservationResult",
