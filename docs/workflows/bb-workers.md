@@ -7,10 +7,11 @@ work isolated, exchanges results, and distinguishes completion from a stalled
 turn. Model selection is separate; use
 [`bb-worker-profiles.md`](bb-worker-profiles.md) for that policy.
 
-`bin/bb_spawn.py` is the only sanctioned assignment-spawn path; it implements
-the spawn gate for this workflow and records the resulting assignment. The
-native `bb thread spawn` examples below document the lifecycle shape only and
-must not be invoked as an alternate spawn path.
+`bin/bb_spawn.py` is the only sanctioned assignment-spawn path; it reaches
+`plan_spawn` in `llm_collab/spawn_gate.py`, implements the spawn gate for this
+workflow, and records the resulting assignment. The native `bb thread spawn`
+examples below document the lifecycle shape only and must not be invoked as an
+alternate assignment-spawn path.
 
 ## What a BB worker is
 
@@ -156,13 +157,29 @@ inferred default. Read-only assignments produce the evidence that gates
 decisions, and the measured glm-5.2 coordinate drift and muse-spark degeneration
 corrupt an audit as readily as a patch—worse, because no diff review catches a
 bad citation; see [`bb-worker-profiles.md`](bb-worker-profiles.md).
-The example records current practice. On the BB bootstrap/first-delivery path,
-`pi / kimi-coding/k3 / high` is the only authoring-qualified coordinate: that gate
-admits an authoring assignment only when its resolved `BbProfile` is a member of
-that exact one-profile qualified set, and refuses other profiles. The explicit
-`bb thread spawn` writing path is not covered by this qualification gate; it
-operates under the orchestrator's review controls and is not claimed to be
-profile-qualified here.
+
+Two paths can start an authoring assignment, and they are deliberately governed
+by different rules. On the inbound activation path, an arriving packet supplies
+the assignment with no human in the loop. BB bootstrap resolves the profile from
+its own policy and admits the assignment only when that profile belongs to the
+qualified set; otherwise it refuses fail closed.
+
+The explicitly selected path is deliberately not gated on qualification. Its
+`plan_spawn` seam, reached through `bin/bb_spawn.py`, enforces the Contract v15
+hard model exclusions and the isolation, exact base-SHA, registry, and scope
+checks, and nothing about qualification. This is a decision, not an oversight:
+an orchestrator decided both to start the specific lane and which exact provider,
+model, and reasoning level it runs on, and that lane's output passes through the
+review controls in
+[`commit-push-prs.md`](commit-push-prs.md). The native `bb thread spawn` command
+is not this assignment-spawn seam and remains forbidden as an alternate path.
+
+On the explicitly selected path, the orchestrator must name the exact provider,
+model, and reasoning level in the assignment, prefer a measured profile, and
+record the executed triple by reading it back from the execution event, never
+from a declared default. The qualified set is defined by the bootstrap profile
+policy and checked on the inbound path; this workflow does not restate its
+membership as runtime authority.
 
 Known failure modes are hard exclusions for every text-bearing assignment. Do
 not assign

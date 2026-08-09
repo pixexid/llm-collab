@@ -37,18 +37,34 @@ execution host.
 
 A Phase 2 selector must require the exact `provider`, `model`, and
 `reasoning_level` to be present and refuse as `profile_unavailable` otherwise;
-it must not fall back. The fail-closed half is implemented: a writer-lane first
-delivery (a packet carrying a complete `activation`/`worktree`/`branch`
-identity, i.e. an implementation/authoring assignment) on the bootstrap path
-is admitted only when its resolved profile is in the exact one-member qualified
-set containing `pi / kimi-coding/k3 / high`; other profiles refuse on this path
-as `bb_bootstrap_profile_unavailable`, and
-a partial or malformed activation marker refuses as the distinct
-`bb_bootstrap_malformed_activation` before execution. There is still no per-packet profile selection: the gate compares the
-resolved profile against the one-member qualified set, and other authoring
-evaluation remains Phase 2. `pi` is a multi-vendor
-provider, so its
-model IDs retain their vendor prefix, such as `kimi-coding/k3` or `zai/glm-5.2`.
+it must not fall back. Two paths can start an authoring assignment, and they are
+deliberately governed by different rules. On the inbound activation path, an
+arriving packet supplies the assignment with no human in the loop. BB bootstrap
+resolves the profile from its own policy and admits the assignment only when
+that profile belongs to the qualified set defined by
+`AUTHORING_QUALIFIED_PROFILES` in `llm_collab/bb_bootstrap.py`; otherwise it
+refuses as `bb_bootstrap_profile_unavailable`, fail closed. A partial or
+malformed activation marker refuses as the distinct
+`bb_bootstrap_malformed_activation` before execution.
+
+The explicitly selected path is deliberately not gated on qualification. Its
+`plan_spawn` seam in `llm_collab/spawn_gate.py`, reached through
+`bin/bb_spawn.py`, enforces the Contract v15 hard model exclusions and the
+isolation, exact base-SHA, registry, and scope checks, and nothing about
+qualification. This is a decision, not an oversight: an orchestrator decided
+both to start the specific lane and which exact provider, model, and reasoning
+level it runs on, and that lane's output passes through the review controls in
+[`commit-push-prs.md`](commit-push-prs.md). The native `bb thread spawn` command
+is not this assignment-spawn seam and remains forbidden as an alternate path.
+
+On the explicitly selected path, the orchestrator must name the exact provider,
+model, and reasoning level in the assignment, prefer a measured profile, and
+record the executed triple by reading it back from the execution event, never
+from a declared default. The qualified set is defined by
+`AUTHORING_QUALIFIED_PROFILES` in `llm_collab/bb_bootstrap.py`; this contract
+states the rule and the check without treating a runtime value as authority.
+There is no per-packet profile selection on the inbound path. `pi` is a
+multi-vendor provider, so its model IDs retain their vendor prefix.
 
 ## Routing tiers
 
@@ -93,8 +109,8 @@ lane, which holds the claiming-target context this classifier does not. The
 classification keys on the markers, never the packet body: a guard bound to how
 a caller phrased the prompt is the wrong proxy, and a writing delegation cannot
 grant a lane without those markers. Work-type → profile routing and authoring
-evaluation remain Phase 2; until then, an explicitly selected writing lane
-(`bin/bb_spawn.py`) operates under the orchestrator review controls in
+evaluation remain Phase 2; an explicitly selected writing lane through
+`bin/bb_spawn.py` operates under the orchestrator review controls in
 [`bb-workers.md`](bb-workers.md), not a claimed property of the model.
 
 ## Named profile candidates
