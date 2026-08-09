@@ -12,10 +12,12 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "bin" / "record_executed_triple.py"
+SCRIPT = REPO_ROOT / "bin" / "record_thread_defaults.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 PY = sys.executable
+
+RECORD_FILE = "thread-creation-defaults.jsonl"
 
 
 def run_record(workspace: Path, *args: str) -> subprocess.CompletedProcess:
@@ -26,7 +28,7 @@ def run_record(workspace: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def state_file(workspace: Path, project: str) -> Path:
-    return workspace / "project-state" / project / "executed-triples.jsonl"
+    return workspace / "project-state" / project / RECORD_FILE
 
 
 def rows_for(workspace: Path, project: str) -> list[dict]:
@@ -37,23 +39,28 @@ def rows_for(workspace: Path, project: str) -> list[dict]:
 
 
 def any_record_file(workspace: Path) -> list[Path]:
-    return [p for p in (workspace).rglob("executed-triples.jsonl")]
+    return [p for p in (workspace).rglob(RECORD_FILE)]
 
 
-class RecordExecutedTripleTest(unittest.TestCase):
+def write_projects(workspace: Path, projects: list[dict]) -> None:
+    (workspace / "projects.json").write_text(json.dumps({"projects": projects}), encoding="utf-8")
+
+
+class RecordThreadDefaultsTest(unittest.TestCase):
     """Each test runs in an isolated temp workspace. collab.config.json anchors
     find_workspace_root() at the temp dir and sets project_state_root; projects.json
-    registers two projects with distinct bb.project_id scopes."""
+    registers two projects with distinct bb.project_id scopes (Amiga + a registered
+    non-Amiga project, for the shared-contract mutation proofs)."""
 
     def setUp(self) -> None:
         self.workspace = Path(tempfile.mkdtemp(prefix="lc-et-", dir="/tmp"))
         (self.workspace / "collab.config.json").write_text(json.dumps({
             "project_state_root": str(self.workspace / "project-state"),
         }), encoding="utf-8")
-        (self.workspace / "projects.json").write_text(json.dumps({"projects": [
+        write_projects(self.workspace, [
             {"id": "amiga", "bb": {"enabled": True, "project_id": "proj_amiga"}},
             {"id": "nuvyr_app", "bb": {"enabled": True, "project_id": "proj_nuvyr"}},
-        ]}), encoding="utf-8")
+        ])
         self.addCleanup(shutil.rmtree, self.workspace, True)
 
     def _resolved(self, project: str, thread_id: str, thread_project: str = "proj_amiga",
@@ -89,6 +96,32 @@ class RecordExecutedTripleTest(unittest.TestCase):
         rows = rows_for(self.workspace, "amiga")
         self.assertEqual(2, len(rows), "two distinct threads => two rows")
         self.assertEqual({"thr_A", "thr_B"}, {r["thread_id"] for r in rows})
+
+    # -- GH-695 P1-B: labelled as creation-time DEFAULTS, not executed --------
+
+    def test_resolved_row_labelled_as_creation_defaults(self) -> None:
+        """The recorded value must say what it IS — creation-time defaults, not
+        executed evidence — in the field, the file name, and the row schema. A record
+        that misnames itself is a trap (GH-617)."""
+        self._resolved("amiga", "thr_L")
+        rows = rows_for(self.workspace, "amiga")
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        # The field label: every row self-describes its evidence kind.
+        self.assertEqual("creation_defaults", row.get("evidence"),
+                         "row must label its values as creation-time defaults")
+        # The file name: the persisted artifact does not call defaults "executed".
+        self.assertEqual(RECORD_FILE, state_file(self.workspace, "amiga").name)
+        self.assertNotIn("executed", state_file(self.workspace, "amiga").name)
+
+        # Unresolved rows are labelled too (a failed default-options probe, not an
+        # executed-evidence failure).
+        run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_U",
+                   "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
+        self.assertEqual(
+            "creation_defaults",
+            next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == "thr_U").get("evidence"),
+        )
 
     # -- N1: provenance immutable once resolved ---------------------------
 
@@ -225,6 +258,73 @@ class RecordExecutedTripleTest(unittest.TestCase):
         self.assertEqual("amiga", amiga[0]["project_id"])
         self.assertEqual("nuvyr_app", nuvyr[0]["project_id"])
 
+    # -- GH-695 P2-C: cross-project rows refused on load -------------------
+
+    def test_cross_project_row_refused_on_load_amiga(self) -> None:
+        """A loaded row whose project_id is missing or belongs to another project is
+        refused (fail closed), not silently reused. A matching thread_id in a
+        cross-project row must not make the recorder report no-op/conflict and
+        preserve the wrong project's data."""
+        path = state_file(self.workspace, "amiga")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A row for the SAME thread id but a DIFFERENT project (nuvyr), plus a row
+        # missing project_id entirely — both must be refused.
+        path.write_text(
+            json.dumps({"thread_id": "thr_A", "project_id": "nuvyr_app", "status": "resolved",
+                        "provider": "pi", "model": "m", "reasoning_level": "low",
+                        "source": "client/turn/requested", "evidence": "creation_defaults"})
+            + "\n"
+            + json.dumps({"thread_id": "thr_B", "status": "resolved"}) + "\n",
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        r = self._resolved("amiga", "thr_A")
+        self.assertNotEqual(0, r.returncode, "a cross-project row must fail closed, not be loaded")
+        self.assertIn("cross-project", r.stderr)
+        self.assertEqual(before, path.read_bytes(), "the corrupt/cross-project log is not rewritten")
+
+    def test_cross_project_row_refused_on_load_non_amiga(self) -> None:
+        """Shared-contract mutation proof on the NON-Amiga path: nuvyr's file with an
+        amiga row is refused too."""
+        path = state_file(self.workspace, "nuvyr_app")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"thread_id": "thr_N", "project_id": "amiga", "status": "resolved",
+                        "provider": "pi", "model": "m", "reasoning_level": "low",
+                        "source": "client/turn/requested", "evidence": "creation_defaults"}) + "\n",
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        r = self._resolved("nuvyr_app", "thr_N", thread_project="proj_nuvyr")
+        self.assertNotEqual(0, r.returncode, "non-Amiga path must also refuse a cross-project row")
+        self.assertIn("cross-project", r.stderr)
+        self.assertEqual(before, path.read_bytes())
+
+    # -- GH-695 P2-D: padded bb.project_id rejected, matched raw ------------
+
+    def test_padded_bb_project_id_rejected_not_normalized_amiga(self) -> None:
+        """A padded registry bb.project_id is REJECTED, not stripped — the recorder and
+        spawn_gate must enforce the same scope. (Mutating the fix back to .strip()
+        makes this pass instead of refusing, proving the gate.)"""
+        write_projects(self.workspace, [
+            {"id": "amiga", "bb": {"enabled": True, "project_id": " proj_amiga "}},
+        ])
+        path = state_file(self.workspace, "amiga")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        r = self._resolved("amiga", "thr_A", thread_project=" proj_amiga ")
+        self.assertNotEqual(0, r.returncode, "a padded bb.project_id must be refused, not normalized")
+        self.assertIn("surrounding whitespace", r.stderr)
+        self.assertFalse(path.exists(), "no record file is written for a refused scope")
+
+    def test_padded_bb_project_id_rejected_not_normalized_non_amiga(self) -> None:
+        """Shared-contract mutation proof on the NON-Amiga path."""
+        write_projects(self.workspace, [
+            {"id": "nuvyr_app", "bb": {"enabled": True, "project_id": "\tproj_nuvyr"}},
+        ])
+        r = self._resolved("nuvyr_app", "thr_N", thread_project="\tproj_nuvyr")
+        self.assertNotEqual(0, r.returncode, "non-Amiga path must also refuse a padded bb.project_id")
+        self.assertIn("surrounding whitespace", r.stderr)
+
     # -- F2: state root -----------------------------------------------------
 
     def test_state_lives_under_configured_project_state_root(self) -> None:
@@ -274,17 +374,18 @@ class RecordExecutedTripleTest(unittest.TestCase):
     def test_boundary_crossing_write_refused_without_modifying(self) -> None:
         """A log just under budget plus one row must refuse WITHOUT modifying the file,
         and the file must remain readable afterwards. A wedge is worse than a refusal."""
-        import record_executed_triple as mod  # type: ignore
+        import record_thread_defaults as mod  # type: ignore
         budget = mod.RECORD_FILE_BUDGET_BYTES
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
 
         def line_of_size(target: int) -> str:
-            # A COMPLETE resolved row (all identity fields) so a same-triple re-fire is
-            # a no-op under N1, which is how we prove the file stayed readable.
-            row = {"thread_id": "old", "status": "resolved", "provider": "pi",
+            # A COMPLETE resolved row (all identity fields + project_id, so P2-C load
+            # validation passes) so a same-triple re-fire is a no-op under N1, which is
+            # how we prove the file stayed readable.
+            row = {"thread_id": "old", "project_id": "amiga", "status": "resolved", "provider": "pi",
                    "model": "M", "reasoning_level": "low", "source": "client/turn/requested",
-                   "pad": "x" * 8}
+                   "evidence": "creation_defaults", "pad": "x" * 8}
             line = json.dumps(row, sort_keys=True, separators=(",", ":"))
             frame = len(line) - 8  # length minus the 8 pad chars
             pad_len = max(0, (target - 1) - frame)
@@ -316,10 +417,10 @@ class RecordExecutedTripleTest(unittest.TestCase):
     # -- read-side budget / corruption (fail closed) -----------------------
 
     def test_oversized_log_is_refused_without_partial_rewrite(self) -> None:
-        import record_executed_triple as mod  # type: ignore
+        import record_thread_defaults as mod  # type: ignore
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
-        original = json.dumps({"thread_id": "old", "status": "resolved",
+        original = json.dumps({"thread_id": "old", "project_id": "amiga", "status": "resolved",
                                "pad": "x" * (mod.RECORD_FILE_BUDGET_BYTES + 4096)})
         path.write_text(original + "\n", encoding="utf-8")
         before = path.read_bytes()
@@ -331,7 +432,9 @@ class RecordExecutedTripleTest(unittest.TestCase):
     def test_malformed_record_is_refused_not_dropped(self) -> None:
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
-        original = '{"thread_id":"good","status":"resolved"}\n{not valid json\n'
+        # The good line carries project_id so it passes P2-C and the refusal is the
+        # malformed second line, not a missing project_id.
+        original = '{"thread_id":"good","project_id":"amiga","status":"resolved"}\n{not valid json\n'
         path.write_text(original, encoding="utf-8")
         before = path.read_bytes()
 
@@ -353,17 +456,17 @@ class RecordExecutedTripleTest(unittest.TestCase):
         self.assertTrue(r_reg.stderr.strip(), "registry refusal must explain itself on stderr")
 
         # write-boundary refusal
-        import record_executed_triple as mod  # type: ignore
+        import record_thread_defaults as mod  # type: ignore
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"thread_id": "old", "status": "resolved",
+        path.write_text(json.dumps({"thread_id": "old", "project_id": "amiga", "status": "resolved",
                                     "pad": "x" * (mod.RECORD_FILE_BUDGET_BYTES - 128)}) + "\n", encoding="utf-8")
         r_bud = self._resolved("amiga", "new")
         self.assertNotEqual(0, r_bud.returncode)
         self.assertTrue(r_bud.stderr.strip(), "budget refusal must explain itself on stderr")
 
         # corruption refusal
-        path.write_text('{"thread_id":"good","status":"resolved"}\n{bad\n', encoding="utf-8")
+        path.write_text('{"thread_id":"good","project_id":"amiga","status":"resolved"}\n{bad\n', encoding="utf-8")
         r_cor = self._resolved("amiga", "new")
         self.assertNotEqual(0, r_cor.returncode)
         self.assertTrue(r_cor.stderr.strip(), "corruption refusal must explain itself on stderr")

@@ -153,6 +153,26 @@ class PreflightRefusalTest(unittest.TestCase):
         self.assertEqual("base_behind_origin", outcome.reason)
         self.assertIn("44 commits behind origin/main", outcome.detail)
 
+    # -- GH-695 P2-D: padded bb.project_id rejected at the gate (raw, not normalized) --
+
+    def test_padded_bb_project_id_refused_at_gate_amiga_and_non_amiga(self) -> None:
+        """A padded registry bb.project_id is refused at the gate (fail closed) rather
+        than normalized, so the spawn gate and the recorder enforce the same scope.
+        Proven on both an Amiga and a registered non-Amiga project. Mutating the fix
+        away (accepting/stripping the padded value) makes this pass instead of
+        refusing, proving the gate."""
+        for project_id in ("amiga", "nuvyr_app"):
+            with self.subTest(project_id=project_id):
+                transport = GitTransport()
+                registry = {**REGISTRY, "id": project_id,
+                            "bb": {**REGISTRY["bb"], "project_id": " proj_bb "}}
+                outcome = planned(registry_entry=registry, transport=transport)
+                self.assertIsInstance(outcome, GateRefusal, f"{project_id}: padded bb.project_id must refuse")
+                self.assertEqual("registry_bb_project_invalid", outcome.reason)
+                self.assertIn("surrounding whitespace", outcome.detail)
+                self.assertEqual([], transport.calls,
+                                 "the padded-scope refusal happens before any git call")
+
 
 class GitBoundaryTest(unittest.TestCase):
     def test_non_main_default_branch_is_used_for_every_origin_lookup(self) -> None:
