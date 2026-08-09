@@ -24,6 +24,7 @@ from _python_runtime import require_python  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import pr_watch  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
+    MAX_RESPONSE_CHARS,
     PINNED_BB_VERSION,
     subprocess_transport,
 )
@@ -48,13 +49,14 @@ HEARTBEAT_MARKER_REFRESH_SECONDS = 60.0
 WATCHER_CYCLE_DEADLINE_SECONDS = 300.0
 SUPPORTED_PR_STATES = frozenset({"open", "closed"})
 PR_HEAD_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
+THREAD_ENUM_MAX_RESPONSE_CHARS = MAX_RESPONSE_CHARS
 
 
 class ProbeError(RuntimeError):
     """A watcher check did not produce one complete sample."""
 
 
-def emit_event(line: str) -> None:
+def emit_event(line: str) -> bool:
     """Make every watcher event immediately visible to a pipe-backed Monitor."""
     try:
         print(line, flush=True)
@@ -62,7 +64,13 @@ def emit_event(line: str) -> None:
         # The Monitor pipe is the reporting channel; if it is gone there is no
         # second channel to report through, but its failure must not kill the
         # watcher.
-        pass
+        return False
+    return True
+
+
+def require_event_delivery(emit: Callable[[str], object], line: str) -> None:
+    if emit(line) is False:
+        raise ProbeError("watcher event was not delivered to the Monitor")
 
 
 @dataclass(frozen=True)
@@ -80,7 +88,7 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
     bb = project.get("bb")
     if not isinstance(bb, Mapping):
         raise ProbeError(f"project {project_id!r} has no bb configuration")
-    executable = bb.get("executable", ["bb"])
+    executable = bb.get("executable")
     if (
         not isinstance(executable, list)
         or not executable
@@ -105,10 +113,18 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
     )
 
 
-def probe_json(executable: Sequence[str], argv: Sequence[str], timeout: float):
+def probe_json(
+    executable: Sequence[str],
+    argv: Sequence[str],
+    timeout: float,
+    *,
+    max_response_chars: int = MAX_RESPONSE_CHARS,
+):
     """Run one bounded command and require one complete JSON response."""
     try:
-        result = subprocess_transport(executable)(argv, timeout)
+        result = subprocess_transport(
+            executable, max_response_chars=max_response_chars
+        )(argv, timeout)
     except Exception as error:
         raise ProbeError(str(error) or type(error).__name__) from error
     if result.exit_code != 0:
@@ -117,6 +133,17 @@ def probe_json(executable: Sequence[str], argv: Sequence[str], timeout: float):
         return json.loads(result.stdout)
     except (TypeError, json.JSONDecodeError) as error:
         raise ProbeError(f"malformed JSON: {error}") from error
+
+
+def probe_thread_json(
+    executable: Sequence[str], argv: Sequence[str], timeout: float
+):
+    return probe_json(
+        executable,
+        argv,
+        timeout,
+        max_response_chars=THREAD_ENUM_MAX_RESPONSE_CHARS,
+    )
 
 
 def cycle_deadline(deadline: float | None, monotonic: Callable[[], float]) -> float:
@@ -209,7 +236,7 @@ def worker_cycle(
     config: WatcherConfig,
     statuses: dict[str, str],
     *,
-    call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
+    call: Callable[[Sequence[str], Sequence[str], float], object] = probe_thread_json,
     emit: Callable[[str], None] = emit_event,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -239,7 +266,8 @@ def worker_cycle(
         previous = statuses.get(thread_id)
         if previous == "active" and status != previous:
             title = (row.get("title") or "")[:40].replace(" ", "_")
-            emit(
+            require_event_delivery(
+                emit,
                 f"WORKER LEFT ACTIVE {thread_id} ({title}): active -> {status} — "
                 "go look (thread output AND log); idle does not mean finished"
             )
@@ -300,11 +328,12 @@ def pr_cycle(
         previous = signatures.get(key)
         if previous is None:
             next_signatures[key] = encoded
-            emit(f"PR #{number} armed (baseline captured)")
+            require_event_delivery(emit, f"PR #{number} armed (baseline captured)")
             continue
         if encoded != previous:
             next_signatures[key] = encoded
-            emit(
+            require_event_delivery(
+                emit,
                 f"PR #{number} TIMELINE CHANGED — inspect the complete reviewed "
                 f"artifact set at head {sample['head'][:7]}"
             )
@@ -316,7 +345,10 @@ def pr_cycle(
         if remaining <= 0:
             next_signatures.pop(key, None)
             next_terminal.pop(key, None)
-            emit(f"PR #{number} retired from the watch set after the post-merge window")
+            require_event_delivery(
+                emit,
+                f"PR #{number} retired from the watch set after the post-merge window",
+            )
         else:
             next_terminal[key] = remaining
     remaining_cycle_seconds(deadline, monotonic)
@@ -328,7 +360,7 @@ def pr_cycle(
 def heartbeat_cycle(
     config: WatcherConfig,
     *,
-    call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
+    call: Callable[[Sequence[str], Sequence[str], float], object] = probe_thread_json,
     enumerate_open: Callable[..., list[int]] = open_numbers,
     emit: Callable[[str], None] = emit_event,
     deadline: float | None = None,
@@ -355,12 +387,14 @@ def heartbeat_cycle(
         current = current_value
     except Exception as error:
         complete = False
-        emit(
+        require_event_delivery(
+            emit,
             f"BB VERSION CHECK FAILED (pin={PINNED_BB_VERSION!r} installed='?') — "
             f"{error}; later quiet cycles prove nothing until this is fixed"
         )
     if current != "?" and current != PINNED_BB_VERSION:
-        emit(
+        require_event_delivery(
+            emit,
             f"BB VERSION MISMATCH pin={PINNED_BB_VERSION} installed={current} — "
             "bin/bb_spawn.py will refuse bb_version_mismatch; run the bb-update "
             "procedure before starting lanes"
@@ -383,7 +417,7 @@ def heartbeat_cycle(
         )
     except Exception as error:
         complete = False
-        emit(f"HEARTBEAT WORKER PROBE FAILED — {error}")
+        require_event_delivery(emit, f"HEARTBEAT WORKER PROBE FAILED — {error}")
     for kind in ("pr", "issue"):
         try:
             counts[kind] = len(
@@ -397,8 +431,11 @@ def heartbeat_cycle(
             )
         except Exception as error:
             complete = False
-            emit(f"HEARTBEAT {kind.upper()} ENUMERATION FAILED — {error}")
-    emit(
+            require_event_delivery(
+                emit, f"HEARTBEAT {kind.upper()} ENUMERATION FAILED — {error}"
+            )
+    require_event_delivery(
+        emit,
         f"HEARTBEAT openPRs={counts['pr']} liveWorkers={workers} "
         f"openIssues={counts['issue']} — NEITHER number is the writing-lane count; "
         "derive that from your own lane list. If writing lanes<2 AND a startable "
@@ -409,7 +446,7 @@ def heartbeat_cycle(
         remaining_cycle_seconds(deadline, monotonic)
     except ProbeError as error:
         complete = False
-        emit(f"HEARTBEAT CYCLE DEADLINE FAILED — {error}")
+        require_event_delivery(emit, f"HEARTBEAT CYCLE DEADLINE FAILED — {error}")
     return complete
 
 
@@ -511,10 +548,15 @@ def main() -> int:
     cycles = 0
     while True:
         cycles += 1
+        periodic_delivered = True
         if cycles % 20 == 0:
-            emit_event(f"WATCHER LIVE ({args.mode}) cycle {cycles}")
+            periodic_delivered = emit_event(
+                f"WATCHER LIVE ({args.mode}) cycle {cycles}"
+            )
 
         def check() -> bool:
+            if not periodic_delivered:
+                return False
             if args.mode == "worker-lifecycle":
                 statuses = state.setdefault("statuses", {})
                 if not isinstance(statuses, dict):

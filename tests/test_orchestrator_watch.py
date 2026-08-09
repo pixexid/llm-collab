@@ -178,6 +178,68 @@ class ProbeShapeTest(unittest.TestCase):
 
 
 class EventDeliveryTest(unittest.TestCase):
+    def test_property_a_undelivered_event_fails_without_advancing_baseline_or_marker(
+        self,
+    ) -> None:
+        class ClosedMonitor:
+            def __init__(self) -> None:
+                self.attempts = []
+                self.delivered = []
+
+            def write(self, text):
+                self.attempts.append(text)
+                raise BrokenPipeError("Monitor closed stdout")
+
+            def flush(self):
+                raise BrokenPipeError("Monitor closed stdout")
+
+        baseline = {"statuses": {"thread-a": "active"}}
+        state = json.loads(json.dumps(baseline))
+        monitor = ClosedMonitor()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker-lifecycle.json"
+            watch.save_state(path, baseline)
+
+            def check() -> bool:
+                complete = watch.worker_cycle(
+                    config(),
+                    state["statuses"],
+                    call=lambda *_: {
+                        "threads": [{"id": "thread-a", "status": "idle"}]
+                    },
+                )
+                if complete:
+                    watch.save_state(path, state)
+                return complete
+
+            with mock.patch.object(watch.sys, "stdout", monitor), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "worker-lifecycle", "project-a", "session-a", check
+                )
+            persisted = watch.load_state(path, {})
+
+        with self.subTest(property="event delivery"):
+            self.assertTrue(monitor.attempts, "the event write must be attempted")
+            self.assertEqual([], monitor.delivered, "the event must not be delivered")
+        with self.subTest(property="cycle result"):
+            self.assertFalse(
+                completed, "an undelivered event must fail the complete cycle"
+            )
+        with self.subTest(property="baseline preservation"):
+            self.assertEqual(
+                (baseline, baseline),
+                (state, persisted),
+                "an undelivered event must not advance in-memory or persisted baseline",
+            )
+        with self.subTest(property="marker preservation"):
+            self.assertEqual(
+                [],
+                writer.call_args_list,
+                "an undelivered event must not refresh the liveness marker",
+            )
+
     def test_failure_event_is_flushed_immediately_to_non_tty_stdout(self) -> None:
         read_fd, write_fd = os.pipe()
         stdout = os.fdopen(write_fd, "w", encoding="utf-8")
@@ -308,6 +370,80 @@ class StatePersistenceTest(unittest.TestCase):
 
 
 class EnumerationTest(unittest.TestCase):
+    def test_property_b_over_bound_thread_enumeration_fails_visibly_without_marker(
+        self,
+    ) -> None:
+        limit = 256
+        thread_payload = json.dumps(
+            {
+                "threads": [
+                    {"id": f"thread-{number}", "status": "idle"}
+                    for number in range(30)
+                ]
+            }
+        )
+        self.assertGreater(
+            len(thread_payload),
+            limit,
+            "the fixture must independently exceed the configured response bound",
+        )
+        version_payload = json.dumps(
+            {"currentVersion": watch.PINNED_BB_VERSION}
+        )
+        script = (
+            "import sys\n"
+            f"version = {version_payload!r}\n"
+            f"threads = {thread_payload!r}\n"
+            "print(version if sys.argv[1:3] == ['settings', 'version'] else threads)\n"
+        )
+        bounded_config = watch.WatcherConfig(
+            bb_executable=(sys.executable, "-c", script),
+            bb_project_id="native-project",
+            github_repo="owner/repo",
+            timeout_seconds=5.0,
+        )
+
+        for mode in ("worker-lifecycle", "heartbeat"):
+            messages = []
+            with self.subTest(mode=mode), mock.patch.object(
+                watch, "THREAD_ENUM_MAX_RESPONSE_CHARS", limit
+            ), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                if mode == "worker-lifecycle":
+                    check = lambda: watch.worker_cycle(
+                        bounded_config, {}, emit=messages.append
+                    )
+                else:
+                    check = lambda: watch.heartbeat_cycle(
+                        bounded_config,
+                        enumerate_open=lambda *_, **__: [],
+                        emit=messages.append,
+                    )
+                completed = watch.run_once(
+                    mode,
+                    "project-a",
+                    "session-a",
+                    check,
+                    emit=messages.append,
+                )
+                self.assertFalse(
+                    completed,
+                    "thread enumeration exceeding the response size bound must fail the cycle",
+                )
+                self.assertTrue(
+                    any(
+                        "FAILED" in message and str(limit) in message
+                        for message in messages
+                    ),
+                    "thread enumeration size refusal must be visible to the Monitor",
+                )
+                self.assertEqual(
+                    [],
+                    writer.call_args_list,
+                    "over-bound thread enumeration must not refresh the marker",
+                )
+
     def test_gh_pr_list_failure_skips_cycle_without_marker_refresh(self) -> None:
         state = {"signatures": {}, "terminal_left": {}}
 
@@ -654,6 +790,21 @@ class MarkerRefreshTest(unittest.TestCase):
             ],
             writer.call_args_list,
         )
+
+
+class ProjectConfigTest(unittest.TestCase):
+    def test_property_c_missing_bb_executable_refuses_without_path_fallback(
+        self,
+    ) -> None:
+        project = {
+            "bb": {"project_id": "native-project", "timeout_seconds": 5},
+            "github": {"repo": "owner/repo"},
+        }
+        with mock.patch.object(watch, "get_project", return_value=project):
+            with self.assertRaisesRegex(
+                watch.ProbeError, "bb.executable must be a non-empty list"
+            ):
+                watch.project_config("project-a", "worker-lifecycle")
 
 
 if __name__ == "__main__":
