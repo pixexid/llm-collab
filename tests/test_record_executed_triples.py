@@ -12,12 +12,12 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "bin" / "record_thread_defaults.py"
+SCRIPT = REPO_ROOT / "bin" / "record_executed_triples.py"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 PY = sys.executable
 
-RECORD_FILE = "thread-creation-defaults.jsonl"
+RECORD_FILE = "thread-executed-triples.jsonl"
 
 
 def run_record(workspace: Path, *args: str) -> subprocess.CompletedProcess:
@@ -46,7 +46,7 @@ def write_projects(workspace: Path, projects: list[dict]) -> None:
     (workspace / "projects.json").write_text(json.dumps({"projects": projects}), encoding="utf-8")
 
 
-class RecordThreadDefaultsTest(unittest.TestCase):
+class RecordExecutedTriplesTest(unittest.TestCase):
     """Each test runs in an isolated temp workspace. collab.config.json anchors
     find_workspace_root() at the temp dir and sets project_state_root; projects.json
     registers two projects with distinct bb.project_id scopes (Amiga + a registered
@@ -65,7 +65,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
 
     def _resolved(self, project: str, thread_id: str, thread_project: str = "proj_amiga",
                   *, model: str = "zai/glm-5.2", reasoning: str = "high",
-                  source: str = "client/thread/start", provider: str = "pi") -> subprocess.CompletedProcess:
+                  source: str = "client/turn/requested", provider: str = "pi") -> subprocess.CompletedProcess:
         return run_record(self.workspace, "--project", project, "--thread-id", thread_id,
                           "--thread-project", thread_project, "--provider", provider,
                           "--model", model, "--reasoning-level", reasoning, "--source", source)
@@ -83,7 +83,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         self.assertEqual("resolved", row["status"])
         self.assertEqual("zai/glm-5.2", row["model"])
         self.assertEqual("high", row["reasoning_level"])
-        self.assertEqual("client/thread/start", row["source"])
+        self.assertEqual("client/turn/requested", row["source"])
         self.assertEqual("pi", row["provider"])
 
         # Same thread again (event re-fire / manual re-run) must NOT duplicate.
@@ -97,61 +97,70 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         self.assertEqual(2, len(rows), "two distinct threads => two rows")
         self.assertEqual({"thr_A", "thr_B"}, {r["thread_id"] for r in rows})
 
-    # -- GH-695 head 3: record ONLY creation defaults; refuse every other source -----
+    # -- GH-710: record ONLY executed-triple evidence (client/turn/requested) -----
 
-    def test_creation_default_source_records(self) -> None:
-        """A client/thread/start result IS a creation-time default and records, with
-        evidence=creation_defaults and the source preserved."""
-        self._resolved("amiga", "thr_create", source="client/thread/start")
+    def test_turn_requested_source_records_with_triple(self) -> None:
+        """A client/turn/requested result IS executed-triple evidence (bb_client.py:21-24
+        names its execution block the authoritative record of the profile bb actually
+        ran) and records, with evidence=executed, the source preserved, and the full
+        (provider, model, reasoning_level) triple. Mutation proof: reverting the
+        accepted source back to client/thread/start fails this test."""
+        r = self._resolved("amiga", "thr_exec", source="client/turn/requested",
+                           model="zai/glm-5.2", reasoning="high", provider="pi")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("recorded resolved", r.stdout)
         rows = rows_for(self.workspace, "amiga")
         self.assertEqual(1, len(rows))
         row = rows[0]
         self.assertEqual("resolved", row["status"])
-        self.assertEqual("creation_defaults", row["evidence"])
-        self.assertEqual("client/thread/start", row["source"])
+        self.assertEqual("executed", row["evidence"])
+        self.assertEqual("client/turn/requested", row["source"])
+        self.assertEqual("zai/glm-5.2", row["model"])
+        self.assertEqual("high", row["reasoning_level"])
+        self.assertEqual("pi", row["provider"])
 
-    def test_turn_sourced_result_refused_observably_writes_nothing(self) -> None:
-        """A turn-derived source (client/turn/requested or client/turn/start) is OUT
-        OF THIS ARTIFACT'S CONTRACT: refused observably (exit 0 + ignored marker
-        naming the source) and writes no row, so the store name stays true. This is
-        the test that fails if turn sources are ever re-admitted into an artifact
-        documented as creation defaults."""
-        for source in ("client/turn/requested", "client/turn/start"):
-            with self.subTest(source=source):
-                r = self._resolved("amiga", f"thr_{source}", source=source)
-                self.assertEqual(0, r.returncode, r.stderr[:500])
-                self.assertIn("ignored out_of_contract", r.stdout)
-                self.assertIn(source, r.stdout, "the marker names the refused source")
-                self.assertIn("GH-695 P1-B", r.stdout, "the marker names the deferred re-scope")
-                self.assertEqual([], rows_for(self.workspace, "amiga"),
-                                 f"source {source!r} must write no row")
-        # An in-contract thread in the same workspace still records normally (control).
-        self._resolved("amiga", "thr_ok", source="client/thread/start")
+    def test_thread_start_refused_with_own_distinct_reason(self) -> None:
+        """client/thread/start is handled EXPLICITLY: on this SDK its payload carries
+        no execution options (GH-706), so it is not executed evidence — refused
+        observably with its OWN distinct reason (not the unrecognised-source one)
+        and writes no row. If thread/start ever carries execution options, this
+        marker is the tripwire that makes the change visible."""
+        r = self._resolved("amiga", "thr_start", source="client/thread/start")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("ignored thread_start_not_executed", r.stdout)
+        self.assertNotIn("out_of_contract", r.stdout,
+                         "thread/start has its own distinct reason, not the unrecognised one")
+        self.assertEqual([], rows_for(self.workspace, "amiga"), "thread/start writes no row")
+        # An accepted turn-derived row in the same workspace still records (control).
+        self._resolved("amiga", "thr_ok", source="client/turn/requested")
         self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
 
     def test_unrecognised_source_refused_observably_writes_nothing(self) -> None:
         """An unrecognised source cannot be classified into an artifact that claims a
-        classification: refused observably (ignored marker naming the source) and
-        writes no row. Do not write a row you cannot classify."""
-        for source in ("client/something/else", "not-a-source", "client/turn/x"):
+        classification: refused observably (ignored out_of_contract marker naming the
+        source) and writes no row. The gate admits ONE named source
+        (client/turn/requested); it is not removed. Mutation proof: removing this
+        refusal fails this test."""
+        for source in ("client/turn/start", "client/something/else", "not-a-source", "client/turn/x"):
             with self.subTest(source=source):
                 r = self._resolved("amiga", f"thr_bad_{source}", source=source)
                 self.assertEqual(0, r.returncode, r.stderr[:500])
                 self.assertIn("ignored out_of_contract", r.stdout)
-                self.assertIn(source, r.stdout)
-                self.assertEqual([], rows_for(self.workspace, "amiga"))
+                self.assertIn(source, r.stdout, "the marker names the refused source")
+                self.assertEqual([], rows_for(self.workspace, "amiga"),
+                                 f"source {source!r} must write no row")
 
     def test_resolved_identity_excludes_source(self) -> None:
-        """source is no longer in RESOLVED_IDENTITY_FIELDS: every stored row has
-        source client/thread/start by construction (turn sources are refused), so
+        """source is not in RESOLVED_IDENTITY_FIELDS: every stored row has
+        source client/turn/requested by construction (other sources are refused), so
         source carries no identity. A same-(provider,model,reasoning_level) re-fire
         is a no-op; the identity is exactly those three fields."""
-        import record_thread_defaults as mod  # type: ignore
+        import record_executed_triples as mod  # type: ignore
         self.assertEqual(("provider", "model", "reasoning_level"), mod.RESOLVED_IDENTITY_FIELDS)
         self.assertNotIn("source", mod.RESOLVED_IDENTITY_FIELDS)
-        self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/thread/start")
+        self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/turn/requested")
         before = state_file(self.workspace, "amiga").read_text(encoding="utf-8")
-        r = self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/thread/start")
+        r = self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/turn/requested")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("noop", r.stdout)
         self.assertEqual(before, state_file(self.workspace, "amiga").read_text(encoding="utf-8"))
@@ -159,28 +168,31 @@ class RecordThreadDefaultsTest(unittest.TestCase):
 
     def test_unresolved_row_carries_no_evidence_label(self) -> None:
         """An unresolved row records a FAILED resolution — no value was read, so
-        there is no source and no evidence label. It must not inherit
-        creation_defaults (the assume-the-label defect)."""
+        there is no source and no evidence label (a failed resolution executed
+        nothing). It must not inherit `executed` (the assume-the-label defect)."""
         run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_U",
                    "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
         row = rows_for(self.workspace, "amiga")[0]
         self.assertNotIn("evidence", row, "an unresolved row has no source to derive a label from")
-        self.assertNotIn("creation_defaults", json.dumps(row))
+        self.assertNotIn("executed", json.dumps(row))
 
-    def test_state_file_name_does_not_call_defaults_executed(self) -> None:
-        """The persisted artifact's name does not call the rows 'executed' — the
-        label follows the value, and a creation-time default is not executed evidence."""
-        self._resolved("amiga", "thr_L", source="client/thread/start")
-        self.assertEqual(RECORD_FILE, state_file(self.workspace, "amiga").name)
-        self.assertNotIn("executed", state_file(self.workspace, "amiga").name)
+    def test_state_file_name_states_what_it_holds(self) -> None:
+        """The persisted artifact's name states what the rows ARE — the triples that
+        executed. thread-creation-defaults.jsonl must not survive holding
+        turn-derived rows (GH-710)."""
+        self._resolved("amiga", "thr_L", source="client/turn/requested")
+        name = state_file(self.workspace, "amiga").name
+        self.assertEqual(RECORD_FILE, name)
+        self.assertIn("executed", name)
+        self.assertNotIn("creation", name)
 
     # -- N1: provenance immutable once resolved ---------------------------
 
     def test_re_fire_same_resolved_triple_is_noop(self) -> None:
         """A re-fire with the SAME resolved triple is a no-op: no rewrite, no duplicate."""
-        self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/thread/start")
+        self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
         before = state_file(self.workspace, "amiga").read_text(encoding="utf-8")
-        r = self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/thread/start")
+        r = self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("noop", r.stdout)
         self.assertEqual(before, state_file(self.workspace, "amiga").read_text(encoding="utf-8"),
@@ -245,7 +257,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
     def test_absent_provider_recorded_as_null(self) -> None:
         r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_P",
                        "--thread-project", "proj_amiga",
-                       "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
+                       "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIsNone(rows_for(self.workspace, "amiga")[0]["provider"])
 
@@ -288,7 +300,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         mis-attributing it to the configured project's file."""
         r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_other",
                        "--thread-project", "proj_nuvyr", "--provider", "pi",
-                       "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
+                       "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("ignored scope_mismatch", r.stdout)
         self.assertEqual([], rows_for(self.workspace, "amiga"), "no row written for an out-of-scope thread")
@@ -323,7 +335,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         path.write_text(
             json.dumps({"thread_id": "thr_A", "project_id": "nuvyr_app", "status": "resolved",
                         "provider": "pi", "model": "m", "reasoning_level": "low",
-                        "source": "client/thread/start", "evidence": "creation_defaults"})
+                        "source": "client/turn/requested", "evidence": "executed"})
             + "\n"
             + json.dumps({"thread_id": "thr_B", "status": "resolved"}) + "\n",
             encoding="utf-8",
@@ -342,7 +354,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         path.write_text(
             json.dumps({"thread_id": "thr_N", "project_id": "amiga", "status": "resolved",
                         "provider": "pi", "model": "m", "reasoning_level": "low",
-                        "source": "client/thread/start", "evidence": "creation_defaults"}) + "\n",
+                        "source": "client/turn/requested", "evidence": "executed"}) + "\n",
             encoding="utf-8",
         )
         before = path.read_bytes()
@@ -397,7 +409,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 r = run_record(self.workspace, "--project", bad, "--thread-id", "thr",
                                "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
+                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
                 self.assertNotEqual(0, r.returncode, f"{bad!r} should be refused")
         self.assertEqual([], any_record_file(self.workspace), "no record file created for a refused project")
 
@@ -411,7 +423,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             with self.subTest(padded=padded):
                 r = run_record(self.workspace, "--project", padded, "--thread-id", "thr",
                                "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
+                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
                 self.assertNotEqual(0, r.returncode, f"padded {padded!r} must be refused, not repaired")
         # The exact, un-padded id still records normally (control direction).
         r_ok = self._resolved("amiga", "thr_ok")
@@ -425,7 +437,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
     def test_boundary_crossing_write_refused_without_modifying(self) -> None:
         """A log just under budget plus one row must refuse WITHOUT modifying the file,
         and the file must remain readable afterwards. A wedge is worse than a refusal."""
-        import record_thread_defaults as mod  # type: ignore
+        import record_executed_triples as mod  # type: ignore
         budget = mod.RECORD_FILE_BUDGET_BYTES
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,8 +447,8 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             # validation passes) so a same-triple re-fire is a no-op under N1, which is
             # how we prove the file stayed readable.
             row = {"thread_id": "old", "project_id": "amiga", "status": "resolved", "provider": "pi",
-                   "model": "M", "reasoning_level": "low", "source": "client/thread/start",
-                   "evidence": "creation_defaults", "pad": "x" * 8}
+                   "model": "M", "reasoning_level": "low", "source": "client/turn/requested",
+                   "evidence": "executed", "pad": "x" * 8}
             line = json.dumps(row, sort_keys=True, separators=(",", ":"))
             frame = len(line) - 8  # length minus the 8 pad chars
             pad_len = max(0, (target - 1) - frame)
@@ -457,7 +469,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         # The file remains readable: a same-triple re-fire of the existing row is a
         # no-op (it had to READ the file to decide the triple matches) and leaves the
         # file untouched — proving the project is not wedged after the refusal.
-        r2 = self._resolved("amiga", "old", model="M", reasoning="low", source="client/thread/start")
+        r2 = self._resolved("amiga", "old", model="M", reasoning="low", source="client/turn/requested")
         self.assertEqual(0, r2.returncode, r2.stderr[:500])
         self.assertIn("noop", r2.stdout)
         self.assertEqual(before, path.read_bytes(), "a no-op does not rewrite")
@@ -468,7 +480,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
     # -- read-side budget / corruption (fail closed) -----------------------
 
     def test_oversized_log_is_refused_without_partial_rewrite(self) -> None:
-        import record_thread_defaults as mod  # type: ignore
+        import record_executed_triples as mod  # type: ignore
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
         original = json.dumps({"thread_id": "old", "project_id": "amiga", "status": "resolved",
@@ -502,12 +514,12 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         # registry refusal
         r_reg = run_record(self.workspace, "--project", "amigaa", "--thread-id", "t",
                            "--thread-project", "proj_amiga", "--model", "m",
-                           "--reasoning-level", "low", "--source", "client/thread/start")
+                           "--reasoning-level", "low", "--source", "client/turn/requested")
         self.assertNotEqual(0, r_reg.returncode)
         self.assertTrue(r_reg.stderr.strip(), "registry refusal must explain itself on stderr")
 
         # write-boundary refusal
-        import record_thread_defaults as mod  # type: ignore
+        import record_executed_triples as mod  # type: ignore
         path = state_file(self.workspace, "amiga")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"thread_id": "old", "project_id": "amiga", "status": "resolved",

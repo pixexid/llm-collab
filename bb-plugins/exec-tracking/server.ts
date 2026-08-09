@@ -1,35 +1,49 @@
 /**
- * exec-tracking plugin — first capability: record the thread's creation-time
- * default execution options (and ONLY those).
+ * exec-tracking plugin — first capability: record the thread's EXECUTED
+ * (provider, model, reasoning_level) triple — which triple actually ran.
  *
- * GH-630 first scope / GH-617 / GH-695 head 3. On `thread.created` this reads the
- * thread's resolved (provider, model, reasoning_level) options IN-PROCESS via
+ * GH-710 / GH-630 first scope / GH-617. On `thread.created` this reads the
+ * thread's resolved execution options IN-PROCESS via
  * `bb.sdk.threads.defaultExecutionOptions`, snapshots the resolved values AND
  * their `source` to primitives, and hands them to a child running our own
- * `bin/record_thread_defaults.py` (the bounded write authority). That script
- * records a durable, project-scoped row ONLY when `source === client/thread/start`
- * (a creation-time default); any other source is refused observably.
+ * `bin/record_executed_triples.py` (the bounded write authority). That script
+ * records a durable, project-scoped row ONLY when `source ===
+ * client/turn/requested`; every other source is refused observably.
  *
- * **Record one thing, refuse the rest (GH-695 head 3).**
- * `defaultExecutionOptions` tags its result with a `source` naming which client
- * phase the values came from. At `thread.created` that is usually
- * `client/thread/start` (creation-time defaults), but the handler is
- * fire-and-forget: if the spawn turn advances before its awaited settings lookup
- * and loopback RPC finish, the result can carry `client/turn/requested` — the
- * authoritative executed-evidence source (the `execution` block
- * `llm_collab/bb_client.py` validates against) — or `client/turn/start`. Those
- * turn-derived sources are OUT OF THIS ARTIFACT'S CONTRACT: the recorder refuses
- * them observably (`ignored out_of_contract`, source named) and writes no row, so
- * the store name stays true (every row really is a creation default) and a
- * consumer selecting the artifact by its documented contract cannot misclassify a
- * turn row. An absent/unrecognised `source` is refused the same way. Recording
- * turn-derived evidence into an artifact named for creation defaults would let the
- * container make a claim its contents can violate. Deterministic sourcing from
- * `client/turn/requested` (via `bb.sdk.threads.events.wait`, the SDK RPC analog of
- * `thread log --json`) is the tracked re-scope (GH-695 P1-B); `bb.events.on`
- * exposes only the six thread transitions (created/active/idle/failed/archived/
- * deleted), so a lifecycle-event-driven recorder is not available. This slice does
- * not build source precedence — it records one thing and refuses the rest.
+ * **Executed-triple evidence, one named source (GH-710).**
+ * The artifact is executed-triple evidence — which triple actually ran. That is
+ * the invariant the frozen-triple rule needs audited; "creation-time defaults"
+ * was a proxy for it, chosen before GH-706 established the proxy is
+ * unobservable on this SDK. The accepted source is `client/turn/requested`
+ * because the repository already decided that source is the proof:
+ * `llm_collab/bb_client.py:21-24` names its `execution` block the authoritative
+ * record of the profile bb actually ran, and `BbClient` validates against it.
+ * This recorder aligns with that authority rather than dissenting from it.
+ *
+ * The gate stays a gate — it admits ONE named source:
+ *   - `client/turn/requested` — recorded, `evidence: executed`.
+ *   - `client/thread/start` — refused with its OWN distinct reason
+ *     (`ignored thread_start_not_executed`): its payload carries no execution
+ *     options on this SDK (GH-706), and if it ever does, that marker is the
+ *     tripwire rather than a silent drop.
+ *   - anything else (`client/turn/start`, absent, unrecognised) — refused as
+ *     `ignored out_of_contract`, source named.
+ * What was measured at `thread.created` (GH-706): `defaultExecutionOptions`
+ * reported `client/turn/requested` in 8 of 8 probes, varying provider (`pi` and
+ * `claude-code`), model, visibility, parentage, an idle fork, and a spawn with no
+ * explicit provider or model. None reported `client/thread/start`. An idle fork
+ * emitted `client/turn/requested` BEFORE `client/thread/start`, so there is no
+ * pre-turn window to sample.
+ *
+ * The SDK documents no ordering: `bb-plugin-sdk.d.ts` declares the `source` enum
+ * and says nothing about when each value is produced. So treat the above as
+ * measurement, not as a guarantee — do not write code that assumes it holds.
+ *
+ * If a `client/thread/start` result does occur, it refuses with its own distinct
+ * `thread_start_not_executed` reason and is logged, so it is visible rather than
+ * silent. There is no retry: this slice records the authoritative source when it
+ * is observable and refuses the rest observably. That is a known limitation of
+ * the slice, not an oversight.
  *
  * Why this shape:
  *
@@ -54,7 +68,7 @@
  *       propagated to the emitter.
  *
  * - **Records, never gates.** Enforcement stays at our CLI call sites; this only
- *   records the creation-time defaults. An options object that cannot be resolved
+ *   records the executed triple. An options object that cannot be resolved
  *   is recorded as an explicit `unresolved` row so an absent row and a failed
  *   resolution are distinguishable.
  *
@@ -68,7 +82,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import type { BbPluginApi } from "@bb/plugin-sdk";
 
-const SCRIPT_REL = path.join("bin", "record_thread_defaults.py");
+const SCRIPT_REL = path.join("bin", "record_executed_triples.py");
 // Both streams are piped+drained with a capped buffer so a verbose child cannot
 // fill the pipe and block. STDOUT_CAP bounds the captured stdout used for info
 // markers; STDERR_CAP bounds the captured stderr used for failure logging.
@@ -134,9 +148,11 @@ async function onCreated(
 
   // Read the thread's resolved execution options in-process. Snapshot to
   // primitives immediately; do not hold the resolved object. Pass the SDK-reported
-  // `source` through; the recorder records ONLY client/thread/start (a creation-
-  // time default) and refuses any other source observably (GH-695 head 3), so a
-  // turn-derived snapshot never enters an artifact documented as creation defaults.
+  // `source` through unchanged; the recorder records ONLY client/turn/requested
+  // (the executed-evidence source bb_client.py:21-24 names authoritative, GH-710),
+  // refuses client/thread/start with its own distinct reason, and refuses any
+  // other source as out of contract — so a non-executed snapshot never enters an
+  // artifact documented as executed-triple evidence.
   let resolved: {
     model?: string | null;
     reasoningLevel?: string | null;

@@ -1,21 +1,44 @@
 # bb-plugin-exec-tracking
 
 Custom bb plugin — the **task/execution-tracking** plugin (GH-630). This checkout's
-first capability is the **creation-defaults recorder** (GH-617 / GH-695): on
-`thread.created` it records the thread's creation-time default `(provider, model,
-reasoning_level)` options — and ONLY those. A turn-derived result is refused
-observably and deferred to the `client/turn/requested` re-scope (GH-695 P1-B).
+first capability is the **executed-triple recorder** (GH-710 / GH-617): on
+`thread.created` it records the `(provider, model, reasoning_level)` triple that
+actually ran — and ONLY executed evidence. A non-executed result is refused
+observably.
 
 > **Operator procedure (build, typecheck, install, config) lives in
 > [`docs/workflows/exec-tracking-plugin.md`](../../docs/workflows/exec-tracking-plugin.md).**
 > It is the single source of truth; this README links to it rather than restating a
 > command sequence that can go stale (AGENTS.md "this file is the source of truth").
 
+## The artifact's definition (this README owns it)
+
+The artifact is **executed-triple evidence**: which `(provider, model,
+reasoning_level)` triple actually ran on each thread. That is the invariant the
+plugin exists to serve — it is what makes the frozen-triple rule auditable.
+"Creation-time defaults" was a **proxy** for that invariant, chosen before GH-706
+established the proxy is unobservable: no surface on this SDK carries
+creation-time execution options (`client/thread/start`'s payload has none, and an
+idle fork emits `client/turn/requested` *first*, so there is no pre-turn window).
+
+The accepted source is `client/turn/requested` **because the repository already
+decided it is the proof**, not because it is the source we can get:
+`llm_collab/bb_client.py:21-24` states that the spawn envelope carries no model
+and no reasoning level, so argv alone cannot prove which profile actually ran,
+and that the authoritative record is the `execution` block on the thread's
+`client/turn/requested` event — the block `BbClient` validates the requested
+profile against (`SPAWN_EVENT_TYPE` at `bb_client.py:67`, `_execution_evidence()`
+at `bb_client.py:633`). This recorder accepts the same source that authority
+accepts; GH-710 resolved the two-authorities defect in favor of `bb_client.py`.
+
+`docs/workflows/exec-tracking-plugin.md` links here for this definition rather
+than restating it.
+
 ## Where it lives (two-plugin structure)
 
 Custom bb plugins live as siblings under `bb-plugins/`:
 
-- `bb-plugins/exec-tracking/` — **this plugin**. Resolved execution options (this
+- `bb-plugins/exec-tracking/` — **this plugin**. Executed-triple evidence (this
   recorder) and, later, task/execution tracking carrying the gaps the builtin
   `tasks` could not supply.
 - `bb-plugins/fan-out/` — a **future** orchestration/fan-out plugin (per-agent
@@ -34,7 +57,7 @@ On `thread.created`, `server.ts`:
    never blocks the event loop);
 2. snapshots the resolved values **and their `source`** to primitives (never a
    mutable reference — GH-617's whole point);
-3. hands them to a child running `bin/record_thread_defaults.py`
+3. hands them to a child running `bin/record_executed_triples.py`
    (`unref()` — the handler never waits on the write). Spawn errors and nonzero
    exits are logged **asynchronously** via the child's `error`/`close` events, so a
    recorder failure is never indistinguishable from an event that never happened.
@@ -44,38 +67,35 @@ row, so an absent row and a failed resolution are distinguishable. The plugin
 **records, never gates**: `thread.created` handlers have no veto hook, so
 enforcement stays at the CLI call sites.
 
-## Records ONLY creation-time defaults (GH-695 head 3)
+## Records ONLY executed-triple evidence (GH-710)
 
 `defaultExecutionOptions` resolves options and tags them with a `source` naming
-which client phase the values came from. Only `client/thread/start` is a
-creation-time default. The committed SDK declaration
-(`resolvedThreadExecutionOptionsSchema`) also permits two turn-derived sources —
-`client/turn/requested` (the authoritative executed-evidence source, the
-`execution` block `llm_collab/bb_client.py` validates against) and
-`client/turn/start` — but those are OUT OF THIS ARTIFACT'S CONTRACT: the recorder
-**refuses them observably** (exit 0 + `ignored out_of_contract` marker naming the
-source) and writes no row. An absent or unrecognised `source` is refused the same
-way — a row the artifact cannot classify is not half-admitted.
+which client phase the values came from. The gate admits ONE named source — it is
+a definition, not a removed check:
 
-| `source`                | outcome                                              |
-|-------------------------|------------------------------------------------------|
-| `client/thread/start`   | **recorded** — `evidence: creation_defaults`         |
-| `client/turn/requested` | refused observably (`ignored out_of_contract`)        |
-| `client/turn/start`     | refused observably (`ignored out_of_contract`)        |
-| absent / unrecognised   | refused observably (`ignored out_of_contract`)        |
+| `source`                | outcome                                                          |
+|-------------------------|------------------------------------------------------------------|
+| `client/turn/requested` | **recorded** — `evidence: executed`                               |
+| `client/thread/start`   | refused observably, own reason (`ignored thread_start_not_executed`) |
+| `client/turn/start`     | refused observably (`ignored out_of_contract`)                    |
+| absent / unrecognised   | refused observably (`ignored out_of_contract`)                    |
 
-So the store name (`thread-creation-defaults.jsonl`) is true — every row in it
-really is a creation default — and a consumer selecting the artifact by its
-documented contract cannot misclassify a turn row. The fire-and-forget handler can
-sometimes already see `client/turn/requested` (if the spawn turn advances before
-its loopback RPC finishes), but recording that into an artifact named for creation
-defaults would let the container make a claim its contents can violate, so it is
-refused. Deterministic sourcing from `client/turn/requested` (via
-`bb.sdk.threads.events.wait`, the SDK RPC analog of `thread log --json`) is the
-tracked re-scope (GH-695 P1-B); `bb.events.on` exposes only the six thread
-transitions (created/active/idle/failed/archived/deleted), so a lifecycle-event
-recorder is not available. This slice does not build source precedence — it records
-one thing and refuses the rest.
+`client/thread/start` is handled **explicitly**, not folded into the unrecognised
+refusal: on this SDK its payload carries no execution options (GH-706), so it is
+not executed evidence — but if it ever IS seen carrying them, the distinct
+`thread_start_not_executed` marker surfaces that change instead of silently
+dropping it. The fire-and-forget handler usually still sees `client/thread/start`
+at `thread.created` (the spawn turn has not advanced when its loopback RPC
+finishes), in which case no row is written; when the turn has advanced, the result
+carries `client/turn/requested` and the executed triple records. Deterministic
+turn-event sourcing (via `bb.sdk.threads.events.wait`, the SDK RPC analog of
+`thread log --json`) remains out of scope: `bb.events.on` exposes only the six
+thread transitions (created/active/idle/failed/archived/deleted), so a
+lifecycle-event recorder is not available.
+
+So the store name (`thread-executed-triples.jsonl`) is true — every row in it
+really is the triple that executed — and a consumer selecting the artifact by its
+documented contract cannot misclassify a non-executed row.
 
 ## Project scope and registry binding
 
@@ -104,16 +124,16 @@ triple is a no-op; a re-fire of a DIFFERENT resolved triple (or `resolved →
 unresolved`) keeps the first and emits a `conflict` marker (info log) so a changed
 preset is visible rather than invisible. Identity is `(provider, model,
 reasoning_level)` — `source` is excluded because every stored row has
-`source: client/thread/start` by construction (turn sources are refused before
+`source: client/turn/requested` by construction (other sources are refused before
 storage), so it never varies between rows and carries no identity. If the contract
-ever re-admits turn sources, `source` must return to identity; without it a turn
-row sharing `(provider, model, reasoning_level)` with a creation-defaults row
-would no-op and be silently discarded rather than surfaced as a conflict. Each row
+ever admits a second source, `source` must return to identity; without it a row
+sharing `(provider, model, reasoning_level)` from a different source would no-op
+and be silently discarded rather than surfaced as a conflict. Each row
 stores the **resolved** values, never a preset name.
 
 ## State
 
-`{project_state_root}/{project_id}/thread-creation-defaults.jsonl` — the project
+`{project_state_root}/{project_id}/thread-executed-triples.jsonl` — the project
 state root the Project Boundary rule owns, **not** a second invented runtime-state
 root. Execution provenance is runtime state, not the git-backed/diffable task state
 a later slice carries (GH-630 lists git-backed task state separately), so it is not

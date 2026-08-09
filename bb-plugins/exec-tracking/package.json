@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Execution tracking for llm-collab. First capability: records ONLY the thread's creation-time default execution options (provider, model, reasoning_level) — source client/thread/start. Turn-derived sources (client/turn/requested, client/turn/start) are refused observably and deferred to the client/turn/requested re-scope (GH-695).",
+  "description": "Execution tracking for llm-collab. First capability: records executed-triple evidence (provider, model, reasoning_level) from client/turn/requested, the source llm_collab/bb_client.py names authoritative for the profile bb actually ran. See the plugin README for the artifact's definition.",
   "engines": {
     "bb": ">=0.9",
     "bbPluginSdk": "^0.4.1"
@@ -17,8 +17,10 @@
   },
   "bb": {
     "name": "Exec Tracking",
-    "description": "Records ONLY the thread's creation-time default execution options (provider, model, reasoning_level; source client/thread/start). First capability of the task/execution-tracking plugin (GH-630/GH-617). Turn-derived sources are refused observably and deferred to GH-695 P1-B.",
-    "branding": { "icon": "ClipboardList" },
+    "description": "Records executed-triple evidence (provider, model, reasoning_level) from client/turn/requested. First capability of the task/execution-tracking plugin (GH-630/GH-617/GH-710). See the plugin README for the artifact's definition.",
+    "branding": {
+      "icon": "ClipboardList"
+    },
     "server": "./server.ts"
   }
 }
