@@ -73,7 +73,7 @@ class ProbeShapeTest(unittest.TestCase):
                 lambda: watch.heartbeat_cycle(
                     config(),
                     call=call,
-                    enumerate_open=lambda *_: [],
+                    enumerate_open=lambda *_, **__: [],
                     emit=lambda _line: None,
                 ),
                 emit=lambda _line: None,
@@ -85,7 +85,7 @@ class ProbeShapeTest(unittest.TestCase):
         writer.assert_not_called()
 
     def test_failed_probe_does_not_refresh_marker(self) -> None:
-        def failed(*_args):
+        def failed(*_args, **_kwargs):
             raise watch.ProbeError("probe failed")
 
         with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
@@ -121,7 +121,7 @@ class EnumerationTest(unittest.TestCase):
     def test_enumeration_over_cap_is_detected_and_does_not_refresh_marker(self) -> None:
         payload = [{"number": 11}, {"number": 12}, {"number": 13}]
 
-        def over_cap(_kind, _repo, _cap):
+        def over_cap(_kind, _repo, _cap, _deadline, **_kwargs):
             return watch.open_numbers(
                 "pr", "owner/repo", 2, call=lambda *_: payload
             )
@@ -163,7 +163,7 @@ class EnumerationTest(unittest.TestCase):
 
         payload = [{"number": 21}, {"number": 22}, {"number": 23}]
         for capped_kind in ("pr", "issue"):
-            def enumerate_open(kind, _repo, _cap):
+            def enumerate_open(kind, _repo, _cap, _deadline, **_kwargs):
                 if kind == capped_kind:
                     return watch.open_numbers(kind, "owner/repo", 2, call=lambda *_: payload)
                 return []
@@ -195,7 +195,7 @@ class PrTerminalWindowTest(unittest.TestCase):
         watch.pr_cycle(
             config(),
             state,
-            enumerate_prs=lambda *_: [3],
+            enumerate_prs=lambda *_, **__: [3],
             signature=lambda *_: signature(),
             emit=lambda _line: None,
         )
@@ -211,7 +211,9 @@ class PrTerminalWindowTest(unittest.TestCase):
             watch.pr_cycle(
                 config(),
                 state,
-                enumerate_prs=(lambda *_: [7]) if cycle == 0 else (lambda *_: []),
+                enumerate_prs=(lambda *_, **__: [7])
+                if cycle == 0
+                else (lambda *_, **__: []),
                 signature=lambda *_: next(samples),
                 emit=lambda _line: None,
             )
@@ -234,7 +236,11 @@ class PrTerminalWindowTest(unittest.TestCase):
 
         for _ in range(29):
             watch.pr_cycle(
-                config(), state, enumerate_prs=lambda *_: [], signature=merged, emit=lambda _line: None
+                config(),
+                state,
+                enumerate_prs=lambda *_, **__: [],
+                signature=merged,
+                emit=lambda _line: None,
             )
         self.assertIn(
             "9",
@@ -242,7 +248,11 @@ class PrTerminalWindowTest(unittest.TestCase):
             "a merged PR must remain armed through the full post-merge window",
         )
         watch.pr_cycle(
-            config(), state, enumerate_prs=lambda *_: [], signature=merged, emit=lambda _line: None
+            config(),
+            state,
+            enumerate_prs=lambda *_, **__: [],
+            signature=merged,
+            emit=lambda _line: None,
         )
         self.assertEqual(30, polls)
         self.assertNotIn("9", state["signatures"])
@@ -252,7 +262,7 @@ class PrTerminalWindowTest(unittest.TestCase):
         state = {"signatures": {"1": encoded, "2": encoded}, "terminal_left": {}}
         before = json.loads(json.dumps(state))
 
-        def sample(_repo, number):
+        def sample(_repo, number, _deadline):
             if number == 2:
                 raise watch.ProbeError("poll failed")
             return signature(head="b" * 40)
@@ -263,7 +273,10 @@ class PrTerminalWindowTest(unittest.TestCase):
                 "project-a",
                 "session-a",
                 lambda: watch.pr_cycle(
-                    config(), state, enumerate_prs=lambda *_: [], signature=sample
+                    config(),
+                    state,
+                    enumerate_prs=lambda *_, **__: [],
+                    signature=sample,
                 ),
                 emit=lambda _line: None,
             )
@@ -273,6 +286,14 @@ class PrTerminalWindowTest(unittest.TestCase):
 
 
 class MarkerRefreshTest(unittest.TestCase):
+    def test_pr_signature_forwards_the_cycle_deadline_to_snapshot(self) -> None:
+        sample = signature()
+        with mock.patch.object(
+            watch.pr_watch, "snapshot", return_value=(sample, {})
+        ) as snapshot:
+            self.assertEqual(sample, watch.pr_signature("owner/repo", 17, 123.0))
+        snapshot.assert_called_once_with("owner/repo", "17", 123.0)
+
     def test_heartbeat_marker_stays_fresh_during_nontrivial_next_cycle_checks(self) -> None:
         now = 0.0
         last_refresh = 0.0  # the preceding completed cycle's run_once marker
@@ -289,7 +310,7 @@ class MarkerRefreshTest(unittest.TestCase):
             watch._watcher_liveness, "write_marker", side_effect=write_marker
         ):
             watch.heartbeat_wait("project-a", "session-a", True, sleep=sleep)
-        sleep(90.0)  # the next cycle is alive but its four probes take real time
+        sleep(watch.WATCHER_CYCLE_DEADLINE_SECONDS)
         age = now - last_refresh
         self.assertLessEqual(
             age,
@@ -302,6 +323,56 @@ class MarkerRefreshTest(unittest.TestCase):
             watch.heartbeat_wait(
                 "project-a", "session-a", False, sleep=lambda _seconds: None
             )
+        writer.assert_not_called()
+
+    def test_pr_cycle_uses_one_cumulative_deadline_and_does_not_refresh_on_exhaustion(
+        self,
+    ) -> None:
+        now = 0.0
+        seen_deadlines = []
+
+        def monotonic():
+            return now
+
+        def enumerate_prs(_kind, _repo, _cap, deadline, **_kwargs):
+            self.assertEqual(300.0, deadline)
+            return [1, 2, 3]
+
+        def sample(_repo, _number, deadline):
+            nonlocal now
+            seen_deadlines.append(deadline)
+            now += 120.0  # each item fits 300s; all three together do not
+            return signature()
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: watch.pr_cycle(
+                    config(),
+                    {"signatures": {}, "terminal_left": {}},
+                    enumerate_prs=enumerate_prs,
+                    signature=sample,
+                    monotonic=monotonic,
+                    emit=lambda _line: None,
+                ),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(
+            completed,
+            "per-item work that collectively exceeds the cumulative deadline must fail the cycle",
+        )
+        self.assertEqual(
+            [300.0, 300.0, 300.0],
+            seen_deadlines,
+            "one cumulative deadline must be shared across every PR",
+        )
+        self.assertGreater(
+            now,
+            watch.WATCHER_CYCLE_DEADLINE_SECONDS,
+            "the test must exceed the total budget while each item stays below it",
+        )
         writer.assert_not_called()
 
     def test_every_watcher_refreshes_only_after_a_completed_cycle(self) -> None:

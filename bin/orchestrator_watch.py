@@ -34,12 +34,17 @@ HEARTBEAT_ENUM_CAP = 1000
 TERMINAL_CYCLES = 30
 MAX_STATE_BYTES = 1 << 20
 
-# Heartbeat reports remain 10 minutes apart, but liveness refreshes every 60s
-# between successful reports. That is 10x inside the external 600s staleness
-# bound and leaves 540s for the next synchronous check; a check wedged longer
-# than that correctly lets the marker go stale rather than masking the wedge.
+# Successful worker and PR cycles repeat after 40s and 45s; heartbeat reports
+# remain 10 minutes apart but refresh liveness every 60s between reports. Every
+# mode also has one 300s cumulative cycle deadline. Thus a healthy watcher's
+# marker is at most 60s + 300s = 360s old, leaving 240s inside the external 600s
+# staleness bound. A cycle that cannot finish within that margin fails and
+# correctly lets its marker go stale.
+WORKER_REFRESH_SECONDS = 40.0
+PR_REFRESH_SECONDS = 45.0
 HEARTBEAT_REPORT_SECONDS = 600.0
 HEARTBEAT_MARKER_REFRESH_SECONDS = 60.0
+WATCHER_CYCLE_DEADLINE_SECONDS = 300.0
 
 
 class ProbeError(RuntimeError):
@@ -100,6 +105,21 @@ def probe_json(executable: Sequence[str], argv: Sequence[str], timeout: float):
         raise ProbeError(f"malformed JSON: {error}") from error
 
 
+def cycle_deadline(deadline: float | None, monotonic: Callable[[], float]) -> float:
+    return (
+        monotonic() + WATCHER_CYCLE_DEADLINE_SECONDS
+        if deadline is None
+        else deadline
+    )
+
+
+def remaining_cycle_seconds(deadline: float, monotonic: Callable[[], float]) -> float:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise ProbeError("watcher cycle exceeded its cumulative deadline")
+    return remaining
+
+
 def thread_rows(payload) -> list[dict]:
     """Accept only bb's observed list or {threads: list} response shapes."""
     if isinstance(payload, list):
@@ -122,10 +142,13 @@ def open_numbers(
     kind: str,
     repo: str,
     cap: int,
+    deadline: float | None = None,
     *,
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
     timeout: float = 30.0,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> list[int]:
+    deadline = cycle_deadline(deadline, monotonic)
     payload = call(
         ("gh",),
         (
@@ -140,8 +163,9 @@ def open_numbers(
             "--json",
             "number",
         ),
-        timeout,
+        min(timeout, remaining_cycle_seconds(deadline, monotonic)),
     )
+    remaining_cycle_seconds(deadline, monotonic)
     if not isinstance(payload, list) or any(
         not isinstance(row, dict)
         or isinstance(row.get("number"), bool)
@@ -163,7 +187,10 @@ def worker_cycle(
     *,
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
     emit: Callable[[str], None] = print,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
+    deadline = cycle_deadline(deadline, monotonic)
     rows = thread_rows(
         call(
             config.bb_executable,
@@ -175,7 +202,10 @@ def worker_cycle(
                 "--include-hidden",
                 "--json",
             ),
-            config.timeout_seconds,
+            min(
+                config.timeout_seconds,
+                remaining_cycle_seconds(deadline, monotonic),
+            ),
         )
     )
     updated = dict(statuses)
@@ -190,13 +220,14 @@ def worker_cycle(
                 "go look (thread output AND log); idle does not mean finished"
             )
         updated[thread_id] = status
+    remaining_cycle_seconds(deadline, monotonic)
     statuses.clear()
     statuses.update(updated)
     return True
 
 
-def pr_signature(repo: str, number: int) -> dict:
-    signature, _ = pr_watch.snapshot(repo, str(number))
+def pr_signature(repo: str, number: int, deadline: float) -> dict:
+    signature, _ = pr_watch.snapshot(repo, str(number), deadline)
     if (
         not isinstance(signature, dict)
         or not isinstance(signature.get("state"), str)
@@ -211,11 +242,16 @@ def pr_cycle(
     config: WatcherConfig,
     state: dict,
     *,
-    enumerate_prs: Callable[[str, str, int], list[int]] = open_numbers,
-    signature: Callable[[str, int], dict] = pr_signature,
+    enumerate_prs: Callable[..., list[int]] = open_numbers,
+    signature: Callable[[str, int, float], dict] = pr_signature,
     emit: Callable[[str], None] = print,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
-    open_prs = enumerate_prs("pr", config.github_repo, PR_ENUM_CAP)
+    deadline = cycle_deadline(deadline, monotonic)
+    open_prs = enumerate_prs(
+        "pr", config.github_repo, PR_ENUM_CAP, deadline, monotonic=monotonic
+    )
     signatures = state.get("signatures", {})
     terminal_left = state.get("terminal_left", {})
     if not isinstance(signatures, dict) or not isinstance(terminal_left, dict):
@@ -224,7 +260,11 @@ def pr_cycle(
 
     # Poll the complete set before mutating state. One failed PR makes the whole
     # cycle incomplete, so earlier results must not masquerade as a full sample.
-    snapshots = {number: signature(config.github_repo, number) for number in watched}
+    snapshots = {}
+    for number in watched:
+        remaining_cycle_seconds(deadline, monotonic)
+        snapshots[number] = signature(config.github_repo, number, deadline)
+        remaining_cycle_seconds(deadline, monotonic)
     updated = deepcopy(state)
     next_signatures = updated.setdefault("signatures", {})
     next_terminal = updated.setdefault("terminal_left", {})
@@ -254,6 +294,7 @@ def pr_cycle(
             emit(f"PR #{number} retired from the watch set after the post-merge window")
         else:
             next_terminal[key] = remaining
+    remaining_cycle_seconds(deadline, monotonic)
     state.clear()
     state.update(updated)
     return True
@@ -263,9 +304,12 @@ def heartbeat_cycle(
     config: WatcherConfig,
     *,
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
-    enumerate_open: Callable[[str, str, int], list[int]] = open_numbers,
+    enumerate_open: Callable[..., list[int]] = open_numbers,
     emit: Callable[[str], None] = print,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
+    deadline = cycle_deadline(deadline, monotonic)
     complete = True
     current = "?"
     workers: int | str = "?"
@@ -274,8 +318,12 @@ def heartbeat_cycle(
         version = call(
             config.bb_executable,
             ("settings", "version", "--json"),
-            config.timeout_seconds,
+            min(
+                config.timeout_seconds,
+                remaining_cycle_seconds(deadline, monotonic),
+            ),
         )
+        remaining_cycle_seconds(deadline, monotonic)
         current_value = version.get("currentVersion") if isinstance(version, dict) else None
         if not isinstance(current_value, str) or not current_value:
             raise ProbeError("settings version response has no currentVersion")
@@ -297,9 +345,13 @@ def heartbeat_cycle(
             call(
                 config.bb_executable,
                 ("thread", "list", "--project", config.bb_project_id, "--json"),
-                config.timeout_seconds,
+                min(
+                    config.timeout_seconds,
+                    remaining_cycle_seconds(deadline, monotonic),
+                ),
             )
         )
+        remaining_cycle_seconds(deadline, monotonic)
         workers = sum(
             row["status"] in {"active", "starting"} and not row.get("archivedAt")
             for row in rows
@@ -309,7 +361,15 @@ def heartbeat_cycle(
         emit(f"HEARTBEAT WORKER PROBE FAILED — {error}")
     for kind in ("pr", "issue"):
         try:
-            counts[kind] = len(enumerate_open(kind, config.github_repo, HEARTBEAT_ENUM_CAP))
+            counts[kind] = len(
+                enumerate_open(
+                    kind,
+                    config.github_repo,
+                    HEARTBEAT_ENUM_CAP,
+                    deadline,
+                    monotonic=monotonic,
+                )
+            )
         except Exception as error:
             complete = False
             emit(f"HEARTBEAT {kind.upper()} ENUMERATION FAILED — {error}")
@@ -320,6 +380,11 @@ def heartbeat_cycle(
         "issue exists (not blocked-on-external, not parked-by-decision, not an epic) "
         "start it; a drained queue is a status, not an order; never invent work"
     )
+    try:
+        remaining_cycle_seconds(deadline, monotonic)
+    except ProbeError as error:
+        complete = False
+        emit(f"HEARTBEAT CYCLE DEADLINE FAILED — {error}")
     return complete
 
 
@@ -430,9 +495,9 @@ def main() -> int:
             check,
         )
         if args.mode == "worker-lifecycle":
-            time.sleep(40 if completed else 45)
+            time.sleep(WORKER_REFRESH_SECONDS if completed else 45)
         elif args.mode == "pr-artifacts":
-            time.sleep(45)
+            time.sleep(PR_REFRESH_SECONDS)
         else:
             heartbeat_wait(args.project, args.session, completed)
 

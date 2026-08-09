@@ -38,11 +38,11 @@ from _helpers import get_project, project_state_dir, write_file_durably
 
 WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
 
-# The standard watcher periods live in bin/orchestrator_watch.py. Its heartbeat
-# refreshes every 60s between 600s reports: 10x inside this external bound, with
-# the remaining margin available to its synchronous checks. The faster worker
-# and PR watchers refresh every cycle. Any interval increase must revisit that
-# margin without weakening this shared bound.
+# The standard watcher periods live in bin/orchestrator_watch.py. All modes have
+# a 300s cumulative cycle deadline; heartbeat refreshes every 60s between 600s
+# reports. The 60s refresh gap plus 300s work bound leaves 240s of margin inside
+# this external bound. Any interval or deadline increase must revisit that margin
+# without weakening this shared bound.
 WATCHER_MARKER_STALE_AFTER_SECONDS = 600.0
 
 # A marker is a few hundred bytes of JSON written by write_marker. Anything
