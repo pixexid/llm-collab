@@ -1,0 +1,17 @@
+{
+  "name": "bb-plugin-exec-tracking",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Execution tracking for llm-collab. First capability: records the resolved (provider, model, reasoning_level) executed profile for BB threads into git-tracked state (closes GH-617).",
+  "engines": {
+    "bb": ">=0.9",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "bb": {
+    "name": "Exec Tracking",
+    "description": "Records the resolved (provider, model, reasoning_level) executed profile for BB threads into git-tracked state. The task/execution-tracking plugin's first capability (GH-630/GH-617).",
+    "branding": { "icon": "ClipboardList" },
+    "server": "./server.ts"
+  }
+}
