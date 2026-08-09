@@ -38,10 +38,10 @@ cd bb-plugins/exec-tracking
 bb plugin types .          # (re)write types/bb-plugin-sdk.d.ts for this bb
 npm install                # install typescript + @types/node (devDependencies)
 npm run typecheck          # FAILS on an undeclared identifier before you install
-bb plugin install .        # operator step — only after typecheck is green
+bb plugin install --yes .  # operator step — only after typecheck is green
 bb plugin config exec-tracking set checkoutPath /path/to/llm-collab
 bb plugin config exec-tracking set pythonPath  /abs/path/to/python3.11   # server PATH is narrow
-bb plugin config exec-tracking set projectId   amiga                     # must be registered in projects.json
+bb plugin config exec-tracking set projectId   <project-id>             # must be registered in projects.json
 bb plugin reload exec-tracking
 ```
 
