@@ -1,37 +1,49 @@
 #!/usr/bin/env python3
-"""Record the resolved execution options for one BB thread, labelled by evidence.
+"""Record the executed (provider, model, reasoning_level) triple for one BB thread.
 
-GH-630 first scope / GH-617 / GH-695 head 3. The bb ``exec-tracking`` plugin's
+GH-710 / GH-630 first scope / GH-617. The bb ``exec-tracking`` plugin's
 ``thread.created`` handler reads ``bb.sdk.threads.defaultExecutionOptions`` and
 passes the *resolved primitive values* + their ``source`` here as CLI args; this
 script is the write authority.
 
-**This artifact records ONLY creation-time defaults (GH-695 head 3).**
-``defaultExecutionOptions`` tags its result with a ``source`` naming which client
-phase the values came from. Only ``client/thread/start`` is a creation-time
-default; the committed SDK declaration (``resolvedThreadExecutionOptionsSchema``)
-also permits ``client/turn/requested`` (the authoritative executed-evidence source
--- the ``execution`` block ``llm_collab/bb_client.py`` validates against) and
-``client/turn/start`` (a turn phase). A result whose ``source`` is anything other
-than ``client/thread/start`` -- turn-derived OR absent/unrecognised -- is OUT OF
-THIS ARTIFACT'S CONTRACT: ``main`` refuses it observably (the ``ignored
-out_of_contract`` marker, with the source named) and writes no row. So the store
-name stays true (every row really is a creation default), the row's ``evidence``
-is ``creation_defaults``, and the identity/precedence question disappears (turn
-sources never enter storage). Recording one thing and saying so is the honest
-slice; a row the artifact cannot describe is not half-admitted.
+**This artifact records executed-triple evidence: which triple actually ran.**
+That is the invariant the plugin exists to serve — it is what makes the
+frozen-triple rule auditable. "Creation-time defaults" was a *proxy* for that
+invariant, chosen before GH-706 established the proxy is unobservable: no surface
+on this SDK carries creation-time execution options. The artifact is therefore
+defined by the repository's existing authority for this decision:
+``llm_collab/bb_client.py:21-24`` states that the spawn envelope carries no model
+and no reasoning level, so argv alone cannot prove which profile actually ran,
+and that **the authoritative record is the ``execution`` block on the thread's
+``client/turn/requested`` event** — the block ``BbClient`` itself validates the
+requested profile against (``SPAWN_EVENT_TYPE`` at ``bb_client.py:67``,
+``_execution_evidence()`` at ``bb_client.py:633``). This recorder accepts the
+same source that authority accepts, so the repository has ONE authority for
+"which triple ran", not two. This is a definition, not a sampling convenience:
+``client/turn/requested`` is accepted because ``bb_client.py`` already decided it
+is the proof, not because it is the one source we can get.
 
-Why turn-derived evidence is deferred, not recorded here: the authoritative
-``client/turn/requested`` source is sometimes already reachable via this handler
-(if the spawn turn advances before the fire-and-forget loopback RPC finishes),
-but not reliably, and recording it into an artifact named for creation defaults
-would let the container make a claim its contents can violate. Deterministic
-sourcing from ``client/turn/requested`` (via ``bb.sdk.threads.events.wait``, the
-SDK RPC analog of ``thread log --json``) is a tracked re-scope (GH-695 P1-B);
-``bb.events.on`` exposes only the six thread transitions
-(created/active/idle/failed/archived/deleted), and that protocol's pre-1.0 SDK
-semantics cannot be verified without a live bb server. This slice does not build
-source precedence -- it records one thing and refuses the rest.
+The gate stays a gate — it admits ONE named source:
+
+- ``client/turn/requested`` — **accepted**. The executed-evidence source above.
+  The row records with ``evidence: executed`` and the resolved triple.
+- ``client/thread/start`` — **refused with its own distinct reason**
+  (``ignored thread_start_not_executed``). On this SDK its payload carries no
+  execution options (GH-706), so it cannot be executed evidence. It is handled
+  EXPLICITLY, not folded into the unrecognised refusal: if ``client/thread/start``
+  ever appears carrying execution options, that distinct marker surfaces it
+  instead of silently dropping it.
+- anything else (``client/turn/start``, absent, or unrecognised) — **refused**
+  via ``ignored out_of_contract``, source named. Admitting one named source does
+  not remove the refusal for everything else.
+
+Why the artifact was redefined rather than its gate widened: GH-695 head 3
+refused turn-derived sources so an artifact documented as *creation defaults*
+could not quietly fill with executed evidence. That refusal was correct for an
+artifact so named — and it is exactly why this change renames the artifact
+(``thread-creation-defaults.jsonl`` must not survive holding turn-derived rows)
+rather than loosening the old check. Under the new definition the accepted
+source is correct by definition, not by exception.
 
 Load-bearing design points (unchanged from the recorder's first slice):
 
@@ -68,9 +80,9 @@ Load-bearing design points (unchanged from the recorder's first slice):
   stderr so the plugin's async close-handler can log it; a silent refusal is
   indistinguishable from an event that never happened (GH-630 review, F5/N3).
 
-State lives at ``{project_state_root}/{project_id}/thread-creation-defaults.jsonl``
+State lives at ``{project_state_root}/{project_id}/thread-executed-triples.jsonl``
 — the project state root the Project Boundary rule owns. The file name says what
-the rows are (creation-time defaults), never "executed".
+the rows are (the triples that executed), never "creation defaults".
 """
 
 from __future__ import annotations
@@ -114,38 +126,41 @@ RECORD_FILE_BUDGET_BYTES = 8 * 1024 * 1024  # 8 MiB
 RESOLVED = "resolved"
 UNRESOLVED = "unresolved"
 
-# GH-695 head 3: this artifact records ONLY creation-time defaults. The
-# ``thread.created`` handler reads ``bb.sdk.threads.defaultExecutionOptions``;
-# its result carries a ``source`` naming which client phase the values came from.
-# Only ``client/thread/start`` is a creation-time default. A turn-derived source
-# (``client/turn/requested`` -- the authoritative executed-evidence surface
-# ``llm_collab/bb_client.py`` validates against -- or ``client/turn/start``) is
-# OUT OF THIS ARTIFACT'S CONTRACT: main() refuses it observably and writes no row,
-# so the store name stays true (every row really is a creation default) and the
-# identity/precedence question disappears (turn sources never enter). Turn-derived
-# evidence is deferred to the ``client/turn/requested`` re-scope (GH-695 P1-B).
-EVIDENCE_CREATION_DEFAULTS = "creation_defaults"   # the one evidence this artifact stores
+# GH-710: this artifact records executed-triple evidence — which triple actually
+# ran. The accepted source is ``client/turn/requested`` because
+# ``llm_collab/bb_client.py:21-24`` names its ``execution`` block the
+# authoritative record of the profile bb actually ran (the block ``BbClient``
+# validates against); the recorder aligns with that authority rather than
+# dissenting from it. ``client/thread/start`` is NOT executed evidence — its
+# payload carries no execution options on this SDK (GH-706) — and is refused
+# with its own distinct reason so a future ``thread/start`` that DOES carry
+# options is surfaced, not silently dropped. Every other source is refused as
+# out of contract: the gate admits one named source, it is not removed.
+EVIDENCE_EXECUTED = "executed"   # the one evidence this artifact stores
 
 # The one ``source`` this artifact records. main() refuses any other source
-# (turn-derived or unrecognised) via the ignored-marker path before a row is
-# built, so _build_resolved_row is only ever reached with this source.
+# before a row is built, so _build_resolved_row is only ever reached with this
+# source.
+_SOURCE_TURN_REQUESTED = "client/turn/requested"
+
+# ``client/thread/start`` is handled EXPLICITLY (GH-710 acceptance): it is not
+# unrecognised — it is a known creation-phase signal that carries no execution
+# options on this SDK — so it gets its own refusal marker, distinct from
+# ``out_of_contract``. If it ever carries execution options, this marker is the
+# tripwire that makes the change visible.
 _SOURCE_THREAD_START = "client/thread/start"
 
 # Fields that define a resolved triple's identity. Two resolved rows for the same
 # thread are the SAME triple iff all of these match; otherwise the second is a
 # conflicting re-resolution and the first is kept (N1).
 #
-# GH-695 head 3: ``source`` is EXCLUDED. Every stored resolved row has
-# ``source == client/thread/start`` by construction (main() refuses every other
-# source), so ``source`` never varies between stored rows and carries no identity
-# -- it was dead weight, and keeping it inverted precedence: a re-fire advancing
-# ``client/thread/start`` -> ``client/turn/requested`` was a CONFLICT that kept the
-# default and discarded the authoritative execution evidence. That advance can no
-# longer reach storage (turn sources are refused), and ``source`` is no longer in
-# identity. If the contract ever re-admits turn sources, ``source`` MUST return to
-# identity -- without it, a turn row with the same (provider, model,
-# reasoning_level) would no-op against a creation-defaults row and be silently
-# discarded rather than surfaced as a conflict.
+# GH-710: ``source`` remains EXCLUDED. Every stored resolved row has
+# ``source == client/turn/requested`` by construction (main() refuses every other
+# source), so ``source`` never varies between stored rows and carries no identity.
+# If the contract ever admits a second source, ``source`` MUST return to identity
+# -- without it, a row with the same (provider, model, reasoning_level) from a
+# different source would no-op against the stored row and be silently discarded
+# rather than surfaced as a conflict.
 RESOLVED_IDENTITY_FIELDS = ("provider", "model", "reasoning_level")
 
 # Typed failure reasons. An absent row and a failed resolution must be
@@ -157,7 +172,7 @@ REASON_INCOMPLETE = "profile_incomplete"  # resolved object missing a required f
 
 def record_path(project_id: str) -> Path:
     """Project-scoped JSONL path under the configured project_state_root."""
-    return project_state_dir(project_id) / "thread-creation-defaults.jsonl"
+    return project_state_dir(project_id) / "thread-executed-triples.jsonl"
 
 
 def _lock_path(project_id: str) -> Path:
@@ -225,7 +240,7 @@ def _load_existing(path: Path, project_id: str) -> list[dict]:
     A malformed or shape-invalid record line is corruption in our own append-only
     log, not a truncation to swallow: raise so it is surfaced and recoverable,
     never silently dropped (a dropped line is an attribution that vanishes)."""
-    budget = ReadBudget(RECORD_FILE_BUDGET_BYTES, label="thread-creation-defaults record log")
+    budget = ReadBudget(RECORD_FILE_BUDGET_BYTES, label="thread-executed-triples record log")
     try:
         with active_read_budget(budget):
             raw = read_regular_file_bounded(path, RECORD_FILE_BUDGET_BYTES)
@@ -300,11 +315,11 @@ def _build_resolved_row(project_id: str, thread_id: str, provider: str | None,
     return {
         "thread_id": thread_id,
         "project_id": project_id,
-        # GH-695 head 3: main() refuses any source other than client/thread/start
-        # before this row is built, so every stored row IS a creation-time default
-        # and the label states exactly that. The source is verified upstream, not
-        # assumed here.
-        "evidence": EVIDENCE_CREATION_DEFAULTS,
+        # GH-710: main() refuses any source other than client/turn/requested
+        # before this row is built, so every stored row IS the triple that
+        # executed and the label states exactly that. The source is verified
+        # upstream, not assumed here.
+        "evidence": EVIDENCE_EXECUTED,
         "provider": provider,
         "model": model,
         "reasoning_level": reasoning_level,
@@ -318,8 +333,8 @@ def _build_unresolved_row(project_id: str, thread_id: str, provider: str | None,
                           reason: str, detail: str | None = None) -> dict:
     # An unresolved row records a FAILED resolution -- no value was read, so there
     # is no source to derive an evidence label from and no ``evidence`` field. It
-    # carries ``failure_reason`` instead. (Setting evidence="creation_defaults"
-    # here would be the same assume-the-label defect P1-A fixes.)
+    # carries ``failure_reason`` instead. (Setting evidence="executed" here would
+    # be the assume-the-label defect: a failed resolution executed nothing.)
     row = {
         "thread_id": thread_id,
         "project_id": project_id,
@@ -336,17 +351,18 @@ def _build_unresolved_row(project_id: str, thread_id: str, provider: str | None,
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     result.add_argument("--project", required=True, help="registered llm-collab project_id (matched RAW; scopes the record file)")
-    result.add_argument("--thread-id", required=True, help="BB thread id whose creation-time defaults are recorded")
+    result.add_argument("--thread-id", required=True, help="BB thread id whose executed triple is recorded")
     result.add_argument("--thread-project", required=True, help="bb projectId from the thread.created event DTO (scope match)")
     result.add_argument("--provider", default=None, help="providerId from the thread.created event DTO (may be omitted)")
-    result.add_argument("--model", help="creation-time default model (resolved case)")
-    result.add_argument("--reasoning-level", help="creation-time default reasoning level (resolved case)")
+    result.add_argument("--model", help="executed model (resolved case)")
+    result.add_argument("--reasoning-level", help="executed reasoning level (resolved case)")
     result.add_argument(
         "--source",
         help="the SDK-reported source the resolved options came from; only "
-        "client/thread/start is recorded (a creation-time default). Any other "
-        "source (client/turn/requested, client/turn/start, or unrecognised) is "
-        "refused observably and writes no row",
+        "client/turn/requested is recorded (the executed-evidence source "
+        "bb_client.py:21-24 names authoritative). client/thread/start is refused "
+        "with its own distinct reason; any other source is refused observably "
+        "as out of contract. No refusal writes a row",
     )
     result.add_argument("--unresolved", metavar="REASON", help="record a typed resolution failure instead of a resolved triple")
     result.add_argument("--failure-detail", default=None, help="short detail for an unresolved row (e.g. the resolution error)")
@@ -392,19 +408,30 @@ def main(argv: list[str] | None = None) -> int:
         missing = [name for name, value in (("model", args.model), ("reasoning-level", args.reasoning_level), ("source", args.source)) if not value]
         if missing:
             raise SystemExit(f"resolved case requires --model/--reasoning-level/--source together; missing: {', '.join(missing)}")
-        # GH-695 head 3: record ONLY creation-time defaults (source ==
-        # client/thread/start). Any other source -- a turn-derived client/turn/*
-        # (out of this artifact's contract) or an unrecognised value we cannot
-        # classify -- is refused observably via the ignored-marker path and writes
-        # no row, so the store name stays true. The source is named in the marker
-        # so an operator can see WHY it was skipped; silence here would repeat the
-        # finding this PR already fixed. Turn-derived evidence is deferred to the
-        # client/turn/requested re-scope (GH-695 P1-B).
-        if args.source != _SOURCE_THREAD_START:
+        # GH-710: record ONLY executed-triple evidence (source ==
+        # client/turn/requested, the source llm_collab/bb_client.py:21-24 names
+        # the authoritative record of the profile bb actually ran).
+        #
+        # client/thread/start is handled EXPLICITLY, with its own distinct
+        # refusal: on this SDK its payload carries no execution options (GH-706),
+        # so it is not executed evidence — but if it ever IS seen carrying
+        # options, the distinct marker surfaces that instead of silently dropping
+        # it. Every other source is unrecognised to this artifact and refused as
+        # out of contract. Both refusals are observable (exit 0 + an ignored
+        # marker naming the source) and write no row; silence here would repeat
+        # the finding the GH-630 review already fixed (F5/N3). This admits ONE
+        # named source; it does not remove the gate.
+        if args.source == _SOURCE_THREAD_START:
             print(
-                f"ignored out_of_contract {thread_id}: source {args.source!r} is not a "
-                f"creation-time default ({_SOURCE_THREAD_START}); not recorded "
-                "(turn-derived evidence is deferred to GH-695 P1-B)"
+                f"ignored thread_start_not_executed {thread_id}: client/thread/start carries "
+                "no execution options on this SDK (GH-706) and is not executed evidence; "
+                "if it ever carries them, this marker is the tripwire — not recorded"
+            )
+            return 0
+        if args.source != _SOURCE_TURN_REQUESTED:
+            print(
+                f"ignored out_of_contract {thread_id}: source {args.source!r} is not the "
+                f"executed-evidence source ({_SOURCE_TURN_REQUESTED}); not recorded"
             )
             return 0
         row = _build_resolved_row(

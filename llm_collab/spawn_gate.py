@@ -166,7 +166,7 @@ def plan_spawn(
     if not isinstance(native_project_id, str) or not native_project_id:
         return GateRefusal("registry_bb_project_invalid", "bb.project_id is invalid")
     # GH-695 P2-D: match RAW and REJECT a padded bb.project_id rather than
-    # normalizing it. The recorder (bin/record_thread_defaults.py) does the same,
+    # normalizing it. The recorder (bin/record_executed_triples.py) does the same,
     # so the spawn gate and the recorder enforce the same scope: a padded registry
     # value used to flow raw here while the recorder stripped it, so a thread could
     # spawn under one id and be recorded (or ignored) under another. `.strip()` is

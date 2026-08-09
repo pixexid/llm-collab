@@ -12,7 +12,11 @@ cites). If a flag, a type-generation command, or an install step changes, it
 changes here once.
 
 Its design, project scope, and immutability semantics are documented in
-`bb-plugins/exec-tracking/README.md`. This doc owns only the operator procedure.
+`bb-plugins/exec-tracking/README.md`. That README also owns the artifact's
+definition — **executed-triple evidence**: which `(provider, model,
+reasoning_level)` triple actually ran, and which event source is authoritative
+for it. This doc links to that definition rather than restating it, and owns
+only the operator procedure.
 
 ## Why a typecheck gate is required
 
