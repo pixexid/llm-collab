@@ -31,7 +31,11 @@ from _watcher_liveness import (  # noqa: E402
     not_fresh,
     write_marker,
 )
-from llm_collab.bb_client import PINNED_BB_VERSION  # noqa: E402
+from llm_collab.bb_client import (  # noqa: E402
+    PINNED_BB_VERSION,
+    BbTransportResult,
+    subprocess_transport,
+)
 
 
 def marker_content(project_id: str = "proj-under-test", session_id: str = "sess-writer") -> str:
@@ -319,12 +323,6 @@ class HookCommandTest(unittest.TestCase):
         self.assertNotIn("python3.11", command)
 
 
-class _Completed:
-    def __init__(self, returncode: int, stdout: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-
-
 class SessionGateTest(unittest.TestCase):
     """The hook prints check results and pointers, and never fails the session."""
 
@@ -510,17 +508,36 @@ class SessionGateTest(unittest.TestCase):
         self.assertIsNone(session_gate.current_session_id(tty))
         tty.read.assert_not_called()
 
+    def test_over_cap_bb_probe_is_unknown_and_does_not_raise(self) -> None:
+        """An unbounded bb (corrupt or regressed) cannot grow the hook's memory:
+        the shared bounded transport raises on overflow and the probe reports
+        UNKNOWN through the same path as any other broken probe."""
+        script = (
+            "import sys; sys.stdout.write('x' * "
+            f"{session_gate.BB_PROBE_MAX_RESPONSE_CHARS + 1})"
+        )
+        bounded = subprocess_transport(
+            [sys.executable, "-c", script],
+            max_response_chars=session_gate.BB_PROBE_MAX_RESPONSE_CHARS,
+        )
+        with mock.patch.object(session_gate, "subprocess_transport", return_value=bounded):
+            status, detail = session_gate.bb_version_check()
+        self.assertEqual(session_gate.UNKNOWN, status)
+        self.assertIn("exceeded", detail)
+
     def test_real_bb_probe_shape(self) -> None:
         """The unpatched bb probe classifies a well-formed envelope."""
-        envelope = _Completed(0, json.dumps({"currentVersion": PINNED_BB_VERSION}))
+        envelope = BbTransportResult(0, json.dumps({"currentVersion": PINNED_BB_VERSION}), "")
         with mock.patch.object(
-            session_gate.subprocess, "run", return_value=envelope
+            session_gate, "subprocess_transport", return_value=mock.Mock(return_value=envelope)
         ):
             status, _detail = session_gate.bb_version_check()
         self.assertEqual(session_gate.PASS, status)
 
         with mock.patch.object(
-            session_gate.subprocess, "run", side_effect=OSError("no bb")
+            session_gate,
+            "subprocess_transport",
+            return_value=mock.Mock(side_effect=OSError("no bb")),
         ):
             status, _detail = session_gate.bb_version_check()
         self.assertEqual(session_gate.UNKNOWN, status)

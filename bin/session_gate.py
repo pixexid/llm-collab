@@ -19,7 +19,6 @@ breaks reports UNKNOWN — visibly distinct from PASS, never rendered as one.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -28,12 +27,17 @@ sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
 from _watcher_liveness import FRESH, check_markers, foreign_fresh, handoff_file  # noqa: E402
-from llm_collab.bb_client import PINNED_BB_VERSION  # noqa: E402
+from llm_collab.bb_client import PINNED_BB_VERSION, subprocess_transport  # noqa: E402
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
 HOOK_PROJECT_ID = "llm-collab"  # this hook is llm-collab's own repo hook
 
 BB_PROBE_TIMEOUT_SECONDS = 10.0
+# The version envelope is ~100 bytes; 64 KiB is generous. The bound lives at the
+# earliest untrusted read — the subprocess streams — via the repository's
+# bounded transport, which kills the child and raises on overflow instead of
+# accumulating unbounded output in a SessionStart hook.
+BB_PROBE_MAX_RESPONSE_CHARS = 64 * 1024
 # A Claude Code hook payload is a small JSON object on stdin; bound the read.
 MAX_HOOK_PAYLOAD_BYTES = 64 * 1024
 
@@ -49,20 +53,24 @@ def _line(check: str, status: str, detail: str) -> None:
 
 
 def bb_version_check() -> tuple[str, str]:
-    """Installed bb vs PINNED_BB_VERSION. A broken probe is UNKNOWN, not a pass."""
+    """Installed bb vs PINNED_BB_VERSION. A broken probe is UNKNOWN, not a pass.
+
+    Reads through the shared bounded transport (llm_collab.bb_client) rather
+    than a second bounding implementation: both streams are capped while read,
+    and overflow/timeout/launch failures raise typed errors, which this hook
+    surfaces as UNKNOWN — never a pass, never a crash.
+    """
     try:
-        done = subprocess.run(
-            ["bb", "settings", "version", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=BB_PROBE_TIMEOUT_SECONDS,
+        transport = subprocess_transport(
+            ["bb"], max_response_chars=BB_PROBE_MAX_RESPONSE_CHARS
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        return UNKNOWN, f"bb version probe could not run: {error}"
-    if done.returncode != 0:
-        return UNKNOWN, f"bb settings version exited {done.returncode}"
+        result = transport(["settings", "version", "--json"], BB_PROBE_TIMEOUT_SECONDS)
+    except Exception as error:
+        return UNKNOWN, f"bb version probe could not run: {type(error).__name__}: {error}"
+    if result.exit_code != 0:
+        return UNKNOWN, f"bb settings version exited {result.exit_code}"
     try:
-        current = json.loads(done.stdout)["currentVersion"]
+        current = json.loads(result.stdout)["currentVersion"]
     except (json.JSONDecodeError, KeyError, TypeError):
         return UNKNOWN, "bb version envelope unreadable"
     if not isinstance(current, str):
