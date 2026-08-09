@@ -1859,22 +1859,20 @@ def execute_bb_bootstrap_plan(
     SessionLifecycleCore = lifecycle_module.SessionLifecycleCore
     TrustedProjectRoot = lifecycle_module.TrustedProjectRoot
 
-    # Fail closed at the profile-resolution seam, before any ledger write or
-    # native spawn. The only measured profile (SLICE_1A_PROFILE) is read-only, so
-    # a first delivery carrying a writer-lane identity cannot launch on it; and a
-    # partial/malformed activation marker must fail closed before execution too
-    # (docs/schema-reference.md). The two refusals carry distinct reasons so a
-    # malformed packet is never misreported as a profile decision (GH-596). This
-    # owns no second routing table — it refuses the work types no measured
-    # profile supports, and never inspects the packet body.
+    # Resolve the profile once at the admission seam. Authoring is admitted only
+    # for the exact measured triple; malformed activation remains a separate
+    # fail-closed decision before any ledger write or native spawn.
+    profile = SLICE_1A_PROFILE
     classification = bootstrap_module.classify_first_delivery_assignment(packet)
-    if classification == bootstrap_module.ASSIGNMENT_AUTHORING:
+    if (
+        classification == bootstrap_module.ASSIGNMENT_AUTHORING
+        and not bootstrap_module.profile_is_authoring_qualified(profile)
+    ):
         return bootstrap_module.BootstrapOutcome(
             bootstrap_module.BOOTSTRAP_PROFILE_UNAVAILABLE,
             detail=(
-                "first packet carries a complete writer-lane identity; "
-                "no BB profile is authoring-qualified, so it cannot launch on "
-                "the read-only SLICE_1A_PROFILE"
+                "resolved BB profile is not authoring-qualified: "
+                f"{profile.provider} / {profile.model} / {profile.reasoning_level}"
             ),
         )
     if classification == bootstrap_module.ASSIGNMENT_MALFORMED_ACTIVATION:
@@ -1921,7 +1919,7 @@ def execute_bb_bootstrap_plan(
         client,
         project_id=str(inputs["native_project_id"]),
         prompt=prompt,
-        profile=SLICE_1A_PROFILE,
+        profile=profile,
         endpoint_id=inputs["endpoint_id"],
         runtime_instance_id=inputs["runtime_instance_id"],
     )
@@ -1930,7 +1928,7 @@ def execute_bb_bootstrap_plan(
         expected_project_id=str(inputs["native_project_id"]),
         expected_endpoint_id=inputs["endpoint_id"],
         expected_runtime_instance_id=inputs["runtime_instance_id"],
-        expected_profile=SLICE_1A_PROFILE,
+        expected_profile=profile,
     )
     paths = LedgerPaths.derive(project_state_root(), workspace_id)
     with LedgerStore.open_writer(paths) as store:

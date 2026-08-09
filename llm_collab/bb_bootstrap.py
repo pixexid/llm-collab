@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from .bb_client import BbProfile, SLICE_1A_PROFILE
+
 # Refusal reasons. Distinct values because the caller logs them and an operator
 # reads them: "not enabled" and "already bound" are different situations with
 # different repairs, and collapsing them hides which one happened.
@@ -84,6 +86,19 @@ def _worktree_is_lexical_canonical(value: Any) -> bool:
         if segment in ("", ".", ".."):
             return False
     return True
+
+
+# The one triple the GH-596 bake-off measured. Spelled literally, not derived
+# from SLICE_1A_PROFILE: retargeting that constant must not silently qualify a
+# new, unmeasured profile.
+AUTHORING_QUALIFIED_PROFILES = frozenset(
+    {BbProfile(provider="pi", model="kimi-coding/k3", reasoning_level="high")}
+)
+
+
+def profile_is_authoring_qualified(profile: BbProfile) -> bool:
+    """Return whether the resolved profile is in the measured qualified set."""
+    return profile in AUTHORING_QUALIFIED_PROFILES
 
 
 def classify_first_delivery_assignment(packet: Mapping[str, Any] | None) -> str:

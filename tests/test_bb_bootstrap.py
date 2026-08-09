@@ -27,6 +27,7 @@ from llm_collab.bb_bootstrap import (
     resolve_bootstrap_repo_id,
     execute_bootstrap,
     classify_first_delivery_assignment,
+    profile_is_authoring_qualified,
     ASSIGNMENT_READ_ONLY,
     ASSIGNMENT_AUTHORING,
     ASSIGNMENT_MALFORMED_ACTIVATION,
@@ -289,6 +290,42 @@ class FirstDeliveryAssignmentTest(unittest.TestCase):
                 {"activation": True, "worktree": "/repo/wt", "branch": "bb/feat-x"}
             ),
         )
+
+    def test_only_the_exact_slice_1a_profile_is_authoring_qualified(self):
+        from llm_collab.bb_bootstrap import AUTHORING_QUALIFIED_PROFILES
+        from llm_collab.bb_client import BbProfile, SLICE_1A_PROFILE
+
+        qualified = BbProfile("pi", "kimi-coding/k3", "high")
+        self.assertTrue(profile_is_authoring_qualified(qualified))
+        self.assertIn(SLICE_1A_PROFILE, AUTHORING_QUALIFIED_PROFILES)
+        self.assertFalse(
+            profile_is_authoring_qualified(
+                BbProfile("pi", "kimi-coding/k3", "low")
+            )
+        )
+
+    def test_authoring_qualification_takes_no_project_input(self):
+        """The admission decision is project-invariant by signature, not by luck.
+
+        AGENTS.md requires an Amiga and a non-Amiga proof whenever a shared
+        contract changes. An earlier version of this test looped over two project
+        ids and asserted the same two project-agnostic facts in each iteration --
+        the loop variable was never used, so it would have stayed green even if
+        the bootstrap path behaved differently per project. A test that claims
+        coverage it does not provide is worse than none, so it is gone.
+
+        What is actually provable here: ``profile_is_authoring_qualified`` accepts
+        a ``BbProfile`` and nothing else, so no project value can reach the
+        decision. This asserts that directly. Cross-project coverage of the
+        *bootstrap seam*, which does take a project, is owed separately -- see the
+        follow-up issue referenced on GH-705.
+        """
+        import inspect
+
+        params = list(
+            inspect.signature(profile_is_authoring_qualified).parameters
+        )
+        self.assertEqual(["profile"], params)
 
     def test_a_non_mapping_is_read_only(self):
         self.assertEqual(ASSIGNMENT_READ_ONLY, classify_first_delivery_assignment(None))
