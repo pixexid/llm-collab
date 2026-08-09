@@ -217,6 +217,8 @@ Before changing shared tooling or operating a project lane, read:
 - `docs/workflows/session-startup.md`
 - `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
   thread end to end
+- `docs/workflows/orchestrator-sessions.md` — watcher, succession, supervisor,
+  model-routing, and bb-update protocol for orchestrator sessions
 - `docs/workflows/task-intake-and-delegation.md`
 - `docs/workflows/bb-workers.md` — required before spawning or driving BB workers
 - `## Requesting Code Review` in this file — it governs every repository a lane
