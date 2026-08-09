@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from copy import deepcopy
@@ -45,6 +46,8 @@ PR_REFRESH_SECONDS = 45.0
 HEARTBEAT_REPORT_SECONDS = 600.0
 HEARTBEAT_MARKER_REFRESH_SECONDS = 60.0
 WATCHER_CYCLE_DEADLINE_SECONDS = 300.0
+SUPPORTED_PR_STATES = frozenset({"open", "closed"})
+PR_HEAD_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 
 
 class ProbeError(RuntimeError):
@@ -142,10 +145,20 @@ def thread_rows(payload) -> list[dict]:
     if any(not isinstance(row, dict) for row in rows):
         raise ProbeError("bb thread list contains a non-object row")
     for row in rows:
-        if not isinstance(row.get("id"), str) or not isinstance(row.get("status"), str):
-            raise ProbeError("bb thread row has no text id/status")
+        if (
+            not isinstance(row.get("id"), str)
+            or not row["id"].strip()
+            or not isinstance(row.get("status"), str)
+            or not row["status"].strip()
+        ):
+            raise ProbeError("bb thread row has no non-empty text id/status")
         if row.get("title") is not None and not isinstance(row["title"], str):
             raise ProbeError("bb thread row title is not text")
+        archived_at = row.get("archivedAt")
+        if archived_at is not None and (
+            not isinstance(archived_at, str) or not archived_at.strip()
+        ):
+            raise ProbeError("bb thread row archivedAt is not null or non-empty text")
     return rows
 
 
@@ -241,9 +254,10 @@ def pr_signature(repo: str, number: int, deadline: float) -> dict:
     signature, _ = pr_watch.snapshot(repo, str(number), deadline)
     if (
         not isinstance(signature, dict)
-        or not isinstance(signature.get("state"), str)
+        or signature.get("state") not in SUPPORTED_PR_STATES
         or not isinstance(signature.get("merged"), bool)
         or not isinstance(signature.get("head"), str)
+        or PR_HEAD_PATTERN.fullmatch(signature["head"]) is None
     ):
         raise ProbeError(f"PR #{number} returned an invalid signature")
     return signature
@@ -336,7 +350,7 @@ def heartbeat_cycle(
         )
         remaining_cycle_seconds(deadline, monotonic)
         current_value = version.get("currentVersion") if isinstance(version, dict) else None
-        if not isinstance(current_value, str) or not current_value:
+        if not isinstance(current_value, str) or not current_value.strip():
             raise ProbeError("settings version response has no currentVersion")
         current = current_value
     except Exception as error:

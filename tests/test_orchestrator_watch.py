@@ -65,27 +65,34 @@ class ProbeShapeTest(unittest.TestCase):
             writer.assert_not_called()
 
     def test_wrong_shape_valid_json_is_not_a_heartbeat_sample_or_marker_refresh(self) -> None:
-        def call(_executable, argv, _timeout):
-            return {} if argv[:2] == ("settings", "version") else {"threads": []}
+        for version_payload in ({}, {"currentVersion": ""}, {"currentVersion": " "}):
+            def call(_executable, argv, _timeout):
+                return (
+                    version_payload
+                    if argv[:2] == ("settings", "version")
+                    else {"threads": []}
+                )
 
-        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
-            completed = watch.run_once(
-                "heartbeat",
-                "project-a",
-                "session-a",
-                lambda: watch.heartbeat_cycle(
-                    config(),
-                    call=call,
-                    enumerate_open=lambda *_, **__: [],
+            with self.subTest(payload=version_payload), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "heartbeat",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.heartbeat_cycle(
+                        config(),
+                        call=call,
+                        enumerate_open=lambda *_, **__: [],
+                        emit=lambda _line: None,
+                    ),
                     emit=lambda _line: None,
-                ),
-                emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "wrong-shape valid JSON must not be a successful heartbeat sample",
             )
-        self.assertFalse(
-            completed,
-            "wrong-shape valid JSON must not be a successful heartbeat sample",
-        )
-        writer.assert_not_called()
+            writer.assert_not_called()
 
     def test_failed_probe_does_not_refresh_marker(self) -> None:
         def failed(*_args, **_kwargs):
@@ -101,6 +108,73 @@ class ProbeShapeTest(unittest.TestCase):
             )
         self.assertFalse(completed, "a failed probe must skip marker refresh")
         writer.assert_not_called()
+
+    def test_incomplete_worker_row_does_not_refresh_marker(self) -> None:
+        invalid_rows = (
+            {"id": "", "status": "idle"},
+            {"id": " ", "status": "idle"},
+            {"id": "thread-a", "status": ""},
+            {"id": "thread-a", "status": " "},
+            {"id": "thread-a", "status": "idle", "archivedAt": ""},
+            {"id": "thread-a", "status": "idle", "archivedAt": " "},
+            {"id": "thread-a", "status": "idle", "archivedAt": {}},
+        )
+        for row in invalid_rows:
+            with self.subTest(row=row), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "worker-lifecycle",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.worker_cycle(
+                        config(),
+                        {},
+                        call=lambda *_: {"threads": [row]},
+                        emit=lambda _line: None,
+                    ),
+                    emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "an incomplete worker identity row must fail the sample",
+            )
+            writer.assert_not_called()
+
+    def test_unusable_pr_identity_does_not_persist_or_refresh_marker(self) -> None:
+        invalid_signatures = (
+            {},
+            {"state": "", "merged": False, "head": "a" * 40},
+            {"state": "draft", "merged": False, "head": "a" * 40},
+            {"state": "open", "merged": False, "head": ""},
+            {"state": "closed", "merged": False, "head": "g" * 40},
+            {"state": "open", "merged": False, "head": "a" * 39},
+        )
+        for sample in invalid_signatures:
+            state = {}
+            with self.subTest(sample=sample), mock.patch.object(
+                watch.pr_watch, "snapshot", return_value=(sample, {})
+            ), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "pr-artifacts",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.pr_cycle(
+                        config(),
+                        state,
+                        enumerate_prs=lambda *_, **__: [17],
+                        emit=lambda _line: None,
+                    ),
+                    emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "unsupported PR state or invalid head must fail the sample",
+            )
+            self.assertEqual({}, state, "an unusable PR identity must not be persisted")
+            writer.assert_not_called()
 
 
 class EventDeliveryTest(unittest.TestCase):
