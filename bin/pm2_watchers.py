@@ -461,7 +461,40 @@ def verify_codex_sidecar_runtime_home(expected_runtime_home: str) -> None:
         sys.exit(result.returncode)
 
 
-def _read_jlist_snapshot() -> tuple[subprocess.CompletedProcess, object]:
+class _Pm2ReadBudget:
+    """Cumulative byte budget across every `pm2 jlist` read in one command run.
+
+    Mirrors the shape of bin/_bounded_io.py's ReadBudget -- limit/spent/charge,
+    refuse on exceed -- because the repository already owns that accumulator style
+    for untrusted reads; this is the same style applied to a subprocess read, not a
+    second one. Per-call bounds (PM2_JLIST_MAX_BYTES passed to each jlist) satisfy
+    'raise, never truncate' for a single read but not 'cumulative across one run'
+    (AGENTS.md "Bounded work fails closed"): `start --all` and `restart --all` read
+    jlist once per target -- the process table MUTATES between reads, so the
+    read-only one-snapshot fix that made `status --all` cumulative by construction
+    (#683) does not transfer. One of these is created per command in main() and
+    threaded through _read_jlist_snapshot / watcher_status so every jlist read in
+    the run charges ONE total, aborting (sys.exit) when it is exceeded. Aborts
+    never truncate: a truncated jlist that still parses reports a real watcher as
+    absent, the fail-open GH-678 closed.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.spent = 0
+
+    def charge(self, count: int, label: str) -> None:
+        self.spent += count
+        if self.spent > self.limit:
+            print(
+                f"[error] cumulative pm2 {label} output exceeds the run budget: "
+                f"{self.spent} > {self.limit} bytes across reads; aborting",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _read_jlist_snapshot(*, budget=None) -> tuple[subprocess.CompletedProcess, object]:
     """Read and parse `pm2 jlist` once with the size bound; the run's jlist budget.
 
     `pm2 jlist` is the same process table for every target in a batch, so reading
@@ -472,13 +505,50 @@ def _read_jlist_snapshot() -> tuple[subprocess.CompletedProcess, object]:
     truncated jlist that still parses reports a real watcher as absent -- the
     fail-open GH-678 closed. Malformed jlist fails closed (entries=None) rather
     than fall back to matching rendered text.
+
+    When a run-level budget is threaded in (start/restart/ensure --all), the bytes
+    of every read are charged against that one cumulative total before the parse
+    boundary (json.loads) -- so N per-target reads in one command share a single
+    bound instead of N per-call bounds (GH-684). Charging happens regardless of
+    whether the bytes later parse: the untrusted read already happened.
     """
     result = pm2_run(["jlist"], capture_output=True, max_output_bytes=PM2_JLIST_MAX_BYTES)
+    if budget is not None:
+        budget.charge(len((result.stdout or "").encode("utf-8", errors="replace")), "jlist")
     try:
         entries = json.loads(result.stdout or "[]")
     except ValueError:
         return result, None
     return result, entries
+
+
+def _refuse_unless_budget_can_verify(budget, *, per_call_bound: int) -> None:
+    """Refuse (sys.exit) BEFORE a mutation unless the budget can verify it.
+
+    A verification `pm2 jlist` read is bounded by per_call_bound (the per-call
+    ceiling), so the read that follows a start/startOrRestart can charge at most
+    that many bytes. If the remaining run budget is below it, that read could trip
+    the cumulative limit AFTER the mutation -- partial application, which the
+    third clause of AGENTS.md's "Bounded work" rule ("raise ... with no partial
+    state") forbids. The read can only be charged after it happens, and it happens
+    after the mutation, so the guard must come first: refusing here means a budget
+    refusal can never land after a mutation it did not have room to verify
+    (GH-684 head 2). With the run budget sized above one per-call read, a normal
+    multi-target run still completes; an adversarial run is capped and refused
+    cleanly before the next mutation. This bounds only BUDGET-caused partial
+    application -- a PM2 failure or crash mid-loop is outside this guard and
+    outside this PR's scope.
+    """
+    if budget is None:
+        return
+    if budget.spent + per_call_bound > budget.limit:
+        print(
+            f"[error] run budget cannot cover another verification read "
+            f"({budget.limit - budget.spent} bytes remaining < {per_call_bound}); "
+            f"aborting before mutating to avoid partial application",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _status_from_snapshot(
@@ -497,7 +567,7 @@ def _status_from_snapshot(
 
 
 def watcher_status(
-    agent_id: str, *, snapshot=None
+    agent_id: str, *, snapshot=None, budget=None
 ) -> tuple[subprocess.CompletedProcess, str | None]:
     """Read the watcher's PM2 status as a structured value from `pm2 jlist`.
 
@@ -520,13 +590,16 @@ def watcher_status(
     # A status batch passes one snapshot so `status --all` reads jlist ONCE under
     # a single cumulative bound for the whole run rather than N bounded reads of
     # the same table (start/ensure/restart mutate between reads and stay fresh).
+    # Those mutating commands read fresh per target and charge each read against
+    # the run-level budget threaded from main() (GH-684): still per-call bounded,
+    # but N reads in one command now share one cumulative total.
     if snapshot is None:
-        snapshot = _read_jlist_snapshot()
+        snapshot = _read_jlist_snapshot(budget=budget)
     result, entries = snapshot
     return _status_from_snapshot(result, entries, agent_id)
 
 
-def start_agent(agent_id: str) -> None:
+def start_agent(agent_id: str, *, budget=None) -> None:
     if not is_sidecar(agent_id):
         agent = get_agent(agent_id)
         if not agent.get("activation", {}).get("watcher_enabled", False):
@@ -534,23 +607,26 @@ def start_agent(agent_id: str) -> None:
             return
 
     name = app_name(agent_id)
+    # Reserve room for the verification read BEFORE mutating (GH-684 head 2): a
+    # budget refusal must never land after a start it had no room to verify.
+    _refuse_unless_budget_can_verify(budget, per_call_bound=PM2_JLIST_MAX_BYTES)
     started = pm2_run(["start", str(ecosystem_path()), "--only", name])
     if started.returncode != 0:
         print(f"[error] pm2 failed to start {name} (exit {started.returncode})", file=sys.stderr)
         sys.exit(started.returncode)
 
-    result, status = watcher_status(agent_id)
+    result, status = watcher_status(agent_id, budget=budget)
     if result.returncode != 0 or status != "online":
         print(f"[error] pm2 started {name} but it is not online", file=sys.stderr)
         sys.exit(result.returncode or 1)
 
 
-def ensure_agent(agent_id: str, *, runtime_home: str | None = None) -> None:
-    _, status = watcher_status(agent_id)
+def ensure_agent(agent_id: str, *, runtime_home: str | None = None, budget=None) -> None:
+    _, status = watcher_status(agent_id, budget=budget)
     if status == "online":
         print(f"[watcher] {agent_id} already running.")
     else:
-        start_agent(agent_id)
+        start_agent(agent_id, budget=budget)
     if is_sidecar(agent_id):
         wait_for_codex_sidecar_readiness()
         if runtime_home is not None:
@@ -645,7 +721,21 @@ def main():
         for name in token_sidecars:
             print(f"[sidecar] target={name} (no AX surface)")
 
-    status_snapshot = _read_jlist_snapshot() if args.command == "status" else None
+    # One cumulative budget for every `pm2 jlist` read in this run (GH-684).
+    # status reads jlist once (the #683 snapshot) so it charges once; start and
+    # restart read fresh per target because the process table mutates between
+    # reads, and those N reads now share this one total instead of N per-call
+    # bounds. The limit is 2x the per-call bound (read at runtime so a test that
+    # patches PM2_JLIST_MAX_BYTES scales both together): the pre-mutation
+    # affordability check (_refuse_unless_budget_can_verify) reserves one full
+    # per-call read of headroom, so the budget must exceed one per-call read for a
+    # normal multi-target run to complete while that headroom is held. A budget
+    # refusal then always lands BEFORE the mutation it could not verify, never
+    # after (GH-684 head 2: no partial state). Aborts never truncate: a
+    # parsed-but-truncated jlist reports a real watcher as absent (fail-open,
+    # GH-678).
+    run_budget = _Pm2ReadBudget(PM2_JLIST_MAX_BYTES * 2)
+    status_snapshot = _read_jlist_snapshot(budget=run_budget) if args.command == "status" else None
 
     if defer_sidecars:
         # safe now: every collaborator AX line is already on stdout
@@ -660,7 +750,7 @@ def main():
     for agent_id in targets:
         name = app_name(agent_id)
         if args.command == "start":
-            start_agent(agent_id)
+            start_agent(agent_id, budget=run_budget)
         elif args.command == "restart":
             # Re-read the deployed ecosystem so the running process matches the
             # definition that the current-runtime gate approved. startOrRestart
@@ -668,16 +758,18 @@ def main():
             # exit code and verify online afterwards -- exactly what start does.
             # The return value used to be discarded, so start_watcher reported ok
             # for a watcher that was not running (GH-678).
+            # Reserve room for the verification read BEFORE mutating (GH-684 head 2).
+            _refuse_unless_budget_can_verify(run_budget, per_call_bound=PM2_JLIST_MAX_BYTES)
             restarted = pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
             if restarted.returncode != 0:
                 print(f"[error] pm2 failed to restart {name} (exit {restarted.returncode})", file=sys.stderr)
                 sys.exit(restarted.returncode)
-            result, status = watcher_status(agent_id)
+            result, status = watcher_status(agent_id, budget=run_budget)
             if result.returncode != 0 or status != "online":
                 print(f"[error] pm2 restarted {name} but it is not online", file=sys.stderr)
                 sys.exit(result.returncode or 1)
         elif args.command == "ensure":
-            ensure_agent(agent_id, runtime_home=args.runtime_home)
+            ensure_agent(agent_id, runtime_home=args.runtime_home, budget=run_budget)
         elif args.command == "stop":
             pm2_run(["stop", name])
         elif args.command == "delete":
