@@ -25,6 +25,20 @@ limits, or PR gates. Use
 [`task-intake-and-delegation.md`](task-intake-and-delegation.md), and
 [`commit-push-prs.md`](commit-push-prs.md) for those procedures.
 
+## Orchestrator topology
+
+The supervisor is one singleton across all projects. Orchestrators are
+per-project: each project has exactly one orchestrator session, and that session
+runs one watcher set parameterized for its project. Starting another
+orchestrator is a project-topology decision, not an ad hoc concurrency choice.
+
+Each project's handoff file lives in that project's checkout at
+`<project-checkout>/scratchpad/orchestrator-handoff.md`. Its watcher markers live
+at `{project_state_root}/{project_id}/watchers/<name>.alive` and record the
+owning `session_id`, exact `project_id`, and `started_at`. The marker content and
+serialization are owned by the companion GH-722 implementation contract; this
+workflow consumes that ownership record and does not redefine its format.
+
 ## Standard watcher set
 
 Start all three watchers at the beginning of every BB orchestrator session as
@@ -45,8 +59,9 @@ The watchers report changes; they do not decide that work is complete.
   decision, and epics. A drained queue produces a status line, not permission to
   invent work. Queue and lane activation remain owned by
   [`Task Intake And Delegation`](task-intake-and-delegation.md).
-- Stop all three watchers with `TaskStop` when flagging handoff. A heartbeat
-  outliving its orchestrator can argue for starting work nobody selected.
+- At handoff, **`TaskStop` every watcher first; then write the handoff**, whose
+  status must say **`watchers stopped: yes` and list the stopped watcher task
+  IDs**. The ordered succession procedure below owns the complete teardown.
 
 Every watcher emits a liveness line every 20 cycles so a dead watcher is
 distinguishable from a quiet repository.
@@ -243,10 +258,11 @@ re-deriving it.
 ## Succession protocol
 
 The per-generation handoff lives at
-`<operator-checkout>/scratchpad/orchestrator-handoff.md`. It carries only state
+`<project-checkout>/scratchpad/orchestrator-handoff.md`. It carries only state
 that a successor cannot recover from the repository and GitHub:
 
-- handoff status and last-updated time;
+- handoff status and last-updated time, including `watchers stopped: yes` and
+  the stopped watcher task IDs;
 - live BB threads, lanes, and PRs that need continuation;
 - **Environment deltas and operator announcements**: tool or CLI changes,
   quota events, untracked configuration changes, machine changes, and operator
@@ -259,12 +275,19 @@ omission. Do not copy this document's procedure into the handoff.
 
 ### Predecessor
 
-1. Reconcile the live-thread, PR, decision, blocker, and environment-delta
-   state in the handoff.
-2. Stop every watcher in this document with `TaskStop`.
-3. Flag the handoff in the file.
-4. Ping the supervisor session. Writing the file without that ping is not a
+1. **`TaskStop` every watcher first.**
+2. **Then write the handoff file.** Reconcile its live-thread, PR, decision,
+   blocker, and environment-delta state; its status section must state
+   **`watchers stopped: yes` and list the stopped watcher task IDs**.
+3. Flag the handoff and ping the supervisor session. Writing the file without
+   that ping is not a
    handoff.
+
+The order and evidence are load-bearing. A predecessor's surviving watchers
+double-notify the successor, while a surviving heartbeat can argue a retired
+session into starting work. That leaves two orchestrators driving one project:
+the session-level form of the same one-writer conflict that lane isolation
+prevents.
 
 ### Successor bootstrap
 
@@ -273,15 +296,21 @@ omission. Do not copy this document's procedure into the handoff.
    and runtime-root rule live in [`Session Startup`](session-startup.md).
 2. Read the handoff in full, beginning with Environment deltas and operator
    announcements.
-3. Check environment currency before the first spawn. Repository currency is
+3. Check the three project-scoped watcher markers before starting watchers or
+   work. A fresh marker owned by a different session means the predecessor's
+   watcher is still alive and teardown is incomplete; use the task IDs recorded
+   in the handoff and do not proceed until no fresh foreign-session owner
+   remains. Marker ownership and freshness are defined by the companion GH-722
+   implementation contract, not by this workflow.
+4. Check environment currency before the first spawn. Repository currency is
    not tool currency: compare the live installed bb version with
    `PINNED_BB_VERSION` as the heartbeat does, then verify every additional tool,
    quota, configuration, or machine delta named by the handoff. A mismatch here
    is planned recovery; the same mismatch at the first refused spawn is an
    outage.
-4. Ping the supervisor session that the successor is online.
-5. Start the watcher set above.
-6. Recover live work through the canonical BB, delegation, and PR workflows
+5. Ping the supervisor session that the successor is online.
+6. Start the watcher set above.
+7. Recover live work through the canonical BB, delegation, and PR workflows
    linked at the top of this document.
 
 If anything looks inconsistent during bootstrap, read the predecessor
@@ -290,9 +319,9 @@ permission to guess.
 
 ## Supervisor arrangement
 
-The supervisor preserves continuity across orchestrator generations and routes
-operator-owned decisions; the orchestrator owns technical execution and
-verification.
+The singleton supervisor preserves continuity across projects and orchestrator
+generations and routes operator-owned decisions; each per-project orchestrator
+owns that project's technical execution and verification.
 
 - Route business priority, irreversible choices, credentials/account changes,
   and product decisions without stated authority to the supervisor. Keep
