@@ -35,6 +35,7 @@ from llm_collab.bb_bootstrap import (  # noqa: E402
     BOOTSTRAP_MALFORMED_ACTIVATION,
     BOOTSTRAP_PROFILE_UNAVAILABLE,
 )
+from llm_collab.ledger import LedgerPaths, LedgerStore  # noqa: E402
 
 
 class BbWatcherBootstrapTest(unittest.TestCase):
@@ -849,6 +850,175 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         self.assertEqual(["Chats/project/first.md"], consumed)
         self.assertTrue(start_factory.called, "the qualified authoring profile must spawn")
         self.assertEqual(SLICE_1A_PROFILE, start_factory.call_args.kwargs["profile"])
+
+    def test_bootstrap_admission_is_scoped_identically_for_registered_projects(self) -> None:
+        """GH-714: the project-taking bootstrap seam gets real Amiga coverage.
+
+        The project id reaches the plan, trusted root, ledger scope, and published
+        session.  The qualified and unqualified runs therefore exercise the seam,
+        rather than repeating the project-agnostic profile predicate.
+        """
+        registered_projects = {
+            project_id: {"id": project_id, "bb": {"enabled": True}}
+            for project_id in ("amiga", "nuvyr")
+        }
+        neighboring = BbProfile("pi", "kimi-coding/k3", "low")
+        events: list[dict] = []
+        started: list[str] = []
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-cross-project-") as raw:
+            root = Path(raw)
+            state_root = root / "state"
+            repo_root = root / "repo"
+            runtime_home = root / "runtime-home"
+            for path in (repo_root, runtime_home):
+                path.mkdir()
+
+            def packet(project_id: str, chat_id: str, path: str) -> dict:
+                value = self._authoring_packet()
+                value["path"] = path
+                value["frontmatter"] = {
+                    **value["frontmatter"],
+                    "project_id": project_id,
+                    "chat_id": chat_id,
+                    "canonical_message_id": f"cmid_{project_id}",
+                }
+                return value
+
+            def start_factory(*_args, **kwargs):
+                project_id = str(kwargs["project_id"])
+                started.append(project_id)
+                return lambda _start_id: {
+                    "native_thread_id": f"thread_{project_id}",
+                    "project_id": project_id,
+                    "environment_id": f"environment_{project_id}",
+                    "provider_id": "pi",
+                    "status": "active",
+                    "endpoint_id": f"endpoint_{project_id}",
+                    "runtime_instance_id": f"runtime_{project_id}",
+                    "provider": "pi",
+                    "model": "kimi-coding/k3",
+                    "reasoning_level": "high",
+                    "source": "managed_bb_thread_start",
+                }
+
+            with patch.object(
+                watch_inbox, "bb_bootstrap_enabled", return_value=True
+            ), patch.object(
+                watch_inbox, "config_get", return_value="ws_bb_cross_project"
+            ), patch.object(
+                watch_inbox, "get_project", side_effect=registered_projects.get
+            ), patch.object(
+                watch_inbox,
+                "_bb_start_inputs",
+                side_effect=lambda project_id, _project, _repo_id: {
+                    "native_project_id": project_id,
+                    "endpoint_id": f"endpoint_{project_id}",
+                    "runtime_instance_id": f"runtime_{project_id}",
+                    "runtime_home": str(runtime_home),
+                    "repo_id": "app",
+                    "repo_root": str(repo_root),
+                    "cwd": str(repo_root),
+                    "executable": ["bb"],
+                    "timeout_seconds": 1.0,
+                    "session_source": None,
+                },
+            ), patch.object(
+                session_autobridge, "config_get", return_value="ws_bb_cross_project"
+            ), patch.object(
+                session_autobridge, "project_state_root", return_value=state_root
+            ), patch.object(
+                session_autobridge, "AUTOBRIDGE_ROOT", state_root
+            ), patch.object(
+                session_autobridge, "SESSIONS_DIR", state_root / "sessions"
+            ), patch.object(
+                session_autobridge, "BINDINGS_DIR", state_root / "bindings"
+            ), patch.object(
+                session_autobridge, "EVENTS_DIR", state_root / "events"
+            ), patch.object(
+                session_autobridge, "SESSION_WRITE_LOCK", state_root / "session.lock"
+            ), patch.object(
+                bb_managed_start, "bb_start_native", side_effect=start_factory
+            ), patch.object(
+                watch_inbox, "emit", side_effect=lambda event, _json: events.append(event)
+            ):
+                for project_id in registered_projects:
+                    consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                        "glmpi",
+                        False,
+                        project_id=project_id,
+                        repo_targets=["app"],
+                        messages={
+                            f"Chats/{project_id}/qualified.md": packet(
+                                project_id, f"CHAT-{project_id}-qualified", f"Chats/{project_id}/qualified.md"
+                            )
+                        },
+                    )
+                    self.assertEqual(
+                        [f"Chats/{project_id}/qualified.md"], consumed, project_id
+                    )
+
+                with patch(
+                    "llm_collab.bb_client.SLICE_1A_PROFILE", neighboring
+                ):
+                    for project_id in registered_projects:
+                        path = f"Chats/{project_id}/refused.md"
+                        consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                            "glmpi",
+                            False,
+                            project_id=project_id,
+                            repo_targets=["app"],
+                            messages={path: packet(
+                                project_id, f"CHAT-{project_id}-refused", path
+                            )},
+                        )
+                        self.assertEqual([], consumed, project_id)
+
+                sessions = {
+                    payload["project_id"]: payload
+                    for path in (state_root / "sessions").glob("*.json")
+                    for payload in [json.loads(path.read_text())]
+                }
+                self.assertEqual({"amiga", "nuvyr"}, set(sessions))
+                with LedgerStore.open_reader(
+                    LedgerPaths.derive(state_root, "ws_bb_cross_project")
+                ) as store:
+                    for project_id in registered_projects:
+                        participant = store._connection.execute(
+                            """
+                            SELECT scope_identity
+                            FROM conversation_participants
+                            WHERE workspace_id = ? AND scope_kind = 'project'
+                              AND conversation_id = ? AND participant_id = ?
+                            """,
+                            (
+                                "ws_bb_cross_project",
+                                f"CHAT-{project_id}-qualified",
+                                "participant_glmpi",
+                            ),
+                        ).fetchone()
+                        reservation = store._connection.execute(
+                            """
+                            SELECT scope_identity, project_id, repo_id, canonical_cwd
+                            FROM managed_start_reservations
+                            WHERE workspace_id = ? AND conversation_id = ?
+                            """,
+                            (
+                                "ws_bb_cross_project",
+                                f"CHAT-{project_id}-qualified",
+                            ),
+                        ).fetchone()
+
+                        self.assertEqual((project_id,), tuple(participant))
+                        self.assertEqual(
+                            (project_id, project_id, "app", str(repo_root.resolve())),
+                            tuple(reservation),
+                        )
+                        self.assertEqual(project_id, sessions[project_id]["project_id"])
+
+        self.assertEqual(["amiga", "nuvyr"], started)
+        refusals = [event for event in events if event.get("reason") == BOOTSTRAP_PROFILE_UNAVAILABLE]
+        self.assertEqual(["amiga", "nuvyr"], [event["project_id"] for event in refusals])
 
     def test_neighbouring_profile_remains_unavailable_for_authoring(self) -> None:
         """GH-705: changing reasoning level must not widen authoring admission."""
