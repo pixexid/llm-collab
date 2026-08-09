@@ -607,6 +607,40 @@ class LedgerStoreTest(unittest.TestCase):
         linked_version.start()
         self.addCleanup(linked_version.stop)
 
+    def test_schema_reference_version_table_matches_ledger_constants(self) -> None:
+        constants = {
+            int(match.group(1))
+            for name in vars(store_module)
+            if (match := re.fullmatch(r"V(\d+)_MIGRATION_CHECKSUM", name))
+        }
+        self.assertTrue(constants, "no ledger migration checksum constants found")
+        self.assertEqual(
+            constants,
+            {
+                int(match.group(1))
+                for name in vars(store_module)
+                if (match := re.fullmatch(r"V(\d+)_SCHEMA_FINGERPRINT", name))
+            },
+        )
+
+        schema = (Path(__file__).resolve().parents[1] / "docs" / "schema-reference.md").read_text()
+        rows = re.findall(
+            r"^\| v(\d+) \| `(sha256:[0-9a-f]{64})` \| `(sha256:[0-9a-f]{64})` \|$",
+            schema,
+            re.MULTILINE,
+        )
+        self.assertEqual(len(rows), len(constants), "schema-reference version row count drifted")
+        self.assertEqual({int(version) for version, _, _ in rows}, constants)
+        for version, migration_checksum, schema_fingerprint in rows:
+            self.assertEqual(
+                migration_checksum,
+                getattr(store_module, f"V{version}_MIGRATION_CHECKSUM"),
+            )
+            self.assertEqual(
+                schema_fingerprint,
+                getattr(store_module, f"V{version}_SCHEMA_FINGERPRINT"),
+            )
+
     def test_busy_timeout_policy_is_literal_and_configure_overrides_zero(self) -> None:
         self.assertEqual(BUSY_TIMEOUT_MS, 5_000)
         with TemporaryDirectory(dir="/tmp") as tmp:
