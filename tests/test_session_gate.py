@@ -191,15 +191,37 @@ class MarkerFreshnessTest(unittest.TestCase):
         self.assertIn("not a regular file", report[0]["detail"])
 
     def test_oversized_marker_is_unreadable_never_fresh(self) -> None:
+        # The oversized fixture must be VALID JSON: with the size bound removed,
+        # unparseable bytes would still classify UNREADABLE via the parse error
+        # and the test would pass while never measuring the bound. Valid-but-
+        # oversized content reads FRESH if the bound is gone, so this fails.
         now = time.time()
-        oversized = "x" * (_watcher_liveness.MAX_MARKER_BYTES + 1)
+        oversized = (
+            marker_content()[:-2]
+            + ', "pad": "'
+            + "x" * _watcher_liveness.MAX_MARKER_BYTES
+            + '"}\n'
+        )
+        self.assertGreater(
+            len(oversized.encode()), _watcher_liveness.MAX_MARKER_BYTES
+        )
         with tempfile.TemporaryDirectory() as temporary:
             self._write_markers(temporary, mtime=now - 30, content=oversized)
             report = self._check(temporary, now=now)
         self.assertEqual(
             ["unreadable"] * len(WATCHER_NAMES), [e["status"] for e in report]
         )
+        self.assertIn("exceeds", report[0]["detail"])
         self.assertEqual([], [e for e in report if e["status"] == "fresh"])
+
+    def test_marker_size_bound_is_a_protective_order_of_magnitude(self) -> None:
+        # The bound tests scale with the constant by design; this pins the
+        # policy itself. A real marker is ~100 bytes of JSON: a bound below
+        # that rejects every marker (the gate can never pass), and a bound in
+        # the megabytes stops protecting a hook that runs at every session
+        # start. Both directions of drift are worth one cheap assertion.
+        self.assertGreaterEqual(_watcher_liveness.MAX_MARKER_BYTES, 256)
+        self.assertLessEqual(_watcher_liveness.MAX_MARKER_BYTES, 1_000_000)
 
     def test_unreadable_marker_is_unreadable_never_fresh(self) -> None:
         with mock.patch.object(
@@ -396,8 +418,12 @@ class ContractHeaderReadTest(unittest.TestCase):
                 version = session_bootstrap.contract_version(path=path)
         self.assertEqual("99", version)
         self.assertTrue(read_sizes)
-        self.assertLessEqual(
-            max(read_sizes), session_bootstrap.CONTRACT_HEADER_READ_BYTES
+        # Every recorded read must be a POSITIVE size at most the bound: an
+        # unbounded read() records -1, which passes a bare `max <= bound`
+        # check. Assert the bound, not the presence of a read.
+        self.assertTrue(
+            all(0 < n <= session_bootstrap.CONTRACT_HEADER_READ_BYTES for n in read_sizes),
+            read_sizes,
         )
 
 
