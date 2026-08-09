@@ -97,31 +97,91 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         self.assertEqual(2, len(rows), "two distinct threads => two rows")
         self.assertEqual({"thr_A", "thr_B"}, {r["thread_id"] for r in rows})
 
-    # -- GH-695 P1-B: labelled as creation-time DEFAULTS, not executed --------
+    # -- GH-695 P1-A: evidence label DERIVED from the reported source ------------
 
-    def test_resolved_row_labelled_as_creation_defaults(self) -> None:
-        """The recorded value must say what it IS — creation-time defaults, not
-        executed evidence — in the field, the file name, and the row schema. A record
-        that misnames itself is a trap (GH-617)."""
-        self._resolved("amiga", "thr_L")
-        rows = rows_for(self.workspace, "amiga")
-        self.assertEqual(1, len(rows))
-        row = rows[0]
-        # The field label: every row self-describes its evidence kind.
-        self.assertEqual("creation_defaults", row.get("evidence"),
-                         "row must label its values as creation-time defaults")
-        # The file name: the persisted artifact does not call defaults "executed".
-        self.assertEqual(RECORD_FILE, state_file(self.workspace, "amiga").name)
-        self.assertNotIn("executed", state_file(self.workspace, "amiga").name)
+    def test_evidence_label_derived_from_reported_source(self) -> None:
+        """The row's evidence label is DERIVED from the source the SDK reports, not
+        assumed from which handler ran. Each source value the committed declaration
+        permits gets its own label; only client/thread/start is creation_defaults."""
+        cases = {
+            "client/thread/start": "creation_defaults",
+            "client/turn/requested": "turn_requested",
+            "client/turn/start": "turn_start",
+        }
+        for source, expected_evidence in cases.items():
+            with self.subTest(source=source):
+                self._resolved("amiga", f"thr_{source}", source=source)
+                row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == f"thr_{source}")
+                self.assertEqual(expected_evidence, row.get("evidence"),
+                                 f"source {source!r} must map to evidence {expected_evidence!r}")
+                self.assertEqual(source, row.get("source"), "the raw source is preserved alongside the label")
 
-        # Unresolved rows are labelled too (a failed default-options probe, not an
-        # executed-evidence failure).
+    def test_turn_sourced_result_not_labelled_creation_defaults(self) -> None:
+        """Both directions (GH-695 P1-A): a turn-sourced snapshot is NOT labelled
+        creation_defaults, and a genuine creation-time result still is. This is the
+        test that fails if the label is ever reassumed unconditionally — i.e. it
+        fails in a world where a turn-derived snapshot is durably labelled as
+        creation defaults."""
+        # Direction 1: a turn/requested source is executed evidence, NOT a default.
+        self._resolved("amiga", "thr_turn", source="client/turn/requested")
+        turn_row = rows_for(self.workspace, "amiga")[0]
+        self.assertEqual("turn_requested", turn_row["evidence"])
+        self.assertNotEqual("creation_defaults", turn_row["evidence"],
+                            "a turn-derived snapshot must never be labelled creation_defaults")
+        # Direction 2: a thread/start source IS a creation-time default.
+        self._resolved("amiga", "thr_create", source="client/thread/start")
+        create_row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == "thr_create")
+        self.assertEqual("creation_defaults", create_row["evidence"],
+                         "a creation-time source must still be labelled creation_defaults")
+
+    def test_unrecognised_source_labelled_unknown_not_creation_defaults(self) -> None:
+        """An unrecognised non-empty source is labelled 'unknown' — NEVER
+        creation_defaults. (An empty source is refused earlier by the CLI's
+        resolved-requires-source check; the absent/None case is covered directly in
+        test_evidence_from_source_mapping.) Guessing a specific claim is the defect
+        this labelling exists to prevent."""
+        for bad in ("client/something/else", "not-a-source", "client/turn/x"):
+            with self.subTest(source=bad):
+                self._resolved("amiga", f"thr_bad_{bad}", source=bad)
+                row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == f"thr_bad_{bad}")
+                self.assertEqual("unknown", row.get("evidence"),
+                                 f"unrecognised source {bad!r} must be unknown, not creation_defaults")
+                self.assertNotEqual("creation_defaults", row.get("evidence"))
+
+    def test_evidence_from_source_mapping(self) -> None:
+        """Direct proof of the source->evidence mapping for every input, including
+        the absent (None) and empty cases the CLI cannot reach (resolved always
+        carries a non-empty source). Only client/thread/start is creation_defaults;
+        an absent/unrecognised source is never creation_defaults."""
+        import record_thread_defaults as mod  # type: ignore
+        self.assertEqual("creation_defaults", mod._evidence_from_source("client/thread/start"))
+        self.assertEqual("turn_requested", mod._evidence_from_source("client/turn/requested"))
+        self.assertEqual("turn_start", mod._evidence_from_source("client/turn/start"))
+        for absent in (None, "", "client/turn/x", "garbage"):
+            with self.subTest(source=absent):
+                self.assertEqual("unknown", mod._evidence_from_source(absent))
+        # The recognised set is exactly the three the committed declaration permits.
+        self.assertEqual(
+            {"client/thread/start", "client/turn/requested", "client/turn/start"},
+            set(mod.RECOGNISED_SOURCES),
+        )
+
+    def test_unresolved_row_carries_no_evidence_label(self) -> None:
+        """An unresolved row records a FAILED resolution — no value was read, so
+        there is no source and no evidence label. It must not inherit
+        creation_defaults (the assume-the-label defect)."""
         run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_U",
                    "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
-        self.assertEqual(
-            "creation_defaults",
-            next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == "thr_U").get("evidence"),
-        )
+        row = rows_for(self.workspace, "amiga")[0]
+        self.assertNotIn("evidence", row, "an unresolved row has no source to derive a label from")
+        self.assertNotIn("creation_defaults", json.dumps(row))
+
+    def test_state_file_name_does_not_call_defaults_executed(self) -> None:
+        """The persisted artifact's name does not call the rows 'executed' — the
+        label follows the value, and a creation-time default is not executed evidence."""
+        self._resolved("amiga", "thr_L", source="client/thread/start")
+        self.assertEqual(RECORD_FILE, state_file(self.workspace, "amiga").name)
+        self.assertNotIn("executed", state_file(self.workspace, "amiga").name)
 
     # -- N1: provenance immutable once resolved ---------------------------
 
@@ -272,7 +332,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         path.write_text(
             json.dumps({"thread_id": "thr_A", "project_id": "nuvyr_app", "status": "resolved",
                         "provider": "pi", "model": "m", "reasoning_level": "low",
-                        "source": "client/turn/requested", "evidence": "creation_defaults"})
+                        "source": "client/thread/start", "evidence": "creation_defaults"})
             + "\n"
             + json.dumps({"thread_id": "thr_B", "status": "resolved"}) + "\n",
             encoding="utf-8",
@@ -291,7 +351,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         path.write_text(
             json.dumps({"thread_id": "thr_N", "project_id": "amiga", "status": "resolved",
                         "provider": "pi", "model": "m", "reasoning_level": "low",
-                        "source": "client/turn/requested", "evidence": "creation_defaults"}) + "\n",
+                        "source": "client/thread/start", "evidence": "creation_defaults"}) + "\n",
             encoding="utf-8",
         )
         before = path.read_bytes()
@@ -384,7 +444,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             # validation passes) so a same-triple re-fire is a no-op under N1, which is
             # how we prove the file stayed readable.
             row = {"thread_id": "old", "project_id": "amiga", "status": "resolved", "provider": "pi",
-                   "model": "M", "reasoning_level": "low", "source": "client/turn/requested",
+                   "model": "M", "reasoning_level": "low", "source": "client/thread/start",
                    "evidence": "creation_defaults", "pad": "x" * 8}
             line = json.dumps(row, sort_keys=True, separators=(",", ":"))
             frame = len(line) - 8  # length minus the 8 pad chars
@@ -406,7 +466,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         # The file remains readable: a same-triple re-fire of the existing row is a
         # no-op (it had to READ the file to decide the triple matches) and leaves the
         # file untouched — proving the project is not wedged after the refusal.
-        r2 = self._resolved("amiga", "old", model="M", reasoning="low", source="client/turn/requested")
+        r2 = self._resolved("amiga", "old", model="M", reasoning="low", source="client/thread/start")
         self.assertEqual(0, r2.returncode, r2.stderr[:500])
         self.assertIn("noop", r2.stdout)
         self.assertEqual(before, path.read_bytes(), "a no-op does not rewrite")

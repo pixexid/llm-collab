@@ -1,18 +1,37 @@
 #!/usr/bin/env python3
-"""Record the creation-time DEFAULT execution options for one BB thread.
+"""Record the resolved execution options for one BB thread, labelled by evidence.
 
-GH-630 first scope / GH-617 / GH-695 P1-B. The bb ``exec-tracking`` plugin's
+GH-630 first scope / GH-617 / GH-695 P1-A. The bb ``exec-tracking`` plugin's
 ``thread.created`` handler reads ``bb.sdk.threads.defaultExecutionOptions`` and
 passes the *resolved primitive values* here as CLI args; this script is the write
 authority.
 
-**What this records — and what it does NOT (GH-695 P1-B).** Every row is labelled
-``evidence: "creation_defaults"``: the values are the thread's creation-time
-default execution options, resolved at ``thread.created``. They are NOT the
-profile that executed the first turn. If a thread's first turn uses an override,
-this record permanently attributes the *default*, which is why the row must never
-be mistaken for executed evidence (GH-617 exists because a value that looked
-authoritative was not).
+    row is labelled by ``evidence`` DERIVED FROM THE SOURCE THE SDK REPORTED (see
+    ``_evidence_from_source``), never assumed. A reader who opens the file must not
+    mistake a default for what ran, nor a turn-derived snapshot for a default.
+
+The recorded options come from ``bb.sdk.threads.defaultExecutionOptions``, whose
+result carries a ``source`` naming which client phase the values were resolved
+from. That source is what the row's ``evidence`` label is derived from -- not from
+which handler happened to be running. The committed SDK declaration
+(``resolvedThreadExecutionOptionsSchema``) permits exactly three ``source``
+values, each labelled in ``_evidence_from_source``:
+
+- ``client/thread/start``  -> ``creation_defaults``  (the thread's creation-time
+  default options; NOT what executed if a turn overrode them).
+- ``client/turn/requested`` -> ``turn_requested``  (the authoritative executed-
+  evidence source -- the ``execution`` block ``llm_collab/bb_client.py`` validates
+  the requested profile against). When the spawn turn has advanced before the
+  fire-and-forget handler finishes its awaited loopback RPC, the result can carry
+  this source, so the good case is sometimes already reachable.
+- ``client/turn/start``    -> ``turn_start``  (a turn phase; turn-derived, not a
+  creation-time default and not the authoritative ``client/turn/requested`` source).
+
+An absent or unrecognised source is labelled ``unknown`` -- NEVER ``creation_defaults``.
+Guessing a specific claim is the defect this labelling exists to prevent (GH-695
+P1-A): the previous head labelled every row ``creation_defaults`` unconditionally,
+which durably and immutably misclassified a turn-derived snapshot as a default --
+the same lie as calling defaults "executed", in the opposite direction.
 
 The authoritative executed-evidence source is the ``execution`` block on the
 thread's ``client/turn/requested`` event — the surface ``llm_collab/bb_client.py``
@@ -112,9 +131,40 @@ RECORD_FILE_BUDGET_BYTES = 8 * 1024 * 1024  # 8 MiB
 RESOLVED = "resolved"
 UNRESOLVED = "unresolved"
 
-# GH-695 P1-B: every row self-describes as creation-time DEFAULTS, not executed
-# evidence. A reader who opens the file must not mistake a default for what ran.
-EVIDENCE_CREATION_DEFAULTS = "creation_defaults"
+# GH-695 P1-A: the evidence label is DERIVED from the ``source`` the SDK reports
+# (see _evidence_from_source), never assumed. The previous head set
+# ``creation_defaults`` unconditionally, which misclassified a turn-derived
+# snapshot as a default.
+EVIDENCE_CREATION_DEFAULTS = "creation_defaults"   # source == client/thread/start
+EVIDENCE_TURN_REQUESTED = "turn_requested"         # source == client/turn/requested (authoritative executed evidence)
+EVIDENCE_TURN_START = "turn_start"                 # source == client/turn/start (turn-derived)
+EVIDENCE_UNKNOWN = "unknown"                       # source absent or unrecognised — never guess a specific claim
+
+# The exact ``source`` values the committed SDK declaration
+# (resolvedThreadExecutionOptionsSchema) permits. _evidence_from_source maps each
+# to an evidence label; anything else -> unknown. Do not invent values not here.
+_SOURCE_THREAD_START = "client/thread/start"
+_SOURCE_TURN_REQUESTED = "client/turn/requested"
+_SOURCE_TURN_START = "client/turn/start"
+RECOGNISED_SOURCES = frozenset({_SOURCE_THREAD_START, _SOURCE_TURN_REQUESTED, _SOURCE_TURN_START})
+
+
+def _evidence_from_source(source: str | None) -> str:
+    """Derive the row's evidence label from the source the SDK actually reported.
+
+    The label says WHERE the recorded values came from, so a reader cannot mistake
+    a creation-time default for executed evidence or vice versa (GH-695 P1-A). Only
+    ``client/thread/start`` is a creation-time default; the two turn phases are
+    turn-derived. An absent or unrecognised source is ``unknown`` -- it must NOT
+    inherit ``creation_defaults``, because guessing a specific claim is the defect
+    this labelling exists to prevent."""
+    if source == _SOURCE_THREAD_START:
+        return EVIDENCE_CREATION_DEFAULTS
+    if source == _SOURCE_TURN_REQUESTED:
+        return EVIDENCE_TURN_REQUESTED
+    if source == _SOURCE_TURN_START:
+        return EVIDENCE_TURN_START
+    return EVIDENCE_UNKNOWN
 
 # Fields that define a resolved triple's identity. Two resolved rows for the same
 # thread are the SAME triple iff all of these match; otherwise the second is a
@@ -273,9 +323,10 @@ def _build_resolved_row(project_id: str, thread_id: str, provider: str | None,
     return {
         "thread_id": thread_id,
         "project_id": project_id,
-        # GH-695 P1-B: label what this row IS. These are the thread's creation-time
-        # default execution options, NOT the profile that executed the first turn.
-        "evidence": EVIDENCE_CREATION_DEFAULTS,
+        # GH-695 P1-A: the evidence label is DERIVED from the reported source, not
+        # assumed. Only client/thread/start is a creation-time default; a turn phase
+        # is turn-derived; an unrecognised source is unknown (never creation_defaults).
+        "evidence": _evidence_from_source(source),
         "provider": provider,
         "model": model,
         "reasoning_level": reasoning_level,
@@ -287,12 +338,13 @@ def _build_resolved_row(project_id: str, thread_id: str, provider: str | None,
 
 def _build_unresolved_row(project_id: str, thread_id: str, provider: str | None,
                           reason: str, detail: str | None = None) -> dict:
+    # An unresolved row records a FAILED resolution -- no value was read, so there
+    # is no source to derive an evidence label from and no ``evidence`` field. It
+    # carries ``failure_reason`` instead. (Setting evidence="creation_defaults"
+    # here would be the same assume-the-label defect P1-A fixes.)
     row = {
         "thread_id": thread_id,
         "project_id": project_id,
-        # GH-695 P1-B: an unresolved row also labels itself as a creation-time
-        # default-options probe that failed, not an executed-evidence failure.
-        "evidence": EVIDENCE_CREATION_DEFAULTS,
         "provider": provider,
         "status": UNRESOLVED,
         "failure_reason": reason,
@@ -313,8 +365,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--reasoning-level", help="creation-time default reasoning level (resolved case)")
     result.add_argument(
         "--source",
-        help="the default-options phase tag returned by defaultExecutionOptions "
-        "(e.g. client/turn/requested) — NOT executed-event provenance; see --evidence on the row",
+        help="the SDK-reported source the resolved options came from "
+        "(one of client/thread/start, client/turn/requested, client/turn/start); "
+        "the row's evidence label is DERIVED from this, not assumed",
     )
     result.add_argument("--unresolved", metavar="REASON", help="record a typed resolution failure instead of a resolved triple")
     result.add_argument("--failure-detail", default=None, help="short detail for an unresolved row (e.g. the resolution error)")
