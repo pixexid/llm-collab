@@ -1,10 +1,10 @@
 # bb-plugin-exec-tracking
 
 Custom bb plugin — the **task/execution-tracking** plugin (GH-630). This checkout's
-first capability is the **executed-options recorder** (GH-617 / GH-695): on
-`thread.created` it records the thread's resolved `(provider, model,
-reasoning_level)` options into project-scoped state, labelled by where they came
-from.
+first capability is the **creation-defaults recorder** (GH-617 / GH-695): on
+`thread.created` it records the thread's creation-time default `(provider, model,
+reasoning_level)` options — and ONLY those. A turn-derived result is refused
+observably and deferred to the `client/turn/requested` re-scope (GH-695 P1-B).
 
 > **Operator procedure (build, typecheck, install, config) lives in
 > [`docs/workflows/exec-tracking-plugin.md`](../../docs/workflows/exec-tracking-plugin.md).**
@@ -44,35 +44,38 @@ row, so an absent row and a failed resolution are distinguishable. The plugin
 **records, never gates**: `thread.created` handlers have no veto hook, so
 enforcement stays at the CLI call sites.
 
-## The evidence label follows the value, not the handler (GH-695 P1-A)
+## Records ONLY creation-time defaults (GH-695 head 3)
 
 `defaultExecutionOptions` resolves options and tags them with a `source` naming
-which client phase they came from. The handler is fire-and-forget: at
-`thread.created` the `source` is usually `client/thread/start` (creation-time
-defaults), but if the spawn turn advances before the handler's awaited settings
-lookup and loopback RPC finish, the result can carry `client/turn/requested` — the
-authoritative executed-evidence source. The recorder therefore DERIVES each row's
-`evidence` label from the `source` the SDK actually reports; it never assumes a
-label from which handler is running. An unconditional label would durably and
-immutably misclassify a turn-derived snapshot (or vice versa) — the same lie GH-617
-exists to prevent, in either direction.
+which client phase the values came from. Only `client/thread/start` is a
+creation-time default. The committed SDK declaration
+(`resolvedThreadExecutionOptionsSchema`) also permits two turn-derived sources —
+`client/turn/requested` (the authoritative executed-evidence source, the
+`execution` block `llm_collab/bb_client.py` validates against) and
+`client/turn/start` — but those are OUT OF THIS ARTIFACT'S CONTRACT: the recorder
+**refuses them observably** (exit 0 + `ignored out_of_contract` marker naming the
+source) and writes no row. An absent or unrecognised `source` is refused the same
+way — a row the artifact cannot classify is not half-admitted.
 
-The `source` values the committed SDK declaration (`resolvedThreadExecutionOptionsSchema`)
-permits, and the label each gets:
+| `source`                | outcome                                              |
+|-------------------------|------------------------------------------------------|
+| `client/thread/start`   | **recorded** — `evidence: creation_defaults`         |
+| `client/turn/requested` | refused observably (`ignored out_of_contract`)        |
+| `client/turn/start`     | refused observably (`ignored out_of_contract`)        |
+| absent / unrecognised   | refused observably (`ignored out_of_contract`)        |
 
-| `source`                  | `evidence`          | meaning |
-|---------------------------|---------------------|---------|
-| `client/thread/start`     | `creation_defaults` | the thread's creation-time default options — NOT what executed if a turn overrode them |
-| `client/turn/requested`   | `turn_requested`    | the authoritative executed-evidence source (the `execution` block `llm_collab/bb_client.py` validates against); sometimes already reachable via this race |
-| `client/turn/start`       | `turn_start`        | a turn phase; turn-derived, not a creation-time default and not the authoritative `client/turn/requested` source |
-
-An absent or unrecognised `source` is labelled `unknown` — NEVER `creation_defaults`.
-Guessing a specific claim is the defect this labelling exists to prevent. A
-dedicated `bb.sdk.threads.events.wait`-based recorder that sources
-`client/turn/requested` deterministically (rather than via this race) remains a
+So the store name (`thread-creation-defaults.jsonl`) is true — every row in it
+really is a creation default — and a consumer selecting the artifact by its
+documented contract cannot misclassify a turn row. The fire-and-forget handler can
+sometimes already see `client/turn/requested` (if the spawn turn advances before
+its loopback RPC finishes), but recording that into an artifact named for creation
+defaults would let the container make a claim its contents can violate, so it is
+refused. Deterministic sourcing from `client/turn/requested` (via
+`bb.sdk.threads.events.wait`, the SDK RPC analog of `thread log --json`) is the
 tracked re-scope (GH-695 P1-B); `bb.events.on` exposes only the six thread
 transitions (created/active/idle/failed/archived/deleted), so a lifecycle-event
-recorder is not available.
+recorder is not available. This slice does not build source precedence — it records
+one thing and refuses the rest.
 
 ## Project scope and registry binding
 
@@ -100,10 +103,13 @@ overwrites a resolved row: the only legal write against an existing row is
 triple is a no-op; a re-fire of a DIFFERENT resolved triple (or `resolved →
 unresolved`) keeps the first and emits a `conflict` marker (info log) so a changed
 preset is visible rather than invisible. Identity is `(provider, model,
-reasoning_level, source)`, so a re-fire that advances the `source` (e.g.
-`client/thread/start` → `client/turn/requested`) is a conflict, not a no-op — the
-first record is kept and the change is surfaced. Each row stores the **resolved**
-values, never a preset name.
+reasoning_level)` — `source` is excluded because every stored row has
+`source: client/thread/start` by construction (turn sources are refused before
+storage), so it never varies between rows and carries no identity. If the contract
+ever re-admits turn sources, `source` must return to identity; without it a turn
+row sharing `(provider, model, reasoning_level)` with a creation-defaults row
+would no-op and be silently discarded rather than surfaced as a conflict. Each row
+stores the **resolved** values, never a preset name.
 
 ## State
 

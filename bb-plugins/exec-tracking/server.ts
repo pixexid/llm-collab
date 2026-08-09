@@ -1,33 +1,35 @@
 /**
- * exec-tracking plugin — first capability: record the thread's resolved
- * execution options, labelled by where they came from.
+ * exec-tracking plugin — first capability: record the thread's creation-time
+ * default execution options (and ONLY those).
  *
- * GH-630 first scope / GH-617 / GH-695 P1-A. On `thread.created` this reads the
+ * GH-630 first scope / GH-617 / GH-695 head 3. On `thread.created` this reads the
  * thread's resolved (provider, model, reasoning_level) options IN-PROCESS via
  * `bb.sdk.threads.defaultExecutionOptions`, snapshots the resolved values AND
  * their `source` to primitives, and hands them to a child running our own
  * `bin/record_thread_defaults.py` (the bounded write authority). That script
- * appends a durable, project-scoped row whose `evidence` label is DERIVED FROM
- * THE REPORTED `source`, never assumed.
+ * records a durable, project-scoped row ONLY when `source === client/thread/start`
+ * (a creation-time default); any other source is refused observably.
  *
- * **The label follows the value, not the handler (GH-695 P1-A).**
- * `defaultExecutionOptions` resolves options and tags them with a `source` naming
- * which client phase they came from. At `thread.created` that is usually
+ * **Record one thing, refuse the rest (GH-695 head 3).**
+ * `defaultExecutionOptions` tags its result with a `source` naming which client
+ * phase the values came from. At `thread.created` that is usually
  * `client/thread/start` (creation-time defaults), but the handler is
  * fire-and-forget: if the spawn turn advances before its awaited settings lookup
  * and loopback RPC finish, the result can carry `client/turn/requested` — the
  * authoritative executed-evidence source (the `execution` block
- * `llm_collab/bb_client.py` validates against). The recorder therefore derives
- * `evidence` from `source` (`client/thread/start`->creation_defaults,
- * `client/turn/requested`->turn_requested, `client/turn/start`->turn_start,
- * absent/unrecognised->unknown), so a turn-derived snapshot is never durably
- * mislabelled as a default — the same lie as calling defaults "executed", in the
- * opposite direction, which the immutability work would make permanent.
- * `client/turn/requested` being reachable here means the good case is sometimes
- * already captured; a dedicated `events.wait`-based recorder remains a tracked
- * re-scope (GH-695 P1-B) for the cases this race misses. `bb.events.on` exposes
- * only the six thread transitions (created/active/idle/failed/archived/deleted),
- * so a lifecycle-event-driven recorder is not available either.
+ * `llm_collab/bb_client.py` validates against) — or `client/turn/start`. Those
+ * turn-derived sources are OUT OF THIS ARTIFACT'S CONTRACT: the recorder refuses
+ * them observably (`ignored out_of_contract`, source named) and writes no row, so
+ * the store name stays true (every row really is a creation default) and a
+ * consumer selecting the artifact by its documented contract cannot misclassify a
+ * turn row. An absent/unrecognised `source` is refused the same way. Recording
+ * turn-derived evidence into an artifact named for creation defaults would let the
+ * container make a claim its contents can violate. Deterministic sourcing from
+ * `client/turn/requested` (via `bb.sdk.threads.events.wait`, the SDK RPC analog of
+ * `thread log --json`) is the tracked re-scope (GH-695 P1-B); `bb.events.on`
+ * exposes only the six thread transitions (created/active/idle/failed/archived/
+ * deleted), so a lifecycle-event-driven recorder is not available. This slice does
+ * not build source precedence — it records one thing and refuses the rest.
  *
  * Why this shape:
  *
@@ -52,14 +54,15 @@
  *       propagated to the emitter.
  *
  * - **Records, never gates.** Enforcement stays at our CLI call sites; this only
- *   records the resolved options. An options object that cannot be resolved is
- *   recorded as an explicit `unresolved` row so an absent row and a failed
- *   resolution are distinguishable — never silently omitted.
+ *   records the creation-time defaults. An options object that cannot be resolved
+ *   is recorded as an explicit `unresolved` row so an absent row and a failed
+ *   resolution are distinguishable.
  *
  * - **No silent failure.** Spawn errors, nonzero exits, and ignored/scope-
- *   mismatched events are logged ASYNCHRONOUSLY via the child's `error`/`close`
- *   events — the event-loop constraint still holds. A recorder failure must be
- *   distinguishable from an event that never happened (GH-630 review, finding 5).
+ *   mismatched/out-of-contract events are logged ASYNCHRONOUSLY via the child's
+ *   `error`/`close` events — the event-loop constraint still holds. A recorder
+ *   failure must be distinguishable from an event that never happened (GH-630
+ *   review, finding 5).
  */
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -131,8 +134,9 @@ async function onCreated(
 
   // Read the thread's resolved execution options in-process. Snapshot to
   // primitives immediately; do not hold the resolved object. Pass the SDK-reported
-  // `source` through; the recorder derives the row's `evidence` label from it
-  // (GH-695 P1-A), so a turn-derived snapshot is not mislabelled as a default.
+  // `source` through; the recorder records ONLY client/thread/start (a creation-
+  // time default) and refuses any other source observably (GH-695 head 3), so a
+  // turn-derived snapshot never enters an artifact documented as creation defaults.
   let resolved: {
     model?: string | null;
     reasoningLevel?: string | null;

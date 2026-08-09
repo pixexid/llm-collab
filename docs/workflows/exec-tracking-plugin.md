@@ -11,10 +11,11 @@ AGENTS.md "this file is the source of truth" rule, and the 27-packet incident it
 cites). If a flag, a type-generation command, or an install step changes, it
 changes here once.
 
-The plugin records the resolved execution options for BB threads on
-`thread.created`; its design, the evidence/source labelling, project scope, and
-immutability semantics are documented in `bb-plugins/exec-tracking/README.md`.
-This doc owns only the operator procedure.
+The plugin records ONLY the thread's creation-time default execution options for
+BB threads on `thread.created` (source `client/thread/start`); turn-derived
+sources are refused observably and deferred to the `client/turn/requested` re-scope
+(GH-695 P1-B). Its design, project scope, and immutability semantics are documented
+in `bb-plugins/exec-tracking/README.md`. This doc owns only the operator procedure.
 
 ## Why a typecheck gate is required
 

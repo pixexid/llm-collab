@@ -65,7 +65,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
 
     def _resolved(self, project: str, thread_id: str, thread_project: str = "proj_amiga",
                   *, model: str = "zai/glm-5.2", reasoning: str = "high",
-                  source: str = "client/turn/requested", provider: str = "pi") -> subprocess.CompletedProcess:
+                  source: str = "client/thread/start", provider: str = "pi") -> subprocess.CompletedProcess:
         return run_record(self.workspace, "--project", project, "--thread-id", thread_id,
                           "--thread-project", thread_project, "--provider", provider,
                           "--model", model, "--reasoning-level", reasoning, "--source", source)
@@ -83,7 +83,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         self.assertEqual("resolved", row["status"])
         self.assertEqual("zai/glm-5.2", row["model"])
         self.assertEqual("high", row["reasoning_level"])
-        self.assertEqual("client/turn/requested", row["source"])
+        self.assertEqual("client/thread/start", row["source"])
         self.assertEqual("pi", row["provider"])
 
         # Same thread again (event re-fire / manual re-run) must NOT duplicate.
@@ -97,74 +97,65 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         self.assertEqual(2, len(rows), "two distinct threads => two rows")
         self.assertEqual({"thr_A", "thr_B"}, {r["thread_id"] for r in rows})
 
-    # -- GH-695 P1-A: evidence label DERIVED from the reported source ------------
+    # -- GH-695 head 3: record ONLY creation defaults; refuse every other source -----
 
-    def test_evidence_label_derived_from_reported_source(self) -> None:
-        """The row's evidence label is DERIVED from the source the SDK reports, not
-        assumed from which handler ran. Each source value the committed declaration
-        permits gets its own label; only client/thread/start is creation_defaults."""
-        cases = {
-            "client/thread/start": "creation_defaults",
-            "client/turn/requested": "turn_requested",
-            "client/turn/start": "turn_start",
-        }
-        for source, expected_evidence in cases.items():
-            with self.subTest(source=source):
-                self._resolved("amiga", f"thr_{source}", source=source)
-                row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == f"thr_{source}")
-                self.assertEqual(expected_evidence, row.get("evidence"),
-                                 f"source {source!r} must map to evidence {expected_evidence!r}")
-                self.assertEqual(source, row.get("source"), "the raw source is preserved alongside the label")
-
-    def test_turn_sourced_result_not_labelled_creation_defaults(self) -> None:
-        """Both directions (GH-695 P1-A): a turn-sourced snapshot is NOT labelled
-        creation_defaults, and a genuine creation-time result still is. This is the
-        test that fails if the label is ever reassumed unconditionally — i.e. it
-        fails in a world where a turn-derived snapshot is durably labelled as
-        creation defaults."""
-        # Direction 1: a turn/requested source is executed evidence, NOT a default.
-        self._resolved("amiga", "thr_turn", source="client/turn/requested")
-        turn_row = rows_for(self.workspace, "amiga")[0]
-        self.assertEqual("turn_requested", turn_row["evidence"])
-        self.assertNotEqual("creation_defaults", turn_row["evidence"],
-                            "a turn-derived snapshot must never be labelled creation_defaults")
-        # Direction 2: a thread/start source IS a creation-time default.
+    def test_creation_default_source_records(self) -> None:
+        """A client/thread/start result IS a creation-time default and records, with
+        evidence=creation_defaults and the source preserved."""
         self._resolved("amiga", "thr_create", source="client/thread/start")
-        create_row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == "thr_create")
-        self.assertEqual("creation_defaults", create_row["evidence"],
-                         "a creation-time source must still be labelled creation_defaults")
+        rows = rows_for(self.workspace, "amiga")
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertEqual("resolved", row["status"])
+        self.assertEqual("creation_defaults", row["evidence"])
+        self.assertEqual("client/thread/start", row["source"])
 
-    def test_unrecognised_source_labelled_unknown_not_creation_defaults(self) -> None:
-        """An unrecognised non-empty source is labelled 'unknown' — NEVER
-        creation_defaults. (An empty source is refused earlier by the CLI's
-        resolved-requires-source check; the absent/None case is covered directly in
-        test_evidence_from_source_mapping.) Guessing a specific claim is the defect
-        this labelling exists to prevent."""
-        for bad in ("client/something/else", "not-a-source", "client/turn/x"):
-            with self.subTest(source=bad):
-                self._resolved("amiga", f"thr_bad_{bad}", source=bad)
-                row = next(r for r in rows_for(self.workspace, "amiga") if r["thread_id"] == f"thr_bad_{bad}")
-                self.assertEqual("unknown", row.get("evidence"),
-                                 f"unrecognised source {bad!r} must be unknown, not creation_defaults")
-                self.assertNotEqual("creation_defaults", row.get("evidence"))
+    def test_turn_sourced_result_refused_observably_writes_nothing(self) -> None:
+        """A turn-derived source (client/turn/requested or client/turn/start) is OUT
+        OF THIS ARTIFACT'S CONTRACT: refused observably (exit 0 + ignored marker
+        naming the source) and writes no row, so the store name stays true. This is
+        the test that fails if turn sources are ever re-admitted into an artifact
+        documented as creation defaults."""
+        for source in ("client/turn/requested", "client/turn/start"):
+            with self.subTest(source=source):
+                r = self._resolved("amiga", f"thr_{source}", source=source)
+                self.assertEqual(0, r.returncode, r.stderr[:500])
+                self.assertIn("ignored out_of_contract", r.stdout)
+                self.assertIn(source, r.stdout, "the marker names the refused source")
+                self.assertIn("GH-695 P1-B", r.stdout, "the marker names the deferred re-scope")
+                self.assertEqual([], rows_for(self.workspace, "amiga"),
+                                 f"source {source!r} must write no row")
+        # An in-contract thread in the same workspace still records normally (control).
+        self._resolved("amiga", "thr_ok", source="client/thread/start")
+        self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
 
-    def test_evidence_from_source_mapping(self) -> None:
-        """Direct proof of the source->evidence mapping for every input, including
-        the absent (None) and empty cases the CLI cannot reach (resolved always
-        carries a non-empty source). Only client/thread/start is creation_defaults;
-        an absent/unrecognised source is never creation_defaults."""
+    def test_unrecognised_source_refused_observably_writes_nothing(self) -> None:
+        """An unrecognised source cannot be classified into an artifact that claims a
+        classification: refused observably (ignored marker naming the source) and
+        writes no row. Do not write a row you cannot classify."""
+        for source in ("client/something/else", "not-a-source", "client/turn/x"):
+            with self.subTest(source=source):
+                r = self._resolved("amiga", f"thr_bad_{source}", source=source)
+                self.assertEqual(0, r.returncode, r.stderr[:500])
+                self.assertIn("ignored out_of_contract", r.stdout)
+                self.assertIn(source, r.stdout)
+                self.assertEqual([], rows_for(self.workspace, "amiga"))
+
+    def test_resolved_identity_excludes_source(self) -> None:
+        """source is no longer in RESOLVED_IDENTITY_FIELDS: every stored row has
+        source client/thread/start by construction (turn sources are refused), so
+        source carries no identity. A same-(provider,model,reasoning_level) re-fire
+        is a no-op; the identity is exactly those three fields."""
         import record_thread_defaults as mod  # type: ignore
-        self.assertEqual("creation_defaults", mod._evidence_from_source("client/thread/start"))
-        self.assertEqual("turn_requested", mod._evidence_from_source("client/turn/requested"))
-        self.assertEqual("turn_start", mod._evidence_from_source("client/turn/start"))
-        for absent in (None, "", "client/turn/x", "garbage"):
-            with self.subTest(source=absent):
-                self.assertEqual("unknown", mod._evidence_from_source(absent))
-        # The recognised set is exactly the three the committed declaration permits.
-        self.assertEqual(
-            {"client/thread/start", "client/turn/requested", "client/turn/start"},
-            set(mod.RECOGNISED_SOURCES),
-        )
+        self.assertEqual(("provider", "model", "reasoning_level"), mod.RESOLVED_IDENTITY_FIELDS)
+        self.assertNotIn("source", mod.RESOLVED_IDENTITY_FIELDS)
+        self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/thread/start")
+        before = state_file(self.workspace, "amiga").read_text(encoding="utf-8")
+        r = self._resolved("amiga", "thr_id", model="m", reasoning="low", source="client/thread/start")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("noop", r.stdout)
+        self.assertEqual(before, state_file(self.workspace, "amiga").read_text(encoding="utf-8"))
+
 
     def test_unresolved_row_carries_no_evidence_label(self) -> None:
         """An unresolved row records a FAILED resolution — no value was read, so
@@ -187,9 +178,9 @@ class RecordThreadDefaultsTest(unittest.TestCase):
 
     def test_re_fire_same_resolved_triple_is_noop(self) -> None:
         """A re-fire with the SAME resolved triple is a no-op: no rewrite, no duplicate."""
-        self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
+        self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/thread/start")
         before = state_file(self.workspace, "amiga").read_text(encoding="utf-8")
-        r = self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/turn/requested")
+        r = self._resolved("amiga", "thr_S", model="m", reasoning="low", source="client/thread/start")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("noop", r.stdout)
         self.assertEqual(before, state_file(self.workspace, "amiga").read_text(encoding="utf-8"),
@@ -254,7 +245,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
     def test_absent_provider_recorded_as_null(self) -> None:
         r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_P",
                        "--thread-project", "proj_amiga",
-                       "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+                       "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIsNone(rows_for(self.workspace, "amiga")[0]["provider"])
 
@@ -297,7 +288,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         mis-attributing it to the configured project's file."""
         r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_other",
                        "--thread-project", "proj_nuvyr", "--provider", "pi",
-                       "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+                       "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("ignored scope_mismatch", r.stdout)
         self.assertEqual([], rows_for(self.workspace, "amiga"), "no row written for an out-of-scope thread")
@@ -406,7 +397,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 r = run_record(self.workspace, "--project", bad, "--thread-id", "thr",
                                "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+                               "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
                 self.assertNotEqual(0, r.returncode, f"{bad!r} should be refused")
         self.assertEqual([], any_record_file(self.workspace), "no record file created for a refused project")
 
@@ -420,7 +411,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
             with self.subTest(padded=padded):
                 r = run_record(self.workspace, "--project", padded, "--thread-id", "thr",
                                "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+                               "--model", "m", "--reasoning-level", "low", "--source", "client/thread/start")
                 self.assertNotEqual(0, r.returncode, f"padded {padded!r} must be refused, not repaired")
         # The exact, un-padded id still records normally (control direction).
         r_ok = self._resolved("amiga", "thr_ok")
@@ -511,7 +502,7 @@ class RecordThreadDefaultsTest(unittest.TestCase):
         # registry refusal
         r_reg = run_record(self.workspace, "--project", "amigaa", "--thread-id", "t",
                            "--thread-project", "proj_amiga", "--model", "m",
-                           "--reasoning-level", "low", "--source", "client/turn/requested")
+                           "--reasoning-level", "low", "--source", "client/thread/start")
         self.assertNotEqual(0, r_reg.returncode)
         self.assertTrue(r_reg.stderr.strip(), "registry refusal must explain itself on stderr")
 

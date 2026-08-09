@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
 """Record the resolved execution options for one BB thread, labelled by evidence.
 
-GH-630 first scope / GH-617 / GH-695 P1-A. The bb ``exec-tracking`` plugin's
+GH-630 first scope / GH-617 / GH-695 head 3. The bb ``exec-tracking`` plugin's
 ``thread.created`` handler reads ``bb.sdk.threads.defaultExecutionOptions`` and
-passes the *resolved primitive values* here as CLI args; this script is the write
-authority.
+passes the *resolved primitive values* + their ``source`` here as CLI args; this
+script is the write authority.
 
-    row is labelled by ``evidence`` DERIVED FROM THE SOURCE THE SDK REPORTED (see
-    ``_evidence_from_source``), never assumed. A reader who opens the file must not
-    mistake a default for what ran, nor a turn-derived snapshot for a default.
+**This artifact records ONLY creation-time defaults (GH-695 head 3).**
+``defaultExecutionOptions`` tags its result with a ``source`` naming which client
+phase the values came from. Only ``client/thread/start`` is a creation-time
+default; the committed SDK declaration (``resolvedThreadExecutionOptionsSchema``)
+also permits ``client/turn/requested`` (the authoritative executed-evidence source
+-- the ``execution`` block ``llm_collab/bb_client.py`` validates against) and
+``client/turn/start`` (a turn phase). A result whose ``source`` is anything other
+than ``client/thread/start`` -- turn-derived OR absent/unrecognised -- is OUT OF
+THIS ARTIFACT'S CONTRACT: ``main`` refuses it observably (the ``ignored
+out_of_contract`` marker, with the source named) and writes no row. So the store
+name stays true (every row really is a creation default), the row's ``evidence``
+is ``creation_defaults``, and the identity/precedence question disappears (turn
+sources never enter storage). Recording one thing and saying so is the honest
+slice; a row the artifact cannot describe is not half-admitted.
 
-The recorded options come from ``bb.sdk.threads.defaultExecutionOptions``, whose
-result carries a ``source`` naming which client phase the values were resolved
-from. That source is what the row's ``evidence`` label is derived from -- not from
-which handler happened to be running. The committed SDK declaration
-(``resolvedThreadExecutionOptionsSchema``) permits exactly three ``source``
-values, each labelled in ``_evidence_from_source``:
-
-- ``client/thread/start``  -> ``creation_defaults``  (the thread's creation-time
-  default options; NOT what executed if a turn overrode them).
-- ``client/turn/requested`` -> ``turn_requested``  (the authoritative executed-
-  evidence source -- the ``execution`` block ``llm_collab/bb_client.py`` validates
-  the requested profile against). When the spawn turn has advanced before the
-  fire-and-forget handler finishes its awaited loopback RPC, the result can carry
-  this source, so the good case is sometimes already reachable.
-- ``client/turn/start``    -> ``turn_start``  (a turn phase; turn-derived, not a
-  creation-time default and not the authoritative ``client/turn/requested`` source).
-
-An absent or unrecognised source is labelled ``unknown`` -- NEVER ``creation_defaults``.
-Guessing a specific claim is the defect this labelling exists to prevent (GH-695
-P1-A): the previous head labelled every row ``creation_defaults`` unconditionally,
-which durably and immutably misclassified a turn-derived snapshot as a default --
-the same lie as calling defaults "executed", in the opposite direction.
-
-The authoritative executed-evidence source is the ``execution`` block on the
-thread's ``client/turn/requested`` event — the surface ``llm_collab/bb_client.py``
-validates the requested profile against (``"the spawn envelope carries no model
-and no reasoning level ... the authoritative record is the execution block on the
-thread's client/turn/requested event"``). That event IS reachable from a plugin
-via ``bb.sdk.threads.events.list``/``events.wait`` (the SDK RPC analog of
-``thread log --json``), but it is NOT delivered as a plugin lifecycle event —
-``bb.events.on(...)`` exposes only the six thread transitions
-(created/active/idle/failed/archived/deleted). At ``thread.created`` the spawn
-turn has not been requested yet, so sourcing from ``client/turn/requested`` means
-turning the creation-time snapshot into a bounded async wait that discriminates
-the spawn turn (``source: "spawn"``) from later tells — a protocol whose
-``afterSeq``/row-shape/``waitMs`` semantics against the pre-1.0 SDK cannot be
-verified without a live bb server. That is a tracked re-scope (GH-695 P1-B), not
-this slice. This slice's honest fix is to stop calling defaults "executed": the
-record says what it is, so it is not a trap while the re-scope is pending.
+Why turn-derived evidence is deferred, not recorded here: the authoritative
+``client/turn/requested`` source is sometimes already reachable via this handler
+(if the spawn turn advances before the fire-and-forget loopback RPC finishes),
+but not reliably, and recording it into an artifact named for creation defaults
+would let the container make a claim its contents can violate. Deterministic
+sourcing from ``client/turn/requested`` (via ``bb.sdk.threads.events.wait``, the
+SDK RPC analog of ``thread log --json``) is a tracked re-scope (GH-695 P1-B);
+``bb.events.on`` exposes only the six thread transitions
+(created/active/idle/failed/archived/deleted), and that protocol's pre-1.0 SDK
+semantics cannot be verified without a live bb server. This slice does not build
+source precedence -- it records one thing and refuses the rest.
 
 Load-bearing design points (unchanged from the recorder's first slice):
 
@@ -131,45 +114,39 @@ RECORD_FILE_BUDGET_BYTES = 8 * 1024 * 1024  # 8 MiB
 RESOLVED = "resolved"
 UNRESOLVED = "unresolved"
 
-# GH-695 P1-A: the evidence label is DERIVED from the ``source`` the SDK reports
-# (see _evidence_from_source), never assumed. The previous head set
-# ``creation_defaults`` unconditionally, which misclassified a turn-derived
-# snapshot as a default.
-EVIDENCE_CREATION_DEFAULTS = "creation_defaults"   # source == client/thread/start
-EVIDENCE_TURN_REQUESTED = "turn_requested"         # source == client/turn/requested (authoritative executed evidence)
-EVIDENCE_TURN_START = "turn_start"                 # source == client/turn/start (turn-derived)
-EVIDENCE_UNKNOWN = "unknown"                       # source absent or unrecognised — never guess a specific claim
+# GH-695 head 3: this artifact records ONLY creation-time defaults. The
+# ``thread.created`` handler reads ``bb.sdk.threads.defaultExecutionOptions``;
+# its result carries a ``source`` naming which client phase the values came from.
+# Only ``client/thread/start`` is a creation-time default. A turn-derived source
+# (``client/turn/requested`` -- the authoritative executed-evidence surface
+# ``llm_collab/bb_client.py`` validates against -- or ``client/turn/start``) is
+# OUT OF THIS ARTIFACT'S CONTRACT: main() refuses it observably and writes no row,
+# so the store name stays true (every row really is a creation default) and the
+# identity/precedence question disappears (turn sources never enter). Turn-derived
+# evidence is deferred to the ``client/turn/requested`` re-scope (GH-695 P1-B).
+EVIDENCE_CREATION_DEFAULTS = "creation_defaults"   # the one evidence this artifact stores
 
-# The exact ``source`` values the committed SDK declaration
-# (resolvedThreadExecutionOptionsSchema) permits. _evidence_from_source maps each
-# to an evidence label; anything else -> unknown. Do not invent values not here.
+# The one ``source`` this artifact records. main() refuses any other source
+# (turn-derived or unrecognised) via the ignored-marker path before a row is
+# built, so _build_resolved_row is only ever reached with this source.
 _SOURCE_THREAD_START = "client/thread/start"
-_SOURCE_TURN_REQUESTED = "client/turn/requested"
-_SOURCE_TURN_START = "client/turn/start"
-RECOGNISED_SOURCES = frozenset({_SOURCE_THREAD_START, _SOURCE_TURN_REQUESTED, _SOURCE_TURN_START})
-
-
-def _evidence_from_source(source: str | None) -> str:
-    """Derive the row's evidence label from the source the SDK actually reported.
-
-    The label says WHERE the recorded values came from, so a reader cannot mistake
-    a creation-time default for executed evidence or vice versa (GH-695 P1-A). Only
-    ``client/thread/start`` is a creation-time default; the two turn phases are
-    turn-derived. An absent or unrecognised source is ``unknown`` -- it must NOT
-    inherit ``creation_defaults``, because guessing a specific claim is the defect
-    this labelling exists to prevent."""
-    if source == _SOURCE_THREAD_START:
-        return EVIDENCE_CREATION_DEFAULTS
-    if source == _SOURCE_TURN_REQUESTED:
-        return EVIDENCE_TURN_REQUESTED
-    if source == _SOURCE_TURN_START:
-        return EVIDENCE_TURN_START
-    return EVIDENCE_UNKNOWN
 
 # Fields that define a resolved triple's identity. Two resolved rows for the same
 # thread are the SAME triple iff all of these match; otherwise the second is a
 # conflicting re-resolution and the first is kept (N1).
-RESOLVED_IDENTITY_FIELDS = ("provider", "model", "reasoning_level", "source")
+#
+# GH-695 head 3: ``source`` is EXCLUDED. Every stored resolved row has
+# ``source == client/thread/start`` by construction (main() refuses every other
+# source), so ``source`` never varies between stored rows and carries no identity
+# -- it was dead weight, and keeping it inverted precedence: a re-fire advancing
+# ``client/thread/start`` -> ``client/turn/requested`` was a CONFLICT that kept the
+# default and discarded the authoritative execution evidence. That advance can no
+# longer reach storage (turn sources are refused), and ``source`` is no longer in
+# identity. If the contract ever re-admits turn sources, ``source`` MUST return to
+# identity -- without it, a turn row with the same (provider, model,
+# reasoning_level) would no-op against a creation-defaults row and be silently
+# discarded rather than surfaced as a conflict.
+RESOLVED_IDENTITY_FIELDS = ("provider", "model", "reasoning_level")
 
 # Typed failure reasons. An absent row and a failed resolution must be
 # distinguishable, so each shape a resolution can fail in gets a stable label.
@@ -323,10 +300,11 @@ def _build_resolved_row(project_id: str, thread_id: str, provider: str | None,
     return {
         "thread_id": thread_id,
         "project_id": project_id,
-        # GH-695 P1-A: the evidence label is DERIVED from the reported source, not
-        # assumed. Only client/thread/start is a creation-time default; a turn phase
-        # is turn-derived; an unrecognised source is unknown (never creation_defaults).
-        "evidence": _evidence_from_source(source),
+        # GH-695 head 3: main() refuses any source other than client/thread/start
+        # before this row is built, so every stored row IS a creation-time default
+        # and the label states exactly that. The source is verified upstream, not
+        # assumed here.
+        "evidence": EVIDENCE_CREATION_DEFAULTS,
         "provider": provider,
         "model": model,
         "reasoning_level": reasoning_level,
@@ -365,9 +343,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--reasoning-level", help="creation-time default reasoning level (resolved case)")
     result.add_argument(
         "--source",
-        help="the SDK-reported source the resolved options came from "
-        "(one of client/thread/start, client/turn/requested, client/turn/start); "
-        "the row's evidence label is DERIVED from this, not assumed",
+        help="the SDK-reported source the resolved options came from; only "
+        "client/thread/start is recorded (a creation-time default). Any other "
+        "source (client/turn/requested, client/turn/start, or unrecognised) is "
+        "refused observably and writes no row",
     )
     result.add_argument("--unresolved", metavar="REASON", help="record a typed resolution failure instead of a resolved triple")
     result.add_argument("--failure-detail", default=None, help="short detail for an unresolved row (e.g. the resolution error)")
@@ -413,6 +392,21 @@ def main(argv: list[str] | None = None) -> int:
         missing = [name for name, value in (("model", args.model), ("reasoning-level", args.reasoning_level), ("source", args.source)) if not value]
         if missing:
             raise SystemExit(f"resolved case requires --model/--reasoning-level/--source together; missing: {', '.join(missing)}")
+        # GH-695 head 3: record ONLY creation-time defaults (source ==
+        # client/thread/start). Any other source -- a turn-derived client/turn/*
+        # (out of this artifact's contract) or an unrecognised value we cannot
+        # classify -- is refused observably via the ignored-marker path and writes
+        # no row, so the store name stays true. The source is named in the marker
+        # so an operator can see WHY it was skipped; silence here would repeat the
+        # finding this PR already fixed. Turn-derived evidence is deferred to the
+        # client/turn/requested re-scope (GH-695 P1-B).
+        if args.source != _SOURCE_THREAD_START:
+            print(
+                f"ignored out_of_contract {thread_id}: source {args.source!r} is not a "
+                f"creation-time default ({_SOURCE_THREAD_START}); not recorded "
+                "(turn-derived evidence is deferred to GH-695 P1-B)"
+            )
+            return 0
         row = _build_resolved_row(
             project_id,
             thread_id,
