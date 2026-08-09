@@ -32,6 +32,13 @@ per-project: each project has exactly one orchestrator session, and that session
 runs one watcher set parameterized for its project. Starting another
 orchestrator is a project-topology decision, not an ad hoc concurrency choice.
 
+A project joining the workbench requires a named inbox owner before its first
+lane, and the per-project orchestrator owns its project's drain. Carry known-
+undrained projects in the handoff's Environment deltas section. Inbox readers
+are already project-exact, so this is not a code gap: without the owner a project
+can go live with nobody draining it, and work stalls silently with no error
+anywhere.
+
 Each project's handoff file lives in that project's own runtime state at
 `{project_state_root}/{project_id}/orchestrator-handoff.md`. A handoff is project
 state, not a checkout document: a checkout is not a project, and two registered
@@ -60,7 +67,13 @@ The watchers report changes; they do not decide that work is complete.
 - A worker leaving `active` means **go look**. `idle` never means finished:
   read both `thread output` and `thread log`, then inspect the promised artifact
   and terminal action. `output` can be stale while a turn is active, and a
-  wedged active lane produces no transition event.
+  wedged active lane produces no transition event. `bb thread output` returns the
+  last *final* output; when a provider quota-death kills a worker mid-turn, that
+  is the previous turn's report — complete, clean, and successful-looking — while
+  the current turn produced nothing. Thread status is `error`, not `idle`. Read
+  `bb thread log` alongside `output`, and treat the branch head as the truth
+  about what landed; this matters even when the worker pushed its commit before
+  it could post its dispositions.
 - A startable issue excludes work blocked on an external actor, parked by a
   decision, and epics. A drained queue produces a status line, not permission to
   invent work. Queue and lane activation remain owned by
@@ -129,9 +142,33 @@ re-derive it.
   `gh pr view --json reviews,comments` poller cannot prove either outcome.
 - **A declared default is not an executed value.** Read the executed provider,
   model, and reasoning level from the execution event.
+- **Strong output and hollow verification are not in tension.** Mutation-prove
+  regardless of how well a report reads. A worker can deliver a genuinely
+  thorough fifteen-path enumeration of every read its change made reachable,
+  including a correctly reasoned deliberately-unbounded entry, while a test
+  named for a bound still passes with `read(-1)` because it asserts only that
+  some read occurred. Quality of reasoning and hollowness of a specific test are
+  independent.
 - **Bind verification to its checkout.** Print `pwd` and
   `git rev-parse HEAD` inside the suite directory, in the same shell invocation
   as the test run.
+- **Automatic reachability is a new execution surface.** Making existing code
+  automatic can break it without changing a line of that code, so a diff that
+  only adds a caller cannot expose the defect. One session found four: an
+  unbounded `read_text` that was fine for a hand-run command but not at every
+  session start, a 20-second fetch deadline chosen for a deliberate command, a
+  plain `open()` that could block on a FIFO, and `print` block-buffering under a
+  pipe-backed Monitor that silently delivered nothing while the watcher reported
+  healthy. Enumerate every read, subprocess, and network call the change newly
+  reaches and give each a verdict.
+- **A weak mutation fails for the wrong reason.** Removing an exact-match
+  comparison made every candidate match and tripped a collision guard, so the
+  cross-project tests failed because resolution broke, not because a
+  cross-project write occurred. Inverting the comparison so a thread resolved to
+  the wrong project was the discriminating mutation and exposed the actual
+  defect: a row written into another project's artifact. A mutation that kills a
+  test proves only coupling to the mutated line unless the failure names the
+  property.
 - **Gate autolink safety.** Make the prohibited-pattern check exit nonzero before
   publication; a warning on its own line prints and proceeds.
 - **Re-check once after merge.** The connector can re-pass an amended head
@@ -139,6 +176,12 @@ re-derive it.
   late finding under the canonical PR workflow.
 
 ## Succession protocol
+
+Continuation is by compaction by operator preference because a new orchestrator
+session adds a handoff boundary. Start a new session only for genuine
+context-quality degradation; when a boundary is necessary, the succession
+protocol below remains the fallback. Anything verifiable headlessly or by a
+worker must never wait idle on an operator click.
 
 The per-generation handoff lives at
 `{project_state_root}/{project_id}/orchestrator-handoff.md`. It carries only state
