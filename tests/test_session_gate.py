@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
 import _watcher_liveness  # noqa: E402
+import session_bootstrap  # noqa: E402
 import session_gate  # noqa: E402
+from _bounded_io import UnreadableFile  # noqa: E402
 from _watcher_liveness import (  # noqa: E402
     WATCHER_MARKER_STALE_AFTER_SECONDS,
     WATCHER_NAMES,
@@ -171,9 +173,39 @@ class MarkerFreshnessTest(unittest.TestCase):
         self.assertEqual([], [e for e in report if e["status"] == "fresh"])
         self.assertIn("future", report[0]["detail"])
 
+    def test_non_regular_marker_is_unreadable_without_hanging(self) -> None:
+        """A FIFO (or any non-regular path) at the marker location fails closed:
+        the bounded primitive opens non-blocking and refuses on fstat, so the
+        hook and the writing-spawn gate report UNREADABLE instead of wedging
+        inside open() before any byte cap could apply."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            for name in WATCHER_NAMES:
+                os.mkfifo(Path(temporary) / f"{name}.alive")
+            # Completing at all is the no-hang assertion; the status is the
+            # fail-closed one.
+            report = self._check(temporary, now=now)
+        self.assertEqual(
+            ["unreadable"] * len(WATCHER_NAMES), [e["status"] for e in report]
+        )
+        self.assertIn("not a regular file", report[0]["detail"])
+
+    def test_oversized_marker_is_unreadable_never_fresh(self) -> None:
+        now = time.time()
+        oversized = "x" * (_watcher_liveness.MAX_MARKER_BYTES + 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            self._write_markers(temporary, mtime=now - 30, content=oversized)
+            report = self._check(temporary, now=now)
+        self.assertEqual(
+            ["unreadable"] * len(WATCHER_NAMES), [e["status"] for e in report]
+        )
+        self.assertEqual([], [e for e in report if e["status"] == "fresh"])
+
     def test_unreadable_marker_is_unreadable_never_fresh(self) -> None:
         with mock.patch.object(
-            Path, "stat", side_effect=PermissionError("denied")
+            _watcher_liveness,
+            "read_regular_file_bounded_with_identity",
+            side_effect=UnreadableFile("denied"),
         ), tempfile.TemporaryDirectory() as temporary:
             report = self._check(temporary, now=time.time())
         self.assertEqual(
@@ -306,6 +338,67 @@ class MarkerWriterTest(unittest.TestCase):
         self.assertNotIn("pad", new)
         own = next(e for e in report if e["name"] == "heartbeat")
         self.assertEqual("fresh", own["status"])
+
+    def test_non_regular_existing_marker_does_not_wedge_the_writer(self) -> None:
+        """The writer's read-before-preserve uses the same bounded primitive: a
+        FIFO at the marker path is discarded (UnreadableFile), not blocked on,
+        and the rewrite replaces it with a valid marker."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "project-a" / "watchers" / "heartbeat.alive"
+            marker.parent.mkdir(parents=True)
+            os.mkfifo(marker)
+            with mock.patch.object(
+                _watcher_liveness,
+                "project_state_dir",
+                side_effect=lambda project_id: root / project_id,
+            ), mock.patch.object(
+                _watcher_liveness, "get_project", side_effect=self._registered
+            ):
+                write_marker("project-a", "heartbeat", "sess-1")
+                report = check_markers("project-a")
+        own = next(e for e in report if e["name"] == "heartbeat")
+        self.assertEqual("fresh", own["status"])
+        self.assertEqual("sess-1", own["session_id"])
+
+
+class ContractHeaderReadTest(unittest.TestCase):
+    """The contract marker read is bounded: the hook makes it automatic."""
+
+    def test_contract_header_read_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "AGENTS.md"
+            path.write_text(
+                "<!-- CONTRACT_VERSION: 99 -->\n" + "x" * 1_000_000, encoding="utf-8"
+            )
+            read_sizes: list[int] = []
+            real_open = open
+
+            class _Spy:
+                def __init__(self, handle) -> None:
+                    self._handle = handle
+
+                def read(self, n=-1):
+                    read_sizes.append(n)
+                    return self._handle.read(n)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    self._handle.close()
+                    return False
+
+            with mock.patch.object(
+                session_bootstrap, "open", create=True, side_effect=None
+            ) as patched:
+                patched.side_effect = lambda *a, **k: _Spy(real_open(*a, **k))
+                version = session_bootstrap.contract_version(path=path)
+        self.assertEqual("99", version)
+        self.assertTrue(read_sizes)
+        self.assertLessEqual(
+            max(read_sizes), session_bootstrap.CONTRACT_HEADER_READ_BYTES
+        )
 
 
 class HookCommandTest(unittest.TestCase):

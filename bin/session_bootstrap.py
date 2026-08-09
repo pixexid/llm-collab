@@ -262,14 +262,25 @@ def queue_summaries() -> list[dict]:
     return summaries
 
 
-def contract_version() -> str:
+# The CONTRACT_VERSION marker lives in the leading HTML comment of AGENTS.md.
+# The shared bounded reader (bin/_bounded_io.py) deliberately REFUSES a file
+# larger than its limit, which fits markers but not a deliberate prefix scan of
+# a tracked file that is legitimately tens of KB — so the bound is local: read
+# only this many bytes, then apply the same 200-character window as before.
+CONTRACT_HEADER_READ_BYTES = 4096
+
+
+def contract_version(path=None) -> str:
     """The CONTRACT_VERSION marker from AGENTS.md, or "unknown" when unreadable.
 
     The one read of the marker: session_bootstrap's announcement and the
-    SessionStart hook (bin/session_gate.py) both go through here.
+    SessionStart hook (bin/session_gate.py) both go through here, so the read
+    is bounded — the hook makes it automatic at every session start.
     """
+    target = path if path is not None else ROOT / "AGENTS.md"
     try:
-        head = (ROOT / "AGENTS.md").read_text(encoding="utf-8")[:200]
+        with open(target, "rb") as handle:
+            head = handle.read(CONTRACT_HEADER_READ_BYTES).decode("utf-8", errors="replace")[:200]
     except OSError:
         return "unknown"
     marker = re.search(r"CONTRACT_VERSION:\s*(\S+)", head)

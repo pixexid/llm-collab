@@ -29,6 +29,11 @@ import json
 import time
 from datetime import datetime, timezone
 
+from _bounded_io import (  # noqa: E402
+    UnreadableFile,
+    read_regular_file_bounded,
+    read_regular_file_bounded_with_identity,
+)
 from _helpers import get_project, project_state_dir, write_file_durably
 
 WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
@@ -91,13 +96,14 @@ def write_marker(project_id, name, session_id):
     marker = markers_dir(project_id) / f"{name}.alive"
     started_at = _utc_now_iso()
     try:
-        with open(marker, "rb") as handle:
-            data = handle.read(MAX_MARKER_BYTES + 1)
-        # Bounded read, fail closed: an oversized existing marker is not a
-        # marker — discard it rather than preserving its started_at into a new
-        # marker, and never parse unbounded input.
-        existing = json.loads(data.decode("utf-8")) if len(data) <= MAX_MARKER_BYTES else None
-    except (OSError, ValueError, UnicodeDecodeError):
+        # Bounded, regular-file-only read: an oversized or non-regular existing
+        # marker is not a marker — discard it rather than preserving its
+        # started_at into a new marker, and never block on or parse unbounded
+        # input.
+        existing = json.loads(
+            read_regular_file_bounded(marker, MAX_MARKER_BYTES).decode("utf-8")
+        )
+    except (FileNotFoundError, UnreadableFile, ValueError, UnicodeDecodeError):
         existing = None
     if (
         isinstance(existing, dict)
@@ -116,20 +122,13 @@ def write_marker(project_id, name, session_id):
     return marker
 
 
-def _read_owner(marker, project_id):
-    """Return (owner_fields, error_detail). Exactly one element is None.
+def _parse_owner(data: bytes, project_id):
+    """Return (owner_fields, error_detail) for marker bytes. Exactly one is None.
 
-    Malformed, oversized, or foreign-project content is an error: such a
-    marker classifies UNREADABLE, never fresh (a cross-project overwrite is
-    the incident shape this exists to make visible).
+    Malformed or foreign-project content is an error: such a marker classifies
+    UNREADABLE, never fresh (a cross-project overwrite is the incident shape
+    this exists to make visible).
     """
-    try:
-        with open(marker, "rb") as handle:
-            data = handle.read(MAX_MARKER_BYTES + 1)
-    except OSError as error:
-        return None, str(error)
-    if len(data) > MAX_MARKER_BYTES:
-        return None, f"marker exceeds {MAX_MARKER_BYTES} bytes"
     try:
         content = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as error:
@@ -175,20 +174,29 @@ def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_S
         marker = directory / f"{name}.alive"
         entry = {"name": name, "marker": str(marker)}
         try:
-            mtime = marker.stat().st_mtime
+            # One descriptor, non-blocking open, regular-file requirement, byte
+            # cap, and the mtime from that SAME descriptor: a FIFO or oversized
+            # path fails closed as UNREADABLE instead of hanging the hook or the
+            # writing-spawn gate inside open().
+            data, mtime = read_regular_file_bounded_with_identity(marker, MAX_MARKER_BYTES)
         except FileNotFoundError:
             entry["status"] = ABSENT
             report.append(entry)
             continue
-        except OSError as error:
+        except UnreadableFile as error:
             entry["status"] = UNREADABLE
             entry["detail"] = str(error)
             report.append(entry)
             continue
-        owner, error = _read_owner(marker, project_id)
+        owner, error = _parse_owner(data, project_id)
         if error is not None:
             entry["status"] = UNREADABLE
             entry["detail"] = error
+            report.append(entry)
+            continue
+        if mtime is None:
+            entry["status"] = UNREADABLE
+            entry["detail"] = "marker mtime unavailable"
             report.append(entry)
             continue
         entry.update(owner)
