@@ -371,7 +371,7 @@ def continue_bb_thread(
     if delivery is None:
         raise BbContinuationRefused("canonical delivery is missing")
     selected = delivery.get("selected_receipt")
-    if isinstance(selected, Mapping):
+    if isinstance(selected, Mapping) and selected.get("state") != "rejected_before_acceptance":
         return BbContinuationResult(
             BB_CONTINUATION_DUPLICATE,
             "canonical delivery already has a receipt",
@@ -380,6 +380,15 @@ def continue_bb_thread(
             attempt_id=attempt_id,
             receipt_id=str(selected["receipt_id"]),
         )
+    # A rejected_before_acceptance receipt is a pre-acceptance refusal: the send
+    # was refused BEFORE bb accepted it, nothing was delivered, and the receipt
+    # authorizes a retry (see codex_delivery.py -- that state "would authorize a
+    # blind retry"). It must NOT short-circuit as a duplicate, or the packet is
+    # stranded on the next poll: the watcher would mark it processed without ever
+    # calling bb again. Fall through and re-send so the packet stays retryable
+    # across polls (GH-691). accepted/completed/ambiguous receipts still short-
+    # circuit above -- a duplicate of those is a real delivery (or, for ambiguous,
+    # a send that may have landed and must not be re-sent).
 
     row = _observation(store, context, observed_at_utc)
     pending_ids = (
