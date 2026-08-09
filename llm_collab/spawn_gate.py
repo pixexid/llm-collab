@@ -302,8 +302,13 @@ def persist_assignment(
     state_dir: Path,
     *,
     write_durably: Callable[[Path, str], None],
+    watcher_gate: Mapping[str, Any] | None = None,
 ) -> Path:
-    """Persist an attested assignment, or surface the client's classified refusal."""
+    """Persist an attested assignment, or surface the client's classified refusal.
+
+    `watcher_gate` carries the recorded delegation-gate override (GH-722) when
+    one was used; it is written verbatim so the record proves the override.
+    """
     if isinstance(outcome, BbRefusal):
         raise _ReturnedSpawnRefusal(outcome)
     thread_id = outcome.thread_id
@@ -337,6 +342,8 @@ def persist_assignment(
         "requested_profile": requested_profile,
         "executed_profile": dict(requested_profile),
     }
+    if watcher_gate is not None:
+        record["watcher_gate"] = dict(watcher_gate)
     record_path = state_dir / f"{thread_id}.json"
     write_durably(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
     return record_path

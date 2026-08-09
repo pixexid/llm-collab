@@ -14,11 +14,18 @@ from _python_runtime import require_python
 
 require_python()
 
+from _activation_lease import runtime_id_from_env  # noqa: E402
 from _helpers import (  # noqa: E402
     get_project,
     project_state_dir,
     resolve_project_repo_path,
     write_file_durably,
+)
+from _watcher_liveness import (  # noqa: E402
+    WATCHER_NAMES,
+    check_markers,
+    evaluate_coverage,
+    uncovered,
 )
 from llm_collab.bb_client import BbClient  # noqa: E402
 from llm_collab.bb_continuation import (  # noqa: E402
@@ -48,6 +55,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--title")
     result.add_argument("--prompt", required=True)
     result.add_argument("--json", action="store_true")
+    result.add_argument(
+        "--allow-stale-watchers",
+        action="store_true",
+        help=(
+            "Admit a writing spawn despite stale or absent orchestrator watcher "
+            "markers. The override is recorded in the assignment record."
+        ),
+    )
     isolation = result.add_mutually_exclusive_group()
     isolation.add_argument("--new-environment", choices=("worktree",))
     isolation.add_argument("--environment")
@@ -113,6 +128,63 @@ def main(argv: list[str] | None = None) -> int:
         _emit(f"REFUSED: {plan.reason}: {plan.detail}")
         return 1
 
+    # Delegation-time watcher gate (GH-722): a WRITING spawn admitted while the
+    # orchestrator watchers are down runs without lifecycle/artifact/heartbeat
+    # coverage. Warn-with-recorded-override, not hard refusal: a gate with no
+    # override would deadlock the session that is still standing its watchers
+    # up, since standing them up requires writing spawns. Read-only spawns are
+    # exempt, mirroring the lane-cap exemption. Pre-execution: refusing here
+    # performs nothing, and the override path is recorded in the assignment.
+    watcher_gate: dict | None = None
+    if args.assignment_kind == "writing":
+        try:
+            # The shared verdict: freshness AND ownership, evaluated once in
+            # _watcher_liveness. This gate acts on it; it does not re-derive a
+            # subset. The session identity comes from the runtime environment
+            # (the same helper bootstrap uses); where it cannot be established,
+            # fresh markers are owner-unknown, and unknown is never a pass.
+            verdicts = evaluate_coverage(
+                check_markers(args.collab_project), runtime_id_from_env()
+            )
+        except Exception as error:
+            # A gate probe that breaks must not render as a pass.
+            verdicts = [
+                {
+                    "name": name,
+                    "acceptable": False,
+                    "reason": "unreadable",
+                    "detail": f"gate probe broke: {type(error).__name__}: {error}",
+                }
+                for name in WATCHER_NAMES
+            ]
+        overdue = uncovered(verdicts)
+        lines = "\n".join(
+            f"  {verdict['name']}: {verdict['reason']}" for verdict in overdue
+        )
+        if overdue and not args.allow_stale_watchers:
+            _emit(
+                "⚠️  REFUSED: watcher_markers_not_fresh — orchestrator watcher "
+                "markers are stale, absent, or foreign-owned:\n"
+                f"{lines}\n"
+                "  A writing spawn admitted now runs without live watcher "
+                "coverage. Pass --allow-stale-watchers to override; the "
+                "override is recorded in the assignment record."
+            )
+            return 1
+        if overdue:
+            _emit(
+                "⚠️  WATCHER GATE OVERRIDE — proceeding with stale/absent/foreign "
+                "watcher markers (--allow-stale-watchers); this override is "
+                f"recorded in the assignment record:\n{lines}"
+            )
+            watcher_gate = {
+                "override": "--allow-stale-watchers",
+                "not_fresh": [
+                    {"name": verdict["name"], "status": verdict["reason"]}
+                    for verdict in overdue
+                ],
+            }
+
     client = _configured_client(registry_entry)
     if isinstance(client, GateRefusal):
         _emit(f"REFUSED: {client.reason}: {client.detail}")
@@ -134,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
             title=plan.title,
         )
         record_path = persist_assignment(
-            plan, outcome, state_dir, write_durably=write_file_durably
+            plan, outcome, state_dir, write_durably=write_file_durably,
+            watcher_gate=watcher_gate,
         )
         print(
             json.dumps(

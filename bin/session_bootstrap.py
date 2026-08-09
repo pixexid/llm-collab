@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
 from _ax_trust import format_ax_status, probe_ax_trust
 from _activation_lease import runtime_id_from_env
+from _bounded_io import UnreadableFile, read_regular_file_prefix
 from _helpers import (
     InboxScanLimitExceeded,
     ROOT,
@@ -262,6 +263,33 @@ def queue_summaries() -> list[dict]:
     return summaries
 
 
+# The CONTRACT_VERSION marker lives in the leading HTML comment of AGENTS.md.
+# The shared bounded reader (bin/_bounded_io.py) deliberately REFUSES a file
+# larger than its limit, which fits markers but not a deliberate prefix scan of
+# a tracked file that is legitimately tens of KB — so this uses its prefix
+# sibling: same non-blocking open and regular-file requirement (a FIFO here
+# must not stall every SessionStart), with truncation as the declared contract.
+CONTRACT_HEADER_READ_BYTES = 4096
+
+
+def contract_version(path=None) -> str:
+    """The CONTRACT_VERSION marker from AGENTS.md, or "unknown" when unreadable.
+
+    The one read of the marker: session_bootstrap's announcement and the
+    SessionStart hook (bin/session_gate.py) both go through here, so the read
+    is bounded — the hook makes it automatic at every session start.
+    """
+    target = path if path is not None else ROOT / "AGENTS.md"
+    try:
+        head = read_regular_file_prefix(target, CONTRACT_HEADER_READ_BYTES).decode(
+            "utf-8", errors="replace"
+        )[:200]
+    except (FileNotFoundError, UnreadableFile, OSError):
+        return "unknown"
+    marker = re.search(r"CONTRACT_VERSION:\s*(\S+)", head)
+    return marker.group(1) if marker else "unknown"
+
+
 def announce_contract(agent_id: str) -> None:
     """Print the contract version and this agent's own drifted instruction copies.
 
@@ -271,18 +299,15 @@ def announce_contract(agent_id: str) -> None:
     deliver.py invocation that silently dropped packets.
     """
     contract = ROOT / "AGENTS.md"
-    version = "unknown"
-    try:
-        head = contract.read_text(encoding="utf-8")[:200]
-        marker = re.search(r"CONTRACT_VERSION:\s*(\S+)", head)
-        if marker:
-            version = marker.group(1)
-    except OSError:
-        return
-
-    print(f"[contract] AGENTS.md version {version} — canonical worker contract")
-    print(f"[contract] if your last session predates it, read "
-          f"'Recent contract changes' in {contract}")
+    version = contract_version()
+    if version == "unknown":
+        # An unreadable contract used to print nothing; silence looked like a
+        # section that ran. UNKNOWN is not a pass.
+        print(f"[contract] AGENTS.md version UNKNOWN — could not read {contract}")
+    else:
+        print(f"[contract] AGENTS.md version {version} — canonical worker contract")
+        print(f"[contract] if your last session predates it, read "
+              f"'Recent contract changes' in {contract}")
 
     checker = ROOT / "bin" / "contract_drift.py"
     if not checker.exists():
