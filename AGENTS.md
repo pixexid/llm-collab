@@ -56,7 +56,8 @@ workers. Related GH-538.
 
 Contract v17 (2026-08-09) qualifies exactly `pi / kimi-coding/k3 / high` for
 BB authoring on the bootstrap/first-delivery path, using the measured profile
-identity. The explicit `bb thread spawn` path is deliberately not covered and
+identity. The explicitly selected `bin/bb_spawn.py` path reaches
+`plan_spawn` in `llm_collab/spawn_gate.py`, is deliberately not covered, and
 continues to rely on orchestrator review controls. Canonical details live in
 [`BB Workers`](docs/workflows/bb-workers.md). Related GH-705.
 
