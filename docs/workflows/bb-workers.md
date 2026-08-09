@@ -53,10 +53,19 @@ an enforcement control. The no-write prompt bounds the preflight; the exact
 post-turn checks below provide the proof. Resolve and record the requested base
 SHA before spawning:
 
+Resolve it **in the selected repository**, not in whatever checkout you happen to
+be standing in. Unscoped `git` reads the current checkout's `origin`, so on any
+multi-project or multi-repo lane it yields a SHA from an unrelated repository and
+provisioning either fails to resolve it or silently starts from the wrong commit.
+Ask the repository for the path rather than rebuilding it from `projects.json`:
+the value may be absolute, relative to `projects_root`, or `..`-relative, and
+`resolve_project_repo_path` already owns those rules.
+
 ```bash
+repo_root=$(python3.11 -c "import sys; sys.path.insert(0, 'bin'); from _helpers import resolve_project_repo_path; print(resolve_project_repo_path('<project-id>', '<repo-id>'))")
 base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
-git fetch origin "$base_branch"
-base_sha=$(git rev-parse "origin/$base_branch")
+git -C "$repo_root" fetch origin "$base_branch"
+base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
 bb thread spawn \
   --project <bb-project-id> \
   --new-environment worktree \
