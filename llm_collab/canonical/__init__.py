@@ -18,6 +18,7 @@ from .delivery import (
 )
 from .control import (
     CanonicalControlError,
+    CanonicalRegistryRevisionError,
     append_acknowledgment_receipt,
     append_dead_letter_receipt,
     inspect_delivery,
@@ -28,6 +29,7 @@ from .control import (
 
 __all__ = [
     "CanonicalControlError",
+    "CanonicalRegistryRevisionError",
     "CanonicalConflictError",
     "CanonicalIntegrityError",
     "append_acknowledgment_receipt",

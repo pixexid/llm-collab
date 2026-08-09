@@ -4702,17 +4702,20 @@ def dispatch_session(
                 if (
                     runtime.get("family") == "pi"
                     and not materialization_result.get("materialized")
+                    and materialization_result.get("gate") == "disabled"
                 ):
                     event["reason"] = "pull_pending"
                     record_event(event)
                     actions.append(event)
                     continue
+                if materialization_result.get("materialized"):
+                    settlement_reason = "materialized"
+                else:
+                    settlement_reason = {
+                        "disabled": "gate_disabled",
+                        "stale_registry_revision": "gate_stale_registry_revision",
+                    }.get(materialization_result.get("gate"), "gate_refused")
                 if message["path"] not in canonical_settled_message_paths(session):
-                    settlement_reason = (
-                        "gate_disabled"
-                        if materialization_result.get("gate") == "disabled"
-                        else "materialized"
-                    )
                     asserted, assertion_event, _ = activation_fenced_mutation(
                         session,
                         message,
@@ -4747,6 +4750,14 @@ def dispatch_session(
                     prepared_candidate,
                     json.dumps(prepared_candidate, indent=2, sort_keys=True),
                 )
+                if (
+                    not materialization_result.get("materialized")
+                    and materialization_result.get("gate") != "disabled"
+                ):
+                    event["reason"] = settlement_reason
+                    record_event(event)
+                    actions.append(event)
+                    continue
             runtime_materialization = event.get("canonical_materialization_result")
             if runtime.get("family") == "bb":
                 runtime_trigger = lambda: execute_runtime_trigger(

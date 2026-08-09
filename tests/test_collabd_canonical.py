@@ -3124,6 +3124,65 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         receipt_id=forged_receipt_id,
                     )
 
+    def test_p2e_gate_rejects_historical_registry_authority_for_both_projects(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                stale_revision = record_registry_for_control(
+                    store,
+                    project_canonical_writes=True,
+                    other_canonical_writes=True,
+                    revision_hash="a" * 64,
+                )
+                current_revision = record_registry_for_control(
+                    store,
+                    project_canonical_writes=True,
+                    other_canonical_writes=True,
+                    revision_hash="b" * 64,
+                )
+                self.assertEqual(current_revision, store.current_registry_revision(workspace_id=WORKSPACE))
+                for project in (PROJECT, OTHER_PROJECT):
+                    with self.subTest(project=project):
+                        with self.assertRaisesRegex(
+                            CanonicalControlError,
+                            "registry revision is not current",
+                        ) as raised:
+                            require_canonical_write_gate(
+                                store,
+                                workspace_id=WORKSPACE,
+                                scope_kind="project",
+                                scope_identity=project,
+                                registry_revision=stale_revision,
+                                allow_canonical_write=True,
+                                environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                            )
+                        self.assertNotEqual(
+                            str(raised.exception),
+                            "canonical write declaration is not enabled",
+                        )
+
+    def test_p2e_gate_admits_current_registry_authority_for_both_projects(self) -> None:
+        with TemporaryDirectory(dir="/tmp") as tmp:
+            paths = LedgerPaths.derive(tmp, WORKSPACE)
+            with LedgerStore.open_writer(paths) as store:
+                revision = record_registry_for_control(
+                    store,
+                    project_canonical_writes=True,
+                    other_canonical_writes=True,
+                    revision_hash="b" * 64,
+                )
+                for project in (PROJECT, OTHER_PROJECT):
+                    with self.subTest(project=project):
+                        require_canonical_write_gate(
+                            store,
+                            workspace_id=WORKSPACE,
+                            scope_kind="project",
+                            scope_identity=project,
+                            registry_revision=revision,
+                            allow_canonical_write=True,
+                            environ={control_module.CANONICAL_CONTROL_ENV: "enabled"},
+                        )
+
     def test_p2e_gate_is_strict_shared_and_fail_closed(self) -> None:
         self.assertIs(control_module.append_receipt, delivery_module.append_receipt)
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -3264,6 +3323,12 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                         "SELECT count(*) FROM canonical_delivery_receipts"
                     ).fetchone()[0],
                     0,
+                )
+                revision = record_registry_for_control(
+                    store,
+                    project_canonical_writes=True,
+                    other_canonical_writes=True,
+                    revision_hash="e" * 64,
                 )
 
                 with patch.dict(
@@ -5344,6 +5409,7 @@ class CanonicalMessageTest(_CanonicalMessageTestBase):
                 "CanonicalConflictError",
                 "CanonicalIntegrityError",
                 "CanonicalControlError",
+                "CanonicalRegistryRevisionError",
                 "append_acknowledgment_receipt",
                 "append_dead_letter_receipt",
                 "append_receipt",

@@ -37,6 +37,10 @@ class CanonicalControlError(PermissionError):
     """Raised when a canonical control write is not explicitly admitted."""
 
 
+class CanonicalRegistryRevisionError(CanonicalControlError):
+    """Raised when a write uses a historical registry snapshot."""
+
+
 def _canonical_writes_declared(
     store: LedgerStore,
     *,
@@ -88,6 +92,11 @@ def require_canonical_write_gate(
     )
     if not declaration_enabled:
         raise CanonicalControlError("canonical write declaration is not enabled")
+
+    if revision != store.current_registry_revision(workspace_id=workspace):
+        raise CanonicalRegistryRevisionError(
+            "canonical write registry revision is not current"
+        )
 
     environment_enabled = environment.get(CANONICAL_CONTROL_ENV) == CANONICAL_CONTROL_ENABLED
     if not environment_enabled:

@@ -13,6 +13,7 @@ from llm_collab.canonical.control import (
     CANONICAL_CONTROL_ENABLED,
     CANONICAL_CONTROL_ENV,
     CanonicalControlError,
+    CanonicalRegistryRevisionError,
     require_canonical_write_gate,
 )
 from llm_collab.canonical.delivery import create_bound_attempt, create_deliveries
@@ -119,6 +120,15 @@ def materialize_selected_legacy_packet(
             registry_revision=registry_revision,
             allow_canonical_write=True,
         )
+    except CanonicalRegistryRevisionError:
+        return {
+            "created": False,
+            "resolved": True,
+            "materialized": False,
+            "gate": "stale_registry_revision",
+            "registry_revision": registry_revision,
+            "canonical_write_started": False,
+        }
     except CanonicalControlError:
         return {
             "created": False,

@@ -3640,6 +3640,55 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertEqual("message_already_consumed", second["actions"][0]["event"])
         self.assertTrue(second["actions"][0]["runtime_result"]["skipped"])
 
+    def test_canonical_settlement_preserves_gate_reason_and_refuses_stale_wakes(self):
+        cases = (
+            ("disabled", False, "gate_disabled", True),
+            ("stale_registry_revision", False, "gate_stale_registry_revision", False),
+            ("materialized", True, "materialized", True),
+        )
+        for index, (gate, materialized, expected_reason, should_trigger) in enumerate(cases):
+            with self.subTest(gate=gate):
+                session = {
+                    "session_id": f"SESSION-SETTLEMENT-{index}",
+                    "agent_id": "gemini",
+                    "mode": "auto-read",
+                    "wake_strategy": "runtime_trigger",
+                    "binding_id": f"binding-settlement-{index}",
+                    "runtime": {"family": "gemini_cli", "session_id": f"runtime-settlement-{index}"},
+                }
+                message = {
+                    "path": f"Chats/settlement/{index}.md",
+                    "frontmatter": {},
+                }
+                runtime_trigger = Mock(return_value={"returncode": 0})
+                materialize = Mock(
+                    return_value={
+                        "resolved": True,
+                        "materialized": materialized,
+                        "created": materialized,
+                        "gate": gate,
+                        "canonical_write_started": materialized,
+                    }
+                )
+                with self._dispatch_patch_context(session, [message]), patch.object(
+                    session_autobridge_lib,
+                    "materialize_selected_runtime_packet",
+                    materialize,
+                ), patch.object(
+                    session_autobridge_lib,
+                    "execute_runtime_trigger",
+                    new=runtime_trigger,
+                ):
+                    result = session_autobridge_lib.dispatch_session(session["session_id"])
+
+                self.assertEqual(should_trigger, runtime_trigger.called)
+                self.assertEqual(
+                    {"reason": expected_reason},
+                    session["canonical_settled_messages"][message["path"]],
+                )
+                if not should_trigger:
+                    self.assertEqual(expected_reason, result["actions"][0]["reason"])
+
     def create_chat(self, root: Path, *, chat_dir_name: str, chat_id: str, project_id: str) -> Path:
         chat_dir = root / "Chats" / chat_dir_name
         write_json(chat_dir / "meta.json", {"chat_id": chat_id, "project_id": project_id})
