@@ -770,8 +770,8 @@ containment.
 
 ### Implemented ledger versions
 
-The exact current ledger is `PRAGMA user_version = 14`
-(`llm_collab.ledger.store.SCHEMA_VERSION == 14`):
+The exact current ledger is `PRAGMA user_version = 15`
+(`llm_collab.ledger.store.SCHEMA_VERSION == 15`):
 
 | Version | Landed in | Tables, triggers, and constraints |
 |---|---|
@@ -789,6 +789,7 @@ The exact current ledger is `PRAGMA user_version = 14`
 | v12 | GH-294 registration repair | Adds a nullable persisted challenge `agent_id` for immutable reservation ownership, a nullable scope-independent `conversation_bindings.owner_key` for cross-project native-session uniqueness, and a coalescing owner index that preserves legacy rows while enforcing new registrations. |
 | v13 | GH-564 managed bb start | Adds `managed_start_reservations` for one bounded, idempotent first-thread reservation and native-session publication. It does not make bb default-on. |
 | v14 | GH-566 Slice 1C | Adds `bb_thread_observations`, keyed by exact project/chat/participant/binding generation, for the committed native event cursor, dispatch state, and queued request/turn correlation. Successor generations start with independent cursors even when a rebind retains the native thread; native-thread uniqueness is generation-scoped. Cursor movement and terminal receipt recording are atomic; WebSocket notifications are not authority. |
+| v15 | GH-700 per-send dispatch seq | Adds a purely additive `dispatch_seq` column to `bb_thread_observations` (`ALTER TABLE ... ADD COLUMN ... DEFAULT 0` with a CHECK, V12 precedent; `SCHEMA_VERSION` 14→15). No released migration SQL is touched; the V15 checksum and fingerprint are computed from `V15_SQL`, then committed as frozen literals so the integrity check is real and not `f() != f()`. The pre-send marker write bumps `dispatch_seq` by one and stamps it onto exactly that send's receipt, giving every send a durable identity distinct from its attempt — `attempt_id` is a pure hash re-materialized to `attempt_index=0` every poll, so it could never answer "was THIS send delivered." The in-flight guard strands unless a `rejected_before_acceptance` receipt carries the marker's current `dispatch_seq`, consulting every receipt rather than the folded selection, so a stale rejection from an earlier send cannot authorize a retry of a send that may have landed. Legacy rows read 0 on the marker and `None` on the receipt, so both fail closed and strand. |
 
 The migration checksums and schema fingerprints are code authority in
 `llm_collab/ledger/store.py` and are verified on open. Current values are:
@@ -809,6 +810,7 @@ The migration checksums and schema fingerprints are code authority in
 | v12 | `sha256:c8ce8b30824ec939e5e7a50ed4ab70cc79b2057befe5010526c1cced2cb49f1e` | `sha256:1d67d6fed6d3959029184c4cf9cf9055ac13baac6476f7c694e99991e6e05347` |
 | v13 | `sha256:3b6b8d0d73a876824bd001adf5c229549382f45401967943e677f3b3de9c43cf` | `sha256:68e3c66f92db9d516a9c48b44ad5f278889d2d77f2588707958c1f441613cc51` |
 | v14 | `sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117` | `sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee` |
+| v15 | `sha256:4be77cde565fe5ccd46b108ce9c2441f15b710eba410eb7a888873cb234c4657` | `sha256:093221f3dd5c2f636e6fb3af16c617194b319662d45198cfd822757b4506f8bd` |
 
 No subscription, timer, runtime-dispatch lease, fence, retry, or quarantine
 table exists in v1 through v12. Dead-letter and reconciliation outcomes in

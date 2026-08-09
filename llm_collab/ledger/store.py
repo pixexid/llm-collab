@@ -18,7 +18,7 @@ from pathlib import Path
 from .paths import LedgerPaths, validate_project_id, validate_registry_token, validate_workspace_id
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 BUSY_TIMEOUT_MS = 5_000
 SYNCHRONOUS_FULL = 2
 MIGRATION_TOOL_VERSION = "llm-collab-ledger/1"
@@ -80,6 +80,7 @@ V11_TABLES = V10_TABLES | frozenset({"legacy_autobridge_provenance_imports"})
 V12_TABLES = V11_TABLES
 V13_TABLES = V12_TABLES | frozenset({"managed_start_reservations"})
 V14_TABLES = V13_TABLES | frozenset({"bb_thread_observations"})
+V15_TABLES = V14_TABLES
 
 
 class SQLiteSafetyError(RuntimeError):
@@ -3201,6 +3202,24 @@ V14_SQL = (
 )
 V14_MIGRATION_CHECKSUM = "sha256:ddd33478bb92ae2b53dcb3650d572a04627b16d44ef4550e1eaf9cca641b1117"
 V14_SCHEMA_FINGERPRINT = "sha256:c32949b37e3ae596dca9c06b0d00ea5d1c79f608cf775cfca076bbb88594fbee"
+# GH-700: give every send a durable identity distinct from its attempt. The
+# marker bumps dispatch_seq once per pre-send write and stamps it onto that
+# send's receipt, so the in-flight guard can ask "was THIS send delivered" --
+# the question attempt_id (a pure hash, re-materialized to attempt_index=0 every
+# poll) could never answer. Purely additive (V12 precedent); legacy rows read 0
+# on the marker and None on the receipt, so they fail closed. The checksum and
+# fingerprint are computed below, where the helper functions are in scope.
+V15_SQL = (
+    """
+    ALTER TABLE bb_thread_observations
+    ADD COLUMN dispatch_seq INTEGER NOT NULL
+        DEFAULT 0
+        CHECK (
+            typeof(dispatch_seq) = 'integer'
+            AND dispatch_seq >= 0
+        )
+    """,
+)
 MIGRATIONS = (
     (1, V1_SQL),
     (2, V2_SQL),
@@ -3216,6 +3235,7 @@ MIGRATIONS = (
     (12, V12_SQL),
     (13, V13_SQL),
     (14, V14_SQL),
+    (15, V15_SQL),
 )
 
 
@@ -3456,6 +3476,42 @@ def _v14_schema_fingerprint_from_sql() -> str:
         return _schema_fingerprint(connection)
     finally:
         connection.close()
+
+
+def _v15_schema_fingerprint_from_sql() -> str:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *V4_SQL,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
+            *V13_SQL,
+            *V14_SQL,
+            *V15_SQL,
+        ):
+            connection.execute(statement)
+        return _schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+# GH-700: V15's checksum and fingerprint are frozen literals, exactly as
+# V1-V14 are, so a drift in V15_SQL is caught at the integrity check rather
+# than recomputed away. They were derived once from V15_SQL (via
+# _migration_checksum and _v15_schema_fingerprint_from_sql) and pasted; the
+# suite re-derives them and asserts equality, which is a real control because
+# the literal is frozen source text, not f() != f().
+V15_MIGRATION_CHECKSUM = "sha256:4be77cde565fe5ccd46b108ce9c2441f15b710eba410eb7a888873cb234c4657"
+V15_SCHEMA_FINGERPRINT = "sha256:093221f3dd5c2f636e6fb3af16c617194b319662d45198cfd822757b4506f8bd"
 
 
 def _utc_now() -> datetime:
@@ -3842,6 +3898,9 @@ class LedgerStore:
         if claimed == 13:
             cls._validate_released_v13(connection, paths)
             return
+        if claimed == 14:
+            cls._validate_released_v14(connection, paths)
+            return
         cls._validate_schema(connection, paths)
 
     @staticmethod
@@ -3926,8 +3985,12 @@ class LedgerStore:
                 raise MigrationError("released v14 migration checksum is incoherent")
             if _v14_schema_fingerprint_from_sql() != V14_SCHEMA_FINGERPRINT:
                 raise MigrationError("released v14 schema fingerprint is incoherent")
+            if _migration_checksum(V15_SQL) != V15_MIGRATION_CHECKSUM:
+                raise MigrationError("released v15 migration checksum is incoherent")
+            if _v15_schema_fingerprint_from_sql() != V15_SCHEMA_FINGERPRINT:
+                raise MigrationError("released v15 schema fingerprint is incoherent")
             rows = cls._migration_rows(connection)
-            if [row[0] for row in rows] != list(range(1, 15)):
+            if [row[0] for row in rows] != list(range(1, 16)):
                 raise MigrationError("ledger migration metadata is incoherent")
             cls._validate_migration_row(rows[0], V1_MIGRATION_CHECKSUM, 0, paths)
             cls._validate_migration_row(rows[1], V2_MIGRATION_CHECKSUM, 1, paths)
@@ -3943,15 +4006,16 @@ class LedgerStore:
             cls._validate_migration_row(rows[11], V12_MIGRATION_CHECKSUM, 11, paths)
             cls._validate_migration_row(rows[12], V13_MIGRATION_CHECKSUM, 12, paths)
             cls._validate_migration_row(rows[13], V14_MIGRATION_CHECKSUM, 13, paths)
+            cls._validate_migration_row(rows[14], V15_MIGRATION_CHECKSUM, 14, paths)
             actual_tables = cls._table_names(connection)
-            if actual_tables != V14_TABLES:
+            if actual_tables != V15_TABLES:
                 raise MigrationError(
-                    "ledger v14 table set is incoherent: "
-                    f"missing={sorted(V14_TABLES - actual_tables)}, "
-                    f"extra={sorted(actual_tables - V14_TABLES)}"
+                    "ledger v15 table set is incoherent: "
+                    f"missing={sorted(V15_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V15_TABLES)}"
                 )
-            if _schema_fingerprint(connection) != V14_SCHEMA_FINGERPRINT:
-                raise MigrationError("ledger v14 schema fingerprint is incoherent")
+            if _schema_fingerprint(connection) != V15_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v15 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -4110,6 +4174,56 @@ class LedgerStore:
                 )
             if _schema_fingerprint(connection) != V13_SCHEMA_FINGERPRINT:
                 raise MigrationError("ledger v13 schema fingerprint is incoherent")
+        except sqlite3.DatabaseError as exc:
+            raise MigrationError("ledger schema is corrupt or incoherent") from exc
+
+    @classmethod
+    def _validate_released_v14(
+        cls, connection: sqlite3.Connection, paths: LedgerPaths
+    ) -> None:
+        """Accept only the exact released v14 long enough for the v15 migration."""
+        try:
+            cls._validate_database_health(connection)
+            if connection.execute("PRAGMA user_version").fetchone()[0] != 14:
+                raise MigrationError("ledger is not released schema v14")
+            released = tuple(
+                (statements, checksum, fingerprint, fingerprint_from_sql)
+                for statements, checksum, fingerprint, fingerprint_from_sql in (
+                    (V1_SQL, V1_MIGRATION_CHECKSUM, V1_SCHEMA_FINGERPRINT, _v1_schema_fingerprint_from_sql),
+                    (V2_SQL, V2_MIGRATION_CHECKSUM, V2_SCHEMA_FINGERPRINT, _v2_schema_fingerprint_from_sql),
+                    (V3_SQL, V3_MIGRATION_CHECKSUM, V3_SCHEMA_FINGERPRINT, _v3_schema_fingerprint_from_sql),
+                    (V4_SQL, V4_MIGRATION_CHECKSUM, V4_SCHEMA_FINGERPRINT, _v4_schema_fingerprint_from_sql),
+                    (V5_SQL, V5_MIGRATION_CHECKSUM, V5_SCHEMA_FINGERPRINT, _v5_schema_fingerprint_from_sql),
+                    (V6_SQL, V6_MIGRATION_CHECKSUM, V6_SCHEMA_FINGERPRINT, _v6_schema_fingerprint_from_sql),
+                    (V7_SQL, V7_MIGRATION_CHECKSUM, V7_SCHEMA_FINGERPRINT, _v7_schema_fingerprint_from_sql),
+                    (V8_SQL, V8_MIGRATION_CHECKSUM, V8_SCHEMA_FINGERPRINT, _v8_schema_fingerprint_from_sql),
+                    (V9_SQL, V9_MIGRATION_CHECKSUM, V9_SCHEMA_FINGERPRINT, _v9_schema_fingerprint_from_sql),
+                    (V10_SQL, V10_MIGRATION_CHECKSUM, V10_SCHEMA_FINGERPRINT, _v10_schema_fingerprint_from_sql),
+                    (V11_SQL, V11_MIGRATION_CHECKSUM, V11_SCHEMA_FINGERPRINT, _v11_schema_fingerprint_from_sql),
+                    (V12_SQL, V12_MIGRATION_CHECKSUM, V12_SCHEMA_FINGERPRINT, _v12_schema_fingerprint_from_sql),
+                    (V13_SQL, V13_MIGRATION_CHECKSUM, V13_SCHEMA_FINGERPRINT, _v13_schema_fingerprint_from_sql),
+                    (V14_SQL, V14_MIGRATION_CHECKSUM, V14_SCHEMA_FINGERPRINT, _v14_schema_fingerprint_from_sql),
+                )
+            )
+            for statements, checksum, fingerprint, fingerprint_from_sql in released:
+                if _migration_checksum(statements) != checksum:
+                    raise MigrationError("released migration checksum is incoherent")
+                if fingerprint_from_sql() != fingerprint:
+                    raise MigrationError("released schema fingerprint is incoherent")
+            rows = cls._migration_rows(connection)
+            if [row[0] for row in rows] != list(range(1, 15)):
+                raise MigrationError("ledger migration metadata is incoherent")
+            for index, (_statements, checksum, _fingerprint, _fingerprint_from_sql) in enumerate(released):
+                cls._validate_migration_row(rows[index], checksum, index, paths)
+            actual_tables = cls._table_names(connection)
+            if actual_tables != V14_TABLES:
+                raise MigrationError(
+                    "ledger v14 table set is incoherent: "
+                    f"missing={sorted(V14_TABLES - actual_tables)}, "
+                    f"extra={sorted(actual_tables - V14_TABLES)}"
+                )
+            if _schema_fingerprint(connection) != V14_SCHEMA_FINGERPRINT:
+                raise MigrationError("ledger v14 schema fingerprint is incoherent")
         except sqlite3.DatabaseError as exc:
             raise MigrationError("ledger schema is corrupt or incoherent") from exc
 
@@ -4440,6 +4554,7 @@ class LedgerStore:
                     12: V12_MIGRATION_CHECKSUM,
                     13: V13_MIGRATION_CHECKSUM,
                     14: V14_MIGRATION_CHECKSUM,
+                    15: V15_MIGRATION_CHECKSUM,
                 }.get(version)
                 if expected_checksum is None or checksum != expected_checksum:
                     raise MigrationError(f"migration {version} does not match its released checksum")
@@ -4472,6 +4587,7 @@ class LedgerStore:
                     12: V12_SCHEMA_FINGERPRINT,
                     13: V13_SCHEMA_FINGERPRINT,
                     14: V14_SCHEMA_FINGERPRINT,
+                    15: V15_SCHEMA_FINGERPRINT,
                 }[version]
                 if _schema_fingerprint(self._connection) != expected_fingerprint:
                     raise MigrationError(f"migration {version} produced an incoherent schema")
@@ -4641,6 +4757,7 @@ class LedgerStore:
             "session_ref_id",
             "last_event_seq",
             "dispatch_state",
+            "dispatch_seq",
             "last_message_id",
             "last_delivery_id",
             "last_attempt_id",
@@ -4673,7 +4790,7 @@ class LedgerStore:
         row = self._connection.execute(
             "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
             "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "dispatch_state, dispatch_seq, last_message_id, last_delivery_id, last_attempt_id, "
             "native_request_id, native_turn_id, updated_at_utc "
             "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
             "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
@@ -4722,7 +4839,7 @@ class LedgerStore:
             row = self._connection.execute(
                 "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
                 "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-                "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                "dispatch_state, dispatch_seq, last_message_id, last_delivery_id, last_attempt_id, "
                 "native_request_id, native_turn_id, updated_at_utc "
                 "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
                 "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
@@ -4741,7 +4858,7 @@ class LedgerStore:
                 row = self._connection.execute(
                     "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
                     "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-                    "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+                    "dispatch_state, dispatch_seq, last_message_id, last_delivery_id, last_attempt_id, "
                     "native_request_id, native_turn_id, updated_at_utc "
                     "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
                     "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "
@@ -4783,6 +4900,7 @@ class LedgerStore:
         last_attempt_id: str | None = None,
         native_request_id: str | None = None,
         native_turn_id: str | None = None,
+        dispatch_seq: int | None = None,
     ) -> dict[str, object]:
         """Advance inside the caller's transaction, never below the cursor."""
         identity = self._bb_observation_identity(
@@ -4798,6 +4916,12 @@ class LedgerStore:
         )
         if isinstance(event_seq, bool) or not isinstance(event_seq, int) or event_seq < 0:
             raise ValueError("event_seq must be a non-negative integer")
+        if dispatch_seq is not None and (
+            isinstance(dispatch_seq, bool)
+            or not isinstance(dispatch_seq, int)
+            or dispatch_seq < 0
+        ):
+            raise ValueError("dispatch_seq must be a non-negative integer or None")
         dispatch_state = self._bb_observation_state(dispatch_state)
         updated_at_utc = _utc_timestamp(updated_at_utc, "updated_at_utc")
         for value, name, validator in (
@@ -4844,7 +4968,8 @@ class LedgerStore:
             "UPDATE bb_thread_observations SET last_event_seq = ?, dispatch_state = ?, "
             "last_message_id = COALESCE(?, last_message_id), "
             "last_delivery_id = COALESCE(?, last_delivery_id), "
-            "last_attempt_id = COALESCE(?, last_attempt_id), native_request_id = ?, "
+            "last_attempt_id = COALESCE(?, last_attempt_id), "
+            "dispatch_seq = COALESCE(?, dispatch_seq), native_request_id = ?, "
             "native_turn_id = ?, updated_at_utc = ? "
             "WHERE workspace_id = ? AND scope_kind = ? AND scope_identity = ? "
             "AND conversation_id = ? AND participant_id = ? AND binding_generation = ?",
@@ -4854,6 +4979,7 @@ class LedgerStore:
                 last_message_id,
                 last_delivery_id,
                 last_attempt_id,
+                dispatch_seq,
                 next_request_id,
                 next_turn_id,
                 updated_at_utc,
@@ -4863,7 +4989,7 @@ class LedgerStore:
         row = self._connection.execute(
             "SELECT workspace_id, scope_kind, scope_identity, conversation_id, participant_id, "
             "binding_id, binding_generation, native_thread_id, session_ref_id, last_event_seq, "
-            "dispatch_state, last_message_id, last_delivery_id, last_attempt_id, "
+            "dispatch_state, dispatch_seq, last_message_id, last_delivery_id, last_attempt_id, "
             "native_request_id, native_turn_id, updated_at_utc "
             "FROM bb_thread_observations WHERE workspace_id = ? AND scope_kind = ? "
             "AND scope_identity = ? AND conversation_id = ? AND participant_id = ? "

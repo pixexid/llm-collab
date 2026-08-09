@@ -52,6 +52,8 @@ from llm_collab.ledger.store import (
     V13_SCHEMA_FINGERPRINT,
     V14_MIGRATION_CHECKSUM,
     V14_SCHEMA_FINGERPRINT,
+    V15_MIGRATION_CHECKSUM,
+    V15_SCHEMA_FINGERPRINT,
     MigrationError,
     V1_SQL,
     V2_SQL,
@@ -67,6 +69,7 @@ from llm_collab.ledger.store import (
     V12_SQL,
     V13_SQL,
     V14_SQL,
+    V15_SQL,
     CanonicalIntegrityError,
     _close_connection_and_pin,
     _connection_fd_snapshot,
@@ -88,6 +91,7 @@ from llm_collab.ledger.store import (
     _v12_schema_fingerprint_from_sql,
     _v13_schema_fingerprint_from_sql,
     _v14_schema_fingerprint_from_sql,
+    _v15_schema_fingerprint_from_sql,
     SCHEMA_VERSION,
     require_safe_sqlite,
 )
@@ -476,6 +480,29 @@ def v14_fingerprint_with_v4(statements: tuple[str, ...]) -> str:
         return store_module._schema_fingerprint(connection)
 
 
+def v15_fingerprint_with_v4(statements: tuple[str, ...]) -> str:
+    with closing(sqlite3.connect(":memory:")) as connection:
+        for statement in (
+            *V1_SQL,
+            *V2_SQL,
+            *V3_SQL,
+            *statements,
+            *V5_SQL,
+            *V6_SQL,
+            *V7_SQL,
+            *V8_SQL,
+            *V9_SQL,
+            *V10_SQL,
+            *V11_SQL,
+            *V12_SQL,
+            *V13_SQL,
+            *V14_SQL,
+            *V15_SQL,
+        ):
+            connection.execute(statement)
+        return store_module._schema_fingerprint(connection)
+
+
 def mutate_v4(old: str, new: str, *, occurrence: int = 1) -> tuple[str, ...]:
     statements = list(V4_SQL)
     matches = [index for index, statement in enumerate(statements) if old in statement]
@@ -500,6 +527,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
     v12_fingerprint = v12_fingerprint_with_v4(statements)
     v13_fingerprint = v13_fingerprint_with_v4(statements)
     v14_fingerprint = v14_fingerprint_with_v4(statements)
+    v15_fingerprint = v15_fingerprint_with_v4(statements)
     with (
         patch.object(store_module, "V4_SQL", statements),
         patch.object(store_module, "V4_MIGRATION_CHECKSUM", checksum),
@@ -514,6 +542,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
         patch.object(store_module, "V12_SCHEMA_FINGERPRINT", v12_fingerprint),
         patch.object(store_module, "V13_SCHEMA_FINGERPRINT", v13_fingerprint),
         patch.object(store_module, "V14_SCHEMA_FINGERPRINT", v14_fingerprint),
+        patch.object(store_module, "V15_SCHEMA_FINGERPRINT", v15_fingerprint),
         LedgerStore.open_writer(
             paths,
             migrations=(
@@ -531,6 +560,7 @@ def open_mutated_v4(paths: LedgerPaths, statements: tuple[str, ...]):
                 (12, V12_SQL),
                 (13, V13_SQL),
                 (14, V14_SQL),
+                (15, V15_SQL),
             ),
         ) as store,
     ):
@@ -924,7 +954,7 @@ class LedgerStoreTest(unittest.TestCase):
 
     def test_all_file_backed_connects_use_one_verified_noncreating_open(self) -> None:
         source = inspect.getsource(store_module)
-        self.assertEqual(source.count("sqlite3.connect("), 15)
+        self.assertEqual(source.count("sqlite3.connect("), 16)
         self.assertEqual(source.count("_close_connection_and_pin("), 8)
         self.assertIn("def _v9_schema_fingerprint_from_sql", source)
         self.assertIn("def _v10_schema_fingerprint_from_sql", source)
@@ -1057,6 +1087,7 @@ class LedgerStoreTest(unittest.TestCase):
                     "ledger-11-20260721T080506123456Z.sqlite3",
                     "ledger-12-20260721T080506123456Z.sqlite3",
                     "ledger-13-20260721T080506123456Z.sqlite3",
+                    "ledger-14-20260721T080506123456Z.sqlite3",
                 ],
             )
             for version, backup in enumerate(backups):
@@ -1155,6 +1186,12 @@ class LedgerStoreTest(unittest.TestCase):
                             MIGRATION_TOOL_VERSION,
                             backups[13].name,
                         ),
+                        (
+                            V15_MIGRATION_CHECKSUM,
+                            FIXED_TIME.isoformat(),
+                            MIGRATION_TOOL_VERSION,
+                            backups[14].name,
+                        ),
                     ],
                 )
             self.assertEqual(_migration_checksum(V1_SQL), V1_MIGRATION_CHECKSUM)
@@ -1183,6 +1220,10 @@ class LedgerStoreTest(unittest.TestCase):
             self.assertEqual(_v12_schema_fingerprint_from_sql(), V12_SCHEMA_FINGERPRINT)
             self.assertEqual(_migration_checksum(V13_SQL), V13_MIGRATION_CHECKSUM)
             self.assertEqual(_v13_schema_fingerprint_from_sql(), V13_SCHEMA_FINGERPRINT)
+            self.assertEqual(_migration_checksum(V14_SQL), V14_MIGRATION_CHECKSUM)
+            self.assertEqual(_v14_schema_fingerprint_from_sql(), V14_SCHEMA_FINGERPRINT)
+            self.assertEqual(_migration_checksum(V15_SQL), V15_MIGRATION_CHECKSUM)
+            self.assertEqual(_v15_schema_fingerprint_from_sql(), V15_SCHEMA_FINGERPRINT)
 
             source = inspect.getsource(__import__("llm_collab.ledger.store", fromlist=["*"]))
             self.assertIn(".backup(", source)
@@ -1194,6 +1235,40 @@ class LedgerStoreTest(unittest.TestCase):
                     "\n".join(V1_SQL),
                 )
             )
+
+    def test_v15_integrity_constants_are_frozen_literals_matching_the_sql(self) -> None:
+        """P2 (GH-700 review head 2): V15_MIGRATION_CHECKSUM and
+        V15_SCHEMA_FINGERPRINT are frozen string literals, like V1-V14.
+
+        This re-derives them from V15_SQL and asserts equality. It is a REAL
+        control, not a tautology, because the left side is recomputed at test
+        time from the current V15_SQL while the right side is frozen source text
+        pasted once: a drift in V15_SQL (a different column or CHECK) changes the
+        recomputed value but not the literal, so the assertion fails. Before the
+        fix the constant WAS the recomputation, so the production integrity check
+        read f() != f() and could never fire.
+        """
+        self.assertEqual(_migration_checksum(V15_SQL), V15_MIGRATION_CHECKSUM)
+        self.assertEqual(_v15_schema_fingerprint_from_sql(), V15_SCHEMA_FINGERPRINT)
+        # The constants must be frozen literals (str), not call expressions that
+        # recompute at import and erase the control.
+        self.assertIsInstance(V15_MIGRATION_CHECKSUM, str)
+        self.assertIsInstance(V15_SCHEMA_FINGERPRINT, str)
+        self.assertTrue(V15_MIGRATION_CHECKSUM.startswith("sha256:"))
+        self.assertTrue(V15_SCHEMA_FINGERPRINT.startswith("sha256:"))
+        source = inspect.getsource(store_module)
+        self.assertRegex(
+            source,
+            r'(?m)^V15_MIGRATION_CHECKSUM = "sha256:[0-9a-f]{64}"$',
+            "V15_MIGRATION_CHECKSUM must be a quoted sha256 literal in source, not a "
+            "_migration_checksum(...) call that recomputes at import",
+        )
+        self.assertRegex(
+            source,
+            r'(?m)^V15_SCHEMA_FINGERPRINT = "sha256:[0-9a-f]{64}"$',
+            "V15_SCHEMA_FINGERPRINT must be a quoted sha256 literal in source, not a "
+            "_v15_schema_fingerprint_from_sql() call that recomputes at import",
+        )
 
     def test_v11_to_v12_migration_preserves_legacy_session_ref_and_backfills_agent(self) -> None:
         with TemporaryDirectory(dir="/tmp") as tmp:
@@ -3972,7 +4047,7 @@ class LedgerStoreTest(unittest.TestCase):
                     paths.ensure_directories()
                     if kind == "unsupported":
                         with closing(sqlite3.connect(paths.ledger)) as connection, connection:
-                            connection.execute("PRAGMA user_version = 15")
+                            connection.execute("PRAGMA user_version = 16")
                         expected = "unsupported ledger schema version"
                     else:
                         if kind == "corrupt":
