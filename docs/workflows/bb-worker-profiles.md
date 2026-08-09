@@ -38,21 +38,22 @@ execution host.
 A Phase 2 selector must require the exact `provider`, `model`, and
 `reasoning_level` to be present and refuse as `profile_unavailable` otherwise;
 it must not fall back. Two paths can start an authoring assignment, and they are
-deliberately governed by different rules. On the inbound activation path, BB
-bootstrap admits an authoring assignment only when the resolved profile belongs
-to the qualified set defined by `AUTHORING_QUALIFIED_PROFILES` in
-`llm_collab/bb_bootstrap.py`; otherwise it refuses fail closed. No person chose
-that profile: it arrives inside a packet. A partial or malformed activation
-marker refuses as the distinct `bb_bootstrap_malformed_activation` before
-execution.
+deliberately governed by different rules. On the inbound activation path, an
+arriving packet supplies the assignment with no human in the loop. BB bootstrap
+resolves the profile from its own policy and admits the assignment only when
+that profile belongs to the qualified set defined by
+`AUTHORING_QUALIFIED_PROFILES` in `llm_collab/bb_bootstrap.py`; otherwise it
+refuses as `bb_bootstrap_profile_unavailable`, fail closed. A partial or
+malformed activation marker refuses as the distinct
+`bb_bootstrap_malformed_activation` before execution.
 
 The explicitly selected path is deliberately not gated on qualification. Its
 `plan_spawn` seam in `llm_collab/spawn_gate.py`, reached through
 `bin/bb_spawn.py`, enforces the Contract v15 hard model exclusions and the
 isolation, exact base-SHA, registry, and scope checks, and nothing about
-qualification. This is a decision, not an oversight: an orchestrator selected
-the exact provider, model, and reasoning level for a specific lane, and that
-lane's output passes through the review controls in
+qualification. This is a decision, not an oversight: an orchestrator decided
+both to start the specific lane and which exact provider, model, and reasoning
+level it runs on, and that lane's output passes through the review controls in
 [`commit-push-prs.md`](commit-push-prs.md). The native `bb thread spawn` command
 is not this assignment-spawn seam and remains forbidden as an alternate path.
 
