@@ -1293,6 +1293,246 @@ class SessionAutobridgeTest(unittest.TestCase):
         trigger.assert_not_called()
         claim.assert_not_called()
 
+    def _dispatch_generic_wake(
+        self, session, message, prepared, *, run_side_effect=None, run_return_value=None,
+        project_id=None,
+    ):
+        """Drive dispatch_session so the REAL execute_runtime_trigger runs against a
+        controlled subprocess.run. Every project-aware seam that this change does
+        NOT touch is patched; the seam under test (execute_runtime_trigger) is left
+        live so the timeout classification is exercised end to end."""
+        run_kwargs = (
+            {"side_effect": run_side_effect}
+            if run_side_effect is not None
+            else {"return_value": run_return_value}
+        )
+        with patch.object(
+            session_autobridge_lib, "load_session", return_value=session
+        ), patch.object(
+            session_autobridge_lib, "session_is_dispatchable", return_value=(True, "ok")
+        ), patch.object(
+            session_autobridge_lib, "matching_unread_messages", return_value=[message]
+        ), patch.object(
+            session_autobridge_lib, "processed_messages", return_value=set()
+        ), patch.object(
+            session_autobridge_lib, "message_targets_session", return_value=(True, "test")
+        ), patch.object(
+            session_autobridge_lib, "should_skip_for_loop_protection",
+            return_value=(False, "ok"),
+        ), patch.object(
+            session_autobridge_lib, "resolve_effective_action",
+            return_value=("runtime_trigger", "test"),
+        ), patch.object(
+            session_autobridge_lib, "resolve_session_receive_binding",
+            return_value=(True, None),
+        ), patch.object(
+            session_autobridge_lib, "message_needs_canonical_materialization",
+            return_value=False,
+        ), patch.object(
+            session_autobridge_lib, "claim_message_activation", return_value=(True, None)
+        ), patch.object(
+            session_autobridge_lib, "reserve_message_result", return_value=prepared
+        ), patch.object(
+            session_autobridge_lib.subprocess, "run", **run_kwargs
+        ), patch.object(
+            session_autobridge_lib, "refresh_runtime_ui", return_value={}
+        ), patch.object(
+            session_autobridge_lib, "write_operator_turn_summary", return_value={}
+        ), patch.object(
+            session_autobridge_lib, "append_event"
+        ), patch.object(
+            session_autobridge_lib, "mark_message_processed"
+        ) as mark_processed:
+            result = session_autobridge_lib.dispatch_session(
+                session["session_id"], project_id=project_id
+            )
+        return result, mark_processed
+
+    def test_execute_runtime_trigger_classifies_timeout_as_ambiguous_and_nonzero_as_clean(self):
+        """GH-688: the SEAM itself must produce the retry-suppressing surface.
+
+        A timed-out generic wake is the canonical ambiguous case -- the command ran
+        for the full budget and the response was lost, so the wake may have landed.
+        The fourth review rule makes every post-execution failure retry-suppressing
+        once the outcome is ambiguous, and says the seam (not just the call site)
+        must produce that surface: a typed reason with a null identity is still a
+        clean refusal, so the retry-suppressing surface (returncode 0) is produced
+        inside execute_runtime_trigger. There is no recoverable native identity on
+        this path, so the rule's "otherwise ambiguous" branch applies.
+
+        Both directions at once, because a test that only proves suppression cannot
+        distinguish this fix from one that suppresses every failure: a NONZERO exit
+        (the command ran and reported a determinate failure, which the rule carves
+        out as outside this rule until a side-effect contract is established) must
+        stay a clean, retryable refusal.
+        """
+        session = {
+            "session_id": "SESSION-GENERIC-WAKE-SEAM",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "runtime": {
+                "family": "claude_app",
+                "session_id": "thread-wake",
+                "command": ["wake-cli", "--prompt"],
+                "timeout_seconds": 1,
+            },
+        }
+        message = {
+            "path": "Chats/wake.md",
+            "frontmatter": {"from": "codex", "to": "claude"},
+            "body": "wake",
+        }
+        # Direction 1: timeout is ambiguous and retry-suppressing at the seam.
+        with patch.object(
+            session_autobridge_lib.subprocess,
+            "run",
+            side_effect=session_autobridge_lib.subprocess.TimeoutExpired(
+                cmd=session["runtime"]["command"], timeout=1
+            ),
+        ):
+            result = session_autobridge_lib.execute_runtime_trigger(session, message)
+        self.assertEqual(
+            0,
+            result["returncode"],
+            "a timed-out wake is ambiguous (the operation may have run) and must be "
+            "retry-suppressing at the seam, never leaving the packet re-evaluated "
+            "every poll",
+        )
+        self.assertTrue(result["timed_out"])
+        self.assertEqual("unobserved", result["terminal_status"])
+        self.assertFalse(
+            result["delivery_accepted"],
+            "delivery stays unobserved; returncode 0 (not delivery_accepted) is the "
+            "retry-suppressing surface",
+        )
+
+        # Direction 2: a determinate nonzero exit is NOT suppressed. This is the
+        # half that proves the fix targets ambiguity rather than suppressing every
+        # failure that reaches the subprocess.
+        with patch.object(
+            session_autobridge_lib.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=session["runtime"]["command"], returncode=1, stdout="", stderr="boom"
+            ),
+        ):
+            result = session_autobridge_lib.execute_runtime_trigger(session, message)
+        self.assertNotEqual(
+            0,
+            result["returncode"],
+            "a determinate nonzero exit is outside the ambiguity rule and must stay "
+            "a clean, retryable refusal",
+        )
+
+    def test_timed_out_generic_wake_marks_packet_processed_on_amiga_and_nuvyr(self):
+        """GH-688 end-to-end: a timed-out generic wake is retry-suppressing on BOTH projects.
+
+        This changes dispatch/retry behaviour in a SHARED seam (execute_runtime_trigger
+        in bin/), so AGENTS.md's Project Boundary requires focused coverage for Amiga
+        and a registered non-Amiga project. Nuvyr is registered in every test
+        workspace's projects.json, so its identifiers come from the repo's own
+        fixture. dispatch_session is driven with project_id=<project> so the project
+        boundary check runs for real on each path.
+
+        The mutation proof must fail on the non-Amiga case too: a proof that only
+        fires on Amiga does not establish the shared contract (this exact clause was
+        missed on GH-689 and caught by review). Under the defect,
+        subprocess.TimeoutExpired propagated out of activation_fenced_mutation
+        (whose try catches only LeaseRefused) and out of dispatch_session's message
+        loop (which wraps the neighbouring UI-refresh call but not the
+        runtime_trigger call), so mark_message_processed was never reached and the
+        packet was re-evaluated every poll while the timed-out wake may have landed.
+        """
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                session = {
+                    "session_id": f"SESSION-TIMEOUT-WAKE-{project.upper()}",
+                    "agent_id": "claude",
+                    "project_id": project,
+                    "mode": "auto-read",
+                    "wake_strategy": "runtime_trigger",
+                    "runtime": {
+                        "family": "claude_app",
+                        "session_id": f"thread-{project}",
+                        "command": ["wake-cli", "--prompt"],
+                        "timeout_seconds": 1,
+                    },
+                }
+                message = {
+                    "path": f"Chats/timeout-{project}/packet.md",
+                    "frontmatter": {"from": "codex", "to": "claude"},
+                }
+                result, mark_processed = self._dispatch_generic_wake(
+                    session,
+                    message,
+                    ({"processed_messages": []}, "{}"),
+                    run_side_effect=session_autobridge_lib.subprocess.TimeoutExpired(
+                        cmd=session["runtime"]["command"], timeout=1
+                    ),
+                    project_id=project,
+                )
+                self.assertEqual(
+                    1,
+                    result["matched_messages"],
+                    f"{project}: the timed-out packet must be matched and dispatched",
+                )
+                self.assertEqual(
+                    1,
+                    mark_processed.call_count,
+                    f"{project}: a timed-out wake is ambiguous and must mark the packet "
+                    "processed so it is never re-evaluated every poll",
+                )
+                action = result["actions"][0]
+                self.assertEqual(
+                    0,
+                    action["runtime_result"]["returncode"],
+                    f"{project}: the seam must produce the retry-suppressing surface",
+                )
+                self.assertTrue(action["runtime_result"]["timed_out"])
+
+    def test_nonzero_generic_wake_is_not_marked_processed(self):
+        """GH-688 other direction: a determinate nonzero exit stays a clean refusal.
+
+        The fix classifies a TIMEOUT as ambiguous and retry-suppressing, but a
+        nonzero exit is a determinate failure the rule explicitly carves out
+        ("outside this rule until evidence establishes its side-effect contract").
+        It must stay retryable: the packet is NOT marked processed, so a later poll
+        re-evaluates it. This is the dispatch-level half that proves the fix targets
+        ambiguity rather than suppressing every failure that reaches the subprocess.
+        """
+        session = {
+            "session_id": "SESSION-NONZERO-WAKE",
+            "agent_id": "claude",
+            "project_id": "amiga",
+            "mode": "auto-read",
+            "wake_strategy": "runtime_trigger",
+            "runtime": {
+                "family": "claude_app",
+                "session_id": "thread-nonzero",
+                "command": ["wake-cli", "--prompt"],
+                "timeout_seconds": 1,
+            },
+        }
+        message = {
+            "path": "Chats/nonzero/packet.md",
+            "frontmatter": {"from": "codex", "to": "claude"},
+        }
+        result, mark_processed = self._dispatch_generic_wake(
+            session,
+            message,
+            ({"processed_messages": []}, "{}"),
+            run_return_value=subprocess.CompletedProcess(
+                args=session["runtime"]["command"], returncode=1, stdout="", stderr="boom"
+            ),
+            project_id="amiga",
+        )
+        self.assertEqual(
+            0,
+            mark_processed.call_count,
+            "a determinate nonzero exit is a clean refusal and must NOT be suppressed",
+        )
+        self.assertNotEqual(0, result["actions"][0]["runtime_result"]["returncode"])
+
     def test_inbox_persistence_uses_the_durable_writer(self):
         with patch.object(helpers_lib, "write_file_durably") as durable:
             helpers_lib.save_agent_inbox("codex", {"agent": "codex", "unread": [], "read": []})

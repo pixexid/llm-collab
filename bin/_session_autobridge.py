@@ -3769,17 +3769,49 @@ def execute_runtime_trigger(
             env["CLAUDE_HOME"] = str(runtime_home)
         elif runtime_family == "gemini_cli":
             env["GEMINI_HOME"] = str(runtime_home)
-    result = subprocess.run(
-        command,
-        input=None if derived else json.dumps(payload),
-        stdin=subprocess.DEVNULL if derived else None,
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        env=env,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    # subprocess.run is the execution boundary for this generic wake. Before it
+    # (no command; the bb/pi/codex_app family dispatch above) every refusal is a
+    # clean PRE-execution refusal and stays retryable. Once the command has
+    # started, a timeout is the canonical ambiguous case -- the wake may have
+    # landed but the response was lost -- so it must be retry-suppressing and must
+    # never propagate and leave the packet re-evaluated every poll (fourth review
+    # rule; execute_codex_app_server_trigger treats turn/start acceptance the same
+    # way). check=False governs CalledProcessError only; subprocess.TimeoutExpired
+    # is still raised, so catch it AT THE SEAM, not the call site: a seam that
+    # returns a typed reason with a null identity is still a clean refusal, so the
+    # retry-suppressing surface (returncode 0) must be produced here. There is no
+    # recoverable native identity on this path, so the rule's "otherwise
+    # ambiguous" branch applies rather than a typed orphan.
+    try:
+        result = subprocess.run(
+            command,
+            input=None if derived else json.dumps(payload),
+            stdin=subprocess.DEVNULL if derived else None,
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            env=env,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Delivered-but-unobserved: the wake command ran for the full budget and
+        # the outcome was lost. returncode 0 marks the packet processed so it is
+        # never retried or re-evaluated every poll; delivery_accepted stays False
+        # because nothing was observed. This mirrors the app-server path's
+        # unobserved terminal state rather than inventing a third treatment.
+        return {
+            "command": command,
+            "derived_command": derived,
+            "timeout_seconds": timeout_seconds,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": f"wake command timed out after {timeout_seconds}s",
+            "terminal_status": "unobserved",
+            "delivery_observed": False,
+            "timed_out": True,
+            "delivery_accepted": False,
+        }
     trigger_result = {
         "command": command,
         "derived_command": derived,
