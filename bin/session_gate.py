@@ -27,13 +27,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _watcher_liveness import FRESH, check_markers  # noqa: E402
+from _watcher_liveness import FRESH, check_markers, foreign_fresh  # noqa: E402
 from llm_collab.bb_client import PINNED_BB_VERSION  # noqa: E402
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
 HANDOFF_FILE = "scratchpad/orchestrator-handoff.md"
+HOOK_PROJECT_ID = "llm-collab"  # this hook is llm-collab's own repo hook
 
 BB_PROBE_TIMEOUT_SECONDS = 10.0
+# A Claude Code hook payload is a small JSON object on stdin; bound the read.
+MAX_HOOK_PAYLOAD_BYTES = 64 * 1024
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -85,20 +88,74 @@ def tooling_check() -> tuple[str, str]:
     return UNKNOWN, f"currency unverifiable: {currency.get('reason', '?')}"
 
 
-def watcher_checks() -> list[tuple[str, str, str]]:
-    """Watcher liveness markers; stale/absent/unreadable is FAIL, never a pass."""
+def current_session_id(stdin) -> str | None:
+    """This session's identity, from the Claude Code hook payload on stdin.
+
+    A SessionStart hook receives `{"session_id": ..., "hook_event_name": ...}`
+    on stdin; that is the hook's only honest source of the current session's
+    id. Run by hand (a TTY, or empty/piped garbage), there is no payload and
+    no identity — None, and the caller says so rather than guessing (I5).
+    """
+    try:
+        if stdin.isatty():
+            return None
+        raw = stdin.read(MAX_HOOK_PAYLOAD_BYTES + 1)
+    except (OSError, ValueError):
+        return None
+    if not raw or len(raw) > MAX_HOOK_PAYLOAD_BYTES:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    session_id = payload.get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def watcher_checks(own_session_id: str | None) -> list[tuple[str, str, str]]:
+    """Watcher liveness markers; stale/absent/unreadable is FAIL, never a pass.
+
+    A FRESH marker owned by a DIFFERENT session is the predecessor-watchers
+    incident: the previous session's watchers were never stopped and are
+    double-notifying this one. Loud, and it names the foreign session id.
+    """
     results = []
-    for entry in check_markers("llm-collab"):  # this hook is llm-collab's own repo hook
-        if entry["status"] == FRESH:
-            results.append((f"watcher {entry['name']}", PASS, f"marker {entry['age_seconds']}s old"))
+    report = check_markers(HOOK_PROJECT_ID)
+    foreign = {entry["name"] for entry in foreign_fresh(report, own_session_id)}
+    for entry in report:
+        check = f"watcher {entry['name']} [{HOOK_PROJECT_ID}]"
+        if entry["status"] == FRESH and entry["name"] in foreign:
+            results.append((
+                check,
+                FAIL,
+                f"fresh marker owned by FOREIGN session {entry['session_id']} — "
+                "a predecessor session's watcher is still running and "
+                "double-notifying this one; message that session to TaskStop "
+                "its watchers, or escalate to the operator",
+            ))
+        elif entry["status"] == FRESH and own_session_id is None:
+            results.append((
+                check,
+                UNKNOWN,
+                f"fresh marker owned by session {entry.get('session_id')}; "
+                "current session identity unavailable, ownership unverified",
+            ))
+        elif entry["status"] == FRESH:
+            results.append((
+                check,
+                PASS,
+                f"marker {entry['age_seconds']}s old, owned by this session",
+            ))
         elif entry["status"] == "unreadable":
-            results.append((f"watcher {entry['name']}", UNKNOWN, f"marker unreadable: {entry.get('detail', '?')}"))
+            results.append((check, UNKNOWN, f"marker unreadable: {entry.get('detail', '?')}"))
         else:
-            results.append((f"watcher {entry['name']}", FAIL, f"marker {entry['status']} ({entry['marker']})"))
+            results.append((check, FAIL, f"marker {entry['status']} ({entry['marker']})"))
     return results
 
 
-def run_checks() -> bool:
+def run_checks(own_session_id: str | None = None) -> bool:
     """Print every check line. Returns True when nothing failed or is unknown."""
     clean = True
 
@@ -117,17 +174,29 @@ def run_checks() -> bool:
     else:
         _line("contract", PASS, f"AGENTS.md version {version}")
 
-    for check, status, detail in watcher_checks():
+    for check, status, detail in watcher_checks(own_session_id):
         _line(check, status, detail)
         clean = clean and status == PASS
+    if own_session_id is None:
+        _line(
+            "watcher ownership",
+            UNKNOWN,
+            "current session id unavailable (no hook payload on stdin); "
+            "foreign-watcher check could not run",
+        )
+        clean = False
 
     return clean
 
 
 def main() -> int:
     print("[session-gate] session-setup checks (results and pointers only):")
+    # I5: coverage must be observable. A reader in ANY checkout must be able to
+    # tell which project's markers this hook checked without reading the source.
+    print(f"[session-gate] project: {HOOK_PROJECT_ID} — watcher markers checked for this project")
+    own_session_id = current_session_id(sys.stdin)
     try:
-        clean = run_checks()
+        clean = run_checks(own_session_id)
     except BaseException as error:  # a broken gate must be loud, never a pass
         # BaseException on purpose: this hook must never fail the session, and a
         # SystemExit leaking out of a probe is still a broken probe.
