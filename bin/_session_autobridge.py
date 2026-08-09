@@ -3769,17 +3769,49 @@ def execute_runtime_trigger(
             env["CLAUDE_HOME"] = str(runtime_home)
         elif runtime_family == "gemini_cli":
             env["GEMINI_HOME"] = str(runtime_home)
-    result = subprocess.run(
-        command,
-        input=None if derived else json.dumps(payload),
-        stdin=subprocess.DEVNULL if derived else None,
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        env=env,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    # subprocess.run is the execution boundary for this generic wake. Before it
+    # (no command; the bb/pi/codex_app family dispatch above) every refusal is a
+    # clean PRE-execution refusal and stays retryable. Once the command has
+    # started, a timeout is the canonical ambiguous case -- the wake may have
+    # landed but the response was lost -- so it must be retry-suppressing and must
+    # never propagate and leave the packet re-evaluated every poll (fourth review
+    # rule; execute_codex_app_server_trigger treats turn/start acceptance the same
+    # way). check=False governs CalledProcessError only; subprocess.TimeoutExpired
+    # is still raised, so catch it AT THE SEAM, not the call site: a seam that
+    # returns a typed reason with a null identity is still a clean refusal, so the
+    # retry-suppressing surface (returncode 0) must be produced here. There is no
+    # recoverable native identity on this path, so the rule's "otherwise
+    # ambiguous" branch applies rather than a typed orphan.
+    try:
+        result = subprocess.run(
+            command,
+            input=None if derived else json.dumps(payload),
+            stdin=subprocess.DEVNULL if derived else None,
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            env=env,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Delivered-but-unobserved: the wake command ran for the full budget and
+        # the outcome was lost. returncode 0 marks the packet processed so it is
+        # never retried or re-evaluated every poll; delivery_accepted stays False
+        # because nothing was observed. This mirrors the app-server path's
+        # unobserved terminal state rather than inventing a third treatment.
+        return {
+            "command": command,
+            "derived_command": derived,
+            "timeout_seconds": timeout_seconds,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": f"wake command timed out after {timeout_seconds}s",
+            "terminal_status": "unobserved",
+            "delivery_observed": False,
+            "timed_out": True,
+            "delivery_accepted": False,
+        }
     trigger_result = {
         "command": command,
         "derived_command": derived,
@@ -4556,6 +4588,13 @@ def dispatch_session(
             "target_session_id": message["frontmatter"].get("target_session_id"),
         }
         should_mark_processed = True
+        # A timed-out generic wake is ambiguous (the command may have landed), so
+        # its retry-suppression must be DURABLE at the execution boundary, not
+        # held only in the returned dict. When set, the processed state was
+        # persisted immediately after the trigger and the later standard mark is
+        # skipped -- the UI-refresh lease assertion and save_session that follow
+        # the boundary can no longer make the ambiguous outcome retryable.
+        ambiguous_wake_settled_early = False
 
         if action == "runtime_trigger":
             runtime = runtime_metadata(session)
@@ -4690,6 +4729,24 @@ def dispatch_session(
                 continue
             event["runtime_result"] = runtime_result
             should_mark_processed = runtime_result.get("returncode") == 0
+            # GH-688 P1: a timed-out wake is ambiguous (the command may have
+            # landed), so its retry-suppression is a property of DURABLE state,
+            # not the returned dict. Persist the processed state NOW, at the
+            # execution boundary, before the operator-turn-summary and UI-refresh
+            # lease assertions and before the standard mark -- any of those can
+            # fail (lease refused, save_session error) and, before this mark,
+            # leave the packet unprocessed so the next poll runs the command
+            # again: a second execution of a non-idempotent call whose first
+            # outcome may have landed. The command already ran, so the mark is
+            # unconditional (ungated): lease state cannot make an ambiguous
+            # outcome retryable. The standard mark below is skipped for this
+            # message because the settlement is already durable.
+            if runtime_result.get("timed_out"):
+                mark_message_processed(
+                    session, message["path"], prepared=prepared_result
+                )
+                ambiguous_wake_settled_early = True
+                event["ambiguous_wake_settled_early"] = True
             if runtime_delivery_accepted(runtime_result):
                 asserted, assertion_event, _ = activation_fenced_mutation(
                     session,
@@ -4754,7 +4811,7 @@ def dispatch_session(
                 continue
             event["relay_result"] = relay_result
 
-        if should_mark_processed:
+        if should_mark_processed and not ambiguous_wake_settled_early:
             if message.get("activation_lease"):
                 asserted, assertion_event, _ = activation_fenced_mutation(
                     session,
