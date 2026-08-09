@@ -50,9 +50,26 @@ create the environment here and attach to it.
 
 BB has no read-only permission mode: `accept-edits`, `auto`, and `full` are all
 write-capable. `accept-edits` below is the least-permissive available mode, not
-an enforcement control. The no-write prompt bounds the preflight; the exact
-post-turn checks below provide the proof. Resolve and record the requested base
-SHA before spawning:
+an enforcement control.
+
+**`full` is the intended mode for a worker, by operator policy.** A restricted
+mode prompts for permission on trivial actions, which defeats the point of
+delegating. Containment does not come from the permission mode and never did: it
+comes from worktree isolation, the frozen delegation contract's MUST and MUST
+NOT clauses, and the review gates. Permission mode is therefore not a control,
+and not a factor when routing a lane to a profile. Choose `accept-edits` for a
+preflight because a probe has nothing to write, not because it is safer.
+
+That matters here because the `pi` provider rejects `accept-edits` and supports
+only `full`, so a `pi` preflight is impossible: provision with a provider that
+currently accepts `accept-edits`, then attach the `pi` writer to the verified
+environment. Check current metadata after initializing `bb_cmd` below with
+`"${bb_cmd[@]}" provider models <provider> --environment <id> --json`, and treat
+the spawn's own HTTP 400 as authoritative. Do not freeze a provider-to-mode
+table here; that is live provider metadata.
+
+The no-write prompt bounds the preflight; the exact post-turn checks below
+provide the proof. Resolve and record the requested base SHA before spawning:
 
 Resolve it **in the selected repository**, not in whatever checkout you happen to
 be standing in. Unscoped `git` reads the current checkout's `origin`, so on any
@@ -62,12 +79,21 @@ Ask the repository for the path rather than rebuilding it from `projects.json`:
 the value may be absolute, relative to `projects_root`, or `..`-relative, and
 `resolve_project_repo_path` already owns those rules.
 
+Use the exact project's configured `bb.executable` for the entire native
+lifecycle. `bin/bb_spawn.py` obtains the same setting through
+`client_from_project()`; using bare `bb` here could provision on one server and
+ask the assignment gate to attach on another. Preserve every configured argv
+token in a Bash array:
+
 ```bash
 repo_root=$(python3.11 -c "import sys; sys.path.insert(0, 'bin'); from _helpers import resolve_project_repo_path; print(resolve_project_repo_path('<project-id>', '<repo-id>'))")
 base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
+bb_cmd=()
+while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<project-id>") | (.bb.executable // ["bb"])[] | ., "\u0000"' projects.json)
+[ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
 git -C "$repo_root" fetch origin "$base_branch"
 base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
-bb thread spawn \
+"${bb_cmd[@]}" thread spawn \
   --project <bb-project-id> \
   --new-environment worktree \
   --base-branch "$base_sha" \
@@ -96,9 +122,9 @@ turn at all. Do not put a writing delegation in that first turn. Wait for the pr
 become idle, then inspect the provisioned environment:
 
 ```bash
-bb thread wait <probe-thread-id> --status idle
-bb thread show <probe-thread-id> --json
-bb environment status <environment-id> --merge-base-branch "$base_sha" --json
+"${bb_cmd[@]}" thread wait <probe-thread-id> --status idle
+"${bb_cmd[@]}" thread show <probe-thread-id> --json
+"${bb_cmd[@]}" environment status <environment-id> --merge-base-branch "$base_sha" --json
 ```
 
 Before activating the writer, verify the exact path and branch from `show` and
@@ -142,7 +168,7 @@ After the writer successfully returns the same environment ID, archive the
 probe immediately:
 
 ```bash
-bb thread archive <probe-thread-id> --json
+"${bb_cmd[@]}" thread archive <probe-thread-id> --json
 ```
 
 Do not archive it earlier: when it is the last attached thread, BB destroys the
@@ -191,8 +217,8 @@ not assign
 The orchestrator sends follow-ups through BB itself:
 
 ```bash
-bb thread tell <thread-id> "<message>" --mode steer
-bb thread tell <thread-id> "<message>" --mode queue
+"${bb_cmd[@]}" thread tell <thread-id> "<message>" --mode steer
+"${bb_cmd[@]}" thread tell <thread-id> "<message>" --mode queue
 ```
 
 `steer` is the default and lands inside an active turn. Use it for a correction,
@@ -204,9 +230,9 @@ The worker returns through BB. The orchestrator ingests the result with BB's
 read surfaces:
 
 ```bash
-bb thread output <thread-id>
-bb thread show <thread-id> --json
-bb thread log <thread-id> --format minimal
+"${bb_cmd[@]}" thread output <thread-id>
+"${bb_cmd[@]}" thread show <thread-id> --json
+"${bb_cmd[@]}" thread log <thread-id> --format minimal
 ```
 
 If a durable record is wanted, the orchestrator authors the packet under its own
@@ -248,16 +274,16 @@ orchestrator authors any durable blocker packet.
 Use BB's read surfaces rather than inferring state from elapsed time:
 
 ```bash
-bb thread show <thread-id> --json
-bb thread output <thread-id>
-bb thread log <thread-id> --format minimal
+"${bb_cmd[@]}" thread show <thread-id> --json
+"${bb_cmd[@]}" thread output <thread-id>
+"${bb_cmd[@]}" thread log <thread-id> --format minimal
 ```
 
 `show` reports thread/environment state, `output` returns the latest final
 answer, and `log` shows the turn history. Add `--work-status` or `--git-diff` to
 `show` when the artifact is a repository change.
 
-`bb thread wait <thread-id>` waits for `idle` by default, but a normal completed
+`"${bb_cmd[@]}" thread wait <thread-id>` waits for `idle` by default, but a normal completed
 turn also becomes idle. A status-only monitor therefore cannot distinguish
 ordinary completion from a worker ending its turn with work outstanding. The
 actionable stall signal is **idle while the delegated deliverable or terminal

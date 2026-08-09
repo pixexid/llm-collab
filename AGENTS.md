@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 17 -->
+<!-- CONTRACT_VERSION: 18 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,22 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v18 (2026-08-09) adds
+[`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md) to Required
+Reading, so it changes what a session must read and do before it starts work.
+The protocol it carries — the standard watcher set, succession and the handoff's
+environment-deltas section, the supervisor arrangement, model routing, and the
+bb-update procedure — previously existed only in one supervisor's memory and in
+untracked scratchpad files.
+
+The version signal is the point. Untracked protocol is invisible to a cached
+worker by construction, and this repository has already paid for that twice in
+two days: an orchestrator was spawned without its predecessor's watcher set, and
+an operator-announced bb upgrade died with the session that heard it, taking the
+only sanctioned assignment-spawn path offline until it was diagnosed from
+scratch. A worker whose instructions predate this version has no way to discover
+the document exists. Related GH-721.
 
 Contract v16 (2026-08-08) changes first-class Claude registration eligibility:
 an explicitly named native session must prove that its named artifact belongs to
@@ -217,6 +233,8 @@ Before changing shared tooling or operating a project lane, read:
 - `docs/workflows/session-startup.md`
 - `docs/workflows/collab-thread-quickstart.md` — starting and running a collab
   thread end to end
+- `docs/workflows/orchestrator-sessions.md` — watcher, succession, supervisor,
+  model-routing, and bb-update protocol for orchestrator sessions
 - `docs/workflows/task-intake-and-delegation.md`
 - `docs/workflows/bb-workers.md` — required before spawning or driving BB workers
 - `## Requesting Code Review` in this file — it governs every repository a lane
