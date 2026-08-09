@@ -3,7 +3,7 @@
 Custom bb plugin — the **task/execution-tracking** plugin (GH-630). This checkout's
 first capability is the **executed-triple recorder** (GH-617): on `thread.created`
 it records the resolved `(provider, model, reasoning_level)` profile that executed
-into git-tracked state.
+into project-scoped state.
 
 ## Where it lives (two-plugin structure)
 
@@ -28,25 +28,38 @@ On `thread.created`, `server.ts`:
    never blocks the event loop);
 2. snapshots the resolved values to primitives (never a mutable reference —
    GH-617's whole point);
-3. hands them to a detached child running `bin/record_executed_triple.py`
-   (`stdio: "ignore"` + `unref()` — the handler never waits on the write).
+3. hands them to a child running `bin/record_executed_triple.py`
+   (`unref()` — the handler never waits on the write). Spawn errors and nonzero
+   exits are logged **asynchronously** via the child's `error`/`close` events, so a
+   recorder failure is never indistinguishable from an event that never happened.
 
 A profile that cannot be resolved is recorded as an explicit `unresolved` row, so
 an absent row and a failed resolution are distinguishable. The plugin **records,
 never gates**: `thread.created` handlers have no veto hook, so enforcement stays at
 the CLI call sites.
 
+## Project scope and registry binding
+
+`thread.created` is server-wide, so the recorder refuses to mis-attribute:
+
+- **Registry binding.** `--project` must be an EXACT registered llm-collab project
+  in `projects.json`; an unregistered id is refused (it would reproduce the builtin
+  `tasks` self-declared-project defect). Refusal is observable (nonzero exit → warn).
+- **Scope match.** The thread's bb project (`thread.projectId`) must exactly match
+  the configured project's `bb.project_id` scope (the same field `spawn_gate` uses).
+  A thread for another llm-collab project is **ignored observably** (exit 0 +
+  `ignored scope_mismatch` → info log) rather than recorded under the wrong file —
+  mis-attribution would corrupt the exact provenance this plugin exists to preserve.
+
 ## State
 
-Git-tracked JSONL, one record per line, project-scoped by path:
-
-```
-<checkout>/records/executed-triples/<project_id>.jsonl
-```
-
-The volatile `project_state_root` (`projects/`) is gitignored by design, so a
-diffable attribution record lives in this dedicated tracked directory. See
-`records/README.md`. Each row stores the **resolved** values, not a preset name.
+`{project_state_root}/{project_id}/executed-triples.jsonl` — the project state root
+the Project Boundary rule owns, **not** a second invented runtime-state root.
+Execution provenance is runtime state, not the git-backed/diffable task state a
+later slice carries (GH-630 lists git-backed task state separately), so it is not
+git-tracked here. Each row stores the **resolved** values, not a preset name. The
+writer is the authority: bounded read, exclusive flock, output-size check before
+the atomic temp+rename write, fail-closed on budget/corruption.
 
 ## Operator install + config (not done here)
 
@@ -57,9 +70,11 @@ code.
 bb plugin install ./bb-plugins/exec-tracking   # operator step
 bb plugin config exec-tracking set checkoutPath /path/to/llm-collab
 bb plugin config exec-tracking set pythonPath  /abs/path/to/python3.11   # server PATH is narrow
-bb plugin config exec-tracking set projectId   llm-collab                # optional; default llm-collab
+bb plugin config exec-tracking set projectId   amiga                     # must be registered in projects.json
 bb plugin reload exec-tracking
 ```
 
 `checkoutPath` and `pythonPath` must be set before any triple is recorded; until
 then the handler logs a warning and records nothing (rather than guess a path).
+`projectId` must exist in that checkout's `projects.json` with a `bb.project_id`
+matching the bb project its threads spawn under.
