@@ -51,6 +51,11 @@ class ProbeError(RuntimeError):
     """A watcher check did not produce one complete sample."""
 
 
+def emit_event(line: str) -> None:
+    """Make every watcher event immediately visible to a pipe-backed Monitor."""
+    print(line, flush=True)
+
+
 @dataclass(frozen=True)
 class WatcherConfig:
     bb_executable: tuple[str, ...]
@@ -186,7 +191,7 @@ def worker_cycle(
     statuses: dict[str, str],
     *,
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] = emit_event,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
@@ -244,7 +249,7 @@ def pr_cycle(
     *,
     enumerate_prs: Callable[..., list[int]] = open_numbers,
     signature: Callable[[str, int, float], dict] = pr_signature,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] = emit_event,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
@@ -305,7 +310,7 @@ def heartbeat_cycle(
     *,
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_json,
     enumerate_open: Callable[..., list[int]] = open_numbers,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] = emit_event,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
@@ -394,7 +399,7 @@ def run_once(
     session_id: str,
     check: Callable[[], bool],
     *,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] = emit_event,
 ) -> bool:
     try:
         complete = check()
@@ -424,7 +429,13 @@ def load_state(path: Path, default: dict) -> dict:
 
 
 def save_state(path: Path, state: dict) -> None:
-    write_file_durably(path, json.dumps(state, sort_keys=True) + "\n")
+    content = json.dumps(state, sort_keys=True) + "\n"
+    size = len(content.encode("utf-8"))
+    if size > MAX_STATE_BYTES:
+        raise ProbeError(
+            f"watcher state would be {size} bytes; limit is {MAX_STATE_BYTES}"
+        )
+    write_file_durably(path, content)
 
 
 def heartbeat_wait(
@@ -463,14 +474,14 @@ def main() -> int:
             else {"signatures": {}, "terminal_left": {}},
         )
     except ProbeError as error:
-        print(f"REFUSED: {error}", file=sys.stderr)
+        print(f"REFUSED: {error}", file=sys.stderr, flush=True)
         return 1
 
     cycles = 0
     while True:
         cycles += 1
         if cycles % 20 == 0:
-            print(f"WATCHER LIVE ({args.mode}) cycle {cycles}")
+            emit_event(f"WATCHER LIVE ({args.mode}) cycle {cycles}")
 
         def check() -> bool:
             if args.mode == "worker-lifecycle":

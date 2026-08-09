@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import select
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -98,6 +101,104 @@ class ProbeShapeTest(unittest.TestCase):
             )
         self.assertFalse(completed, "a failed probe must skip marker refresh")
         writer.assert_not_called()
+
+
+class EventDeliveryTest(unittest.TestCase):
+    def test_failure_event_is_flushed_immediately_to_non_tty_stdout(self) -> None:
+        read_fd, write_fd = os.pipe()
+        stdout = os.fdopen(write_fd, "w", encoding="utf-8")
+        try:
+            self.assertFalse(stdout.isatty(), "the test must exercise piped stdout")
+            self.assertFalse(
+                stdout.line_buffering,
+                "the pipe must start block-buffered so an unflushed print is invisible",
+            )
+
+            def failed():
+                raise watch.ProbeError("probe failed")
+
+            with mock.patch.object(watch.sys, "stdout", stdout):
+                self.assertFalse(
+                    watch.run_once(
+                        "heartbeat", "project-a", "session-a", failed
+                    )
+                )
+                readable, _, _ = select.select([read_fd], [], [], 0)
+                self.assertEqual(
+                    [read_fd],
+                    readable,
+                    "watcher failure events must be flushed immediately to non-TTY stdout",
+                )
+                output = os.read(read_fd, 4096).decode("utf-8")
+            self.assertIn("HEARTBEAT CHECK FAILED — probe failed", output)
+        finally:
+            stdout.close()
+            os.close(read_fd)
+
+    def test_every_production_emit_default_uses_the_flushing_emitter(self) -> None:
+        for function in (
+            watch.worker_cycle,
+            watch.pr_cycle,
+            watch.heartbeat_cycle,
+            watch.run_once,
+        ):
+            with self.subTest(function=function.__name__):
+                self.assertIs(
+                    function.__kwdefaults__["emit"],
+                    watch.emit_event,
+                    f"{function.__name__} must use the shared flushing emitter",
+                )
+
+
+class StatePersistenceTest(unittest.TestCase):
+    def test_state_within_bound_round_trips_through_save_and_load(self) -> None:
+        state = {"statuses": {"thread-a": "idle", "thread-b": "active"}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "MAX_STATE_BYTES", 128
+        ):
+            path = Path(directory) / "worker-lifecycle.json"
+            watch.save_state(path, state)
+            self.assertEqual(
+                state,
+                watch.load_state(path, {}),
+                "state within the shared byte bound must round-trip",
+            )
+
+    def test_oversized_state_fails_cycle_without_replacement_or_marker_refresh(
+        self,
+    ) -> None:
+        state = {"signatures": {"1": "x" * 100}, "terminal_left": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pr-artifacts.json"
+            path.write_text('{"old": true}\n', encoding="utf-8")
+            previous = path.read_bytes()
+
+            def save() -> bool:
+                watch.save_state(path, state)
+                return True
+
+            with mock.patch.object(
+                watch, "MAX_STATE_BYTES", 64
+            ), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "pr-artifacts",
+                    "project-a",
+                    "session-a",
+                    save,
+                    emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "state exceeding MAX_STATE_BYTES must fail the cycle before marker refresh",
+            )
+            self.assertEqual(
+                previous,
+                path.read_bytes(),
+                "oversized state must not replace the last readable state",
+            )
+            writer.assert_not_called()
 
 
 class EnumerationTest(unittest.TestCase):
