@@ -33,8 +33,11 @@ runs one watcher set parameterized for its project. Starting another
 orchestrator is a project-topology decision, not an ad hoc concurrency choice.
 
 A project joining the workbench requires a named inbox owner before its first
-lane, and the per-project orchestrator owns its project's drain. Carry known-
-undrained projects in the handoff's Environment deltas section. Inbox readers
+lane, and the per-project orchestrator owns its project's drain. Record the owner
+in the new project's own onboarding or runtime state, so the record lives with
+the project it governs and is readable by whoever starts that project's first
+lane. The exact field is not yet specified; the project-scoped state rule above
+governs this record, so do not carry another project's state in it. Inbox readers
 are already project-exact, so this is not a code gap: without the owner a project
 can go live with nobody draining it, and work stalls silently with no error
 anywhere.
