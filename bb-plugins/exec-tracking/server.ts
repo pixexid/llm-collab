@@ -1,18 +1,41 @@
 /**
- * exec-tracking plugin — first capability: record the executed triple.
+ * exec-tracking plugin — first capability: record the thread's creation-time
+ * default execution options (and ONLY those).
  *
- * GH-630 first scope / GH-617. On `thread.created` this resolves the executed
- * (provider, model, reasoning_level) profile IN-PROCESS via the only surface that
- * exposes it — `bb.sdk.threads.defaultExecutionOptions` — snapshots the resolved
- * values to primitives, and hands them to a child running our own
- * `bin/record_executed_triple.py` (the bounded write authority). That script
- * appends a durable, project-scoped row.
+ * GH-630 first scope / GH-617 / GH-695 head 3. On `thread.created` this reads the
+ * thread's resolved (provider, model, reasoning_level) options IN-PROCESS via
+ * `bb.sdk.threads.defaultExecutionOptions`, snapshots the resolved values AND
+ * their `source` to primitives, and hands them to a child running our own
+ * `bin/record_thread_defaults.py` (the bounded write authority). That script
+ * records a durable, project-scoped row ONLY when `source === client/thread/start`
+ * (a creation-time default); any other source is refused observably.
+ *
+ * **Record one thing, refuse the rest (GH-695 head 3).**
+ * `defaultExecutionOptions` tags its result with a `source` naming which client
+ * phase the values came from. At `thread.created` that is usually
+ * `client/thread/start` (creation-time defaults), but the handler is
+ * fire-and-forget: if the spawn turn advances before its awaited settings lookup
+ * and loopback RPC finish, the result can carry `client/turn/requested` — the
+ * authoritative executed-evidence source (the `execution` block
+ * `llm_collab/bb_client.py` validates against) — or `client/turn/start`. Those
+ * turn-derived sources are OUT OF THIS ARTIFACT'S CONTRACT: the recorder refuses
+ * them observably (`ignored out_of_contract`, source named) and writes no row, so
+ * the store name stays true (every row really is a creation default) and a
+ * consumer selecting the artifact by its documented contract cannot misclassify a
+ * turn row. An absent/unrecognised `source` is refused the same way. Recording
+ * turn-derived evidence into an artifact named for creation defaults would let the
+ * container make a claim its contents can violate. Deterministic sourcing from
+ * `client/turn/requested` (via `bb.sdk.threads.events.wait`, the SDK RPC analog of
+ * `thread log --json`) is the tracked re-scope (GH-695 P1-B); `bb.events.on`
+ * exposes only the six thread transitions (created/active/idle/failed/archived/
+ * deleted), so a lifecycle-event-driven recorder is not available. This slice does
+ * not build source precedence — it records one thing and refuses the rest.
  *
  * Why this shape:
  *
  * - **Resolved values, never a mutable reference.** GH-617's defect is that a
  *   stored preset name can be edited to retroactively change what a historical
- *   dispatch resolves to. We read the resolved triple and copy its fields into
+ *   dispatch resolves to. We read the resolved options and copy their fields into
  *   plain strings before anything is persisted; no object reference survives.
  *
  * - **Thin over the stable seams.** The SDK is pre-1.0 (0.4.1). This module
@@ -31,21 +54,30 @@
  *       propagated to the emitter.
  *
  * - **Records, never gates.** Enforcement stays at our CLI call sites; this only
- *   records what ran. A profile that cannot be resolved is recorded as an
- *   explicit `unresolved` row so an absent row and a failed resolution are
- *   distinguishable — never silently omitted.
+ *   records the creation-time defaults. An options object that cannot be resolved
+ *   is recorded as an explicit `unresolved` row so an absent row and a failed
+ *   resolution are distinguishable.
  *
  * - **No silent failure.** Spawn errors, nonzero exits, and ignored/scope-
- *   mismatched events are logged ASYNCHRONOUSLY via the child's `error`/`close`
- *   events — the event-loop constraint still holds. A recorder failure must be
- *   distinguishable from an event that never happened (GH-630 review, finding 5).
+ *   mismatched/out-of-contract events are logged ASYNCHRONOUSLY via the child's
+ *   `error`/`close` events — the event-loop constraint still holds. A recorder
+ *   failure must be distinguishable from an event that never happened (GH-630
+ *   review, finding 5).
  */
 import { spawn } from "node:child_process";
 import path from "node:path";
 import type { BbPluginApi } from "@bb/plugin-sdk";
 
-const SCRIPT_REL = path.join("bin", "record_executed_triple.py");
+const SCRIPT_REL = path.join("bin", "record_thread_defaults.py");
+// Both streams are piped+drained with a capped buffer so a verbose child cannot
+// fill the pipe and block. STDOUT_CAP bounds the captured stdout used for info
+// markers; STDERR_CAP bounds the captured stderr used for failure logging.
+const STDOUT_CAP = 4096;
 const STDERR_CAP = 4096;
+// Recorder stdout lines that are observable-but-not-failure: a correctly-ignored
+// scope mismatch or a correctly-conflicted re-resolution. Matched with
+// startsWith, so each marker includes its trailing space.
+const INFO_MARKERS = ["ignored ", "conflict "] as readonly string[];
 
 interface Settings {
   checkoutPath: string | undefined;
@@ -100,8 +132,11 @@ async function onCreated(
   if (!threadId || !threadProject) return;
   const provider = thread?.providerId ?? null;
 
-  // Resolve the executed profile in-process — the only place it is available.
-  // Snapshot to primitives immediately; do not hold the resolved object.
+  // Read the thread's resolved execution options in-process. Snapshot to
+  // primitives immediately; do not hold the resolved object. Pass the SDK-reported
+  // `source` through; the recorder records ONLY client/thread/start (a creation-
+  // time default) and refuses any other source observably (GH-695 head 3), so a
+  // turn-derived snapshot never enters an artifact documented as creation defaults.
   let resolved: {
     model?: string | null;
     reasoningLevel?: string | null;

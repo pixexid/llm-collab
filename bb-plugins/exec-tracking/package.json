@@ -3,14 +3,21 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Execution tracking for llm-collab. First capability: records the resolved (provider, model, reasoning_level) executed profile for BB threads into git-tracked state (closes GH-617).",
+  "description": "Execution tracking for llm-collab. First capability: records ONLY the thread's creation-time default execution options (provider, model, reasoning_level) — source client/thread/start. Turn-derived sources (client/turn/requested, client/turn/start) are refused observably and deferred to the client/turn/requested re-scope (GH-695).",
   "engines": {
     "bb": ">=0.9",
     "bbPluginSdk": "^0.4.1"
   },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
   "bb": {
     "name": "Exec Tracking",
-    "description": "Records the resolved (provider, model, reasoning_level) executed profile for BB threads into git-tracked state. The task/execution-tracking plugin's first capability (GH-630/GH-617).",
+    "description": "Records ONLY the thread's creation-time default execution options (provider, model, reasoning_level; source client/thread/start). First capability of the task/execution-tracking plugin (GH-630/GH-617). Turn-derived sources are refused observably and deferred to GH-695 P1-B.",
     "branding": { "icon": "ClipboardList" },
     "server": "./server.ts"
   }
