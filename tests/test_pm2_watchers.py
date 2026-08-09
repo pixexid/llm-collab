@@ -401,100 +401,109 @@ class PM2WatchersTest(unittest.TestCase):
             _jlist_entry("llm-collab-gamma", "online"),
         )
 
-    def _assert_all_command_aborts_on_cumulative_budget(self, command: str) -> None:
-        # start/restart --all read `pm2 jlist` once per target (the table mutates
-        # between reads, so the #683 read-only one-snapshot fix does not
-        # transfer). Per-call bounds alone let N targets spend N x the per-call
-        # bound; AGENTS.md makes the budget cumulative across one run. Every
-        # jlist read must charge ONE run-level total, and exceeding it aborts.
-        #
-        # Discriminator vs a per-call-only change: each single payload is UNDER
-        # the bound, yet the run aborts -- only a shared cumulative total can see
-        # the sum. A change that merely re-bounds each call fresh completes here.
-        #
-        # MUTATION PROOF: remove the shared accumulator so each call gets a fresh
-        # budget (budget=None, or a new _Pm2ReadBudget per call). Then no read
-        # charges a shared total, each stays under its own limit, the run
-        # completes, and assertRaises(SystemExit) FAILS. Could this pass in a
-        # world where N agents each get a fresh per-call bound? NO -- a fresh
-        # budget per call never sums, the cumulative abort never fires, and
-        # main() returns normally instead of raising SystemExit.
-        jlist_calls: list[int | None] = []
-        payload = self._all_agents_online_jlist()
-        payload_len = len(payload.encode("utf-8"))
-        # budget in [payload_len, 2*payload_len): one read fits, two reads abort.
-        budget = 2 * payload_len - 1
-        self.assertGreater(budget, payload_len)  # no single read can refuse per-call
+    def _mutation_and_read_counts(self, payload: str):
+        """fake pm2_run counting mutations (start/startOrRestart) and reads (jlist)."""
+        mutations: list[str] = []
+        reads: list[int | None] = []
 
         def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
-            if args_list[0] == "jlist":
-                jlist_calls.append(max_output_bytes)
+            head = args_list[0]
+            if head == "jlist":
+                reads.append(max_output_bytes)
                 return subprocess.CompletedProcess(
                     args=args_list, returncode=0, stdout=payload, stderr="")
-            # `start` and `startOrRestart` both succeed; both commands reach here.
+            if head in ("start", "startOrRestart"):
+                mutations.append(head)
             return subprocess.CompletedProcess(args=args_list, returncode=0)
 
+        return fake_pm2_run, mutations, reads
+
+    def _patches_for_all_run(self, command: str, fake_pm2_run):
+        return [
+            patch.object(sys, "argv", ["pm2_watchers.py", command, "--all"]),
+            patch.object(
+                pm2_watchers, "watcher_enabled_agents",
+                return_value=[{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]),
+            patch.object(pm2_watchers, "agent_ids", return_value=["alpha", "beta", "gamma"]),
+            patch.object(pm2_watchers, "config_get", return_value="llm-collab"),
+            patch.object(pm2_watchers, "is_sidecar", return_value=False),
+            patch.object(
+                pm2_watchers, "get_agent",
+                return_value={"activation": {"watcher_enabled": True}}),
+            patch.object(pm2_watchers, "sidecar_ids_for_command", return_value=[]),
+            patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run),
+        ]
+
+    def _assert_all_command_refuses_before_unverified_mutation(self, command: str) -> None:
+        # GH-684 head 2. start/restart --all mutate a target (pm2 start /
+        # startOrRestart) and ONLY THEN read jlist to verify it -- so a budget
+        # that aborts on that read would abort AFTER a mutation it could not
+        # verify, leaving part of the target set changed. AGENTS.md's third
+        # clause is "raise ... with NO PARTIAL STATE", not merely "raise rather
+        # than truncate". So the affordability check runs BEFORE the mutation: if
+        # the remaining run budget cannot cover a full per-call verification
+        # read, the command refuses BEFORE mutating that target.
+        #
+        # The deliverable is the MUTATION COUNT, not the exit code: an
+        # exit-code-only test cannot see partial application. Here every mutation
+        # is followed by exactly one verification read, so mutations == reads; and
+        # the budget bit, so fewer than all targets were mutated. The unmutated
+        # remainder is what "no partial state" buys.
+        #
+        # MUTATION PROOF: move _refuse_unless_budget_can_verify back to AFTER the
+        # mutation. Then the over-budget target IS mutated and only then refused,
+        # so its verification read never runs: mutations=3, reads=2, and
+        # assertEqual(mutations, reads) FAILS (3 != 2). Could this test pass in a
+        # world where a budget abort still leaves some targets started and others
+        # not? NO -- in that world the over-budget target is started (mutations=3)
+        # but not verified (reads=2), so the equality fails. The test can pass
+        # only when every mutation is verified.
+        payload = self._all_agents_online_jlist()
+        payload_len = len(payload.encode("utf-8"))
+        # Patch the per-call bound to one payload: the run budget (2x, read at
+        # runtime) then holds exactly two reads; the third target's verification
+        # would not fit, so it is refused BEFORE its mutation.
+        fake_pm2_run, mutations, reads = self._mutation_and_read_counts(payload)
         err = io.StringIO()
-        with patch.object(sys, "argv", ["pm2_watchers.py", command, "--all"]), \
-             contextlib.redirect_stderr(err):
-            with patch.object(pm2_watchers, "PM2_JLIST_MAX_BYTES", budget), \
-                 patch.object(
-                     pm2_watchers, "watcher_enabled_agents",
-                     return_value=[{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]), \
-                 patch.object(pm2_watchers, "agent_ids", return_value=["alpha", "beta", "gamma"]), \
-                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
-                 patch.object(pm2_watchers, "is_sidecar", return_value=False), \
-                 patch.object(
-                     pm2_watchers, "get_agent",
-                     return_value={"activation": {"watcher_enabled": True}}), \
-                 patch.object(pm2_watchers, "sidecar_ids_for_command", return_value=[]), \
-                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+        with contextlib.redirect_stderr(err), \
+             patch.object(pm2_watchers, "PM2_JLIST_MAX_BYTES", payload_len):
+            with contextlib.ExitStack() as stack:
+                for p in self._patches_for_all_run(command, fake_pm2_run):
+                    stack.enter_context(p)
                 with self.assertRaises(SystemExit) as ctx:
                     pm2_watchers.main()
         self.assertEqual(1, ctx.exception.code)
-        # Per-target reads (the mutating loop), not the status one-snapshot design:
-        # the abort landed mid-run after the cumulative total tipped past the bound.
-        self.assertGreaterEqual(len(jlist_calls), 2)
-        self.assertIn("exceeds", err.getvalue())
-        self.assertIn("run budget", err.getvalue())
+        # THE no-partial-state invariant: every mutation was verified (one read
+        # each), and the budget bit so not all targets were mutated.
+        self.assertEqual(len(mutations), len(reads))
+        self.assertEqual(2, len(mutations))
+        self.assertLess(len(mutations), 3)
+        self.assertIn("aborting before mutating", err.getvalue())
 
-    def test_start_all_aborts_when_jlist_reads_exceed_one_run_budget(self) -> None:
-        self._assert_all_command_aborts_on_cumulative_budget("start")
+    def test_start_all_refuses_before_mutating_a_target_it_cannot_verify(self) -> None:
+        self._assert_all_command_refuses_before_unverified_mutation("start")
 
-    def test_restart_all_aborts_when_jlist_reads_exceed_one_run_budget(self) -> None:
-        self._assert_all_command_aborts_on_cumulative_budget("restart")
+    def test_restart_all_refuses_before_mutating_a_target_it_cannot_verify(self) -> None:
+        self._assert_all_command_refuses_before_unverified_mutation("restart")
 
-    def test_start_all_normal_multi_agent_run_still_succeeds(self) -> None:
-        # GH-684 other direction. A normal `start --all` over several agents with a
-        # modest process table must still complete: the run budget is large enough
-        # for real jlist sizes and each per-target read charges it without
-        # aborting. A refusal-only test cannot distinguish the cumulative budget
-        # from a change that broke start, so this proves the success path intact.
-        jlist_calls: list[int | None] = []
-
-        def fake_pm2_run(args_list, *, capture_output=False, max_output_bytes=None):
-            if args_list[0] == "jlist":
-                jlist_calls.append(max_output_bytes)
-                return subprocess.CompletedProcess(
-                    args=args_list, returncode=0, stdout=self._all_agents_online_jlist(), stderr="")
-            return subprocess.CompletedProcess(args=args_list, returncode=0)
-
-        with patch.object(sys, "argv", ["pm2_watchers.py", "start", "--all"]), \
-             contextlib.redirect_stdout(io.StringIO()):
-            with patch.object(
-                    pm2_watchers, "watcher_enabled_agents",
-                    return_value=[{"id": "alpha"}, {"id": "beta"}, {"id": "gamma"}]), \
-                 patch.object(pm2_watchers, "agent_ids", return_value=["alpha", "beta", "gamma"]), \
-                 patch.object(pm2_watchers, "config_get", return_value="llm-collab"), \
-                 patch.object(pm2_watchers, "is_sidecar", return_value=False), \
-                 patch.object(
-                     pm2_watchers, "get_agent",
-                     return_value={"activation": {"watcher_enabled": True}}), \
-                 patch.object(pm2_watchers, "sidecar_ids_for_command", return_value=[]), \
-                 patch.object(pm2_watchers, "pm2_run", side_effect=fake_pm2_run):
+    def test_start_all_normal_multi_agent_run_mutates_every_target(self) -> None:
+        # GH-684 head 2 other direction. A normal `start --all` over several
+        # agents with a modest process table must still complete and mutate EVERY
+        # target: the run budget (2x the per-call bound) holds one read of
+        # headroom throughout, so the affordability check passes for all of them.
+        # A refusal-only test cannot distinguish the guard from a change that
+        # broke start, so this proves the success path and that nothing is
+        # incorrectly refused.
+        payload = self._all_agents_online_jlist()
+        fake_pm2_run, mutations, reads = self._mutation_and_read_counts(payload)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.ExitStack() as stack:
+                for p in self._patches_for_all_run("start", fake_pm2_run):
+                    stack.enter_context(p)
                 pm2_watchers.main()  # no SystemExit
-        # Each target read jlist once; none aborted.
-        self.assertEqual(3, len(jlist_calls))
+        # Every target mutated and verified; nothing refused.
+        self.assertEqual(3, len(mutations))
+        self.assertEqual(3, len(reads))
 
 
 if __name__ == "__main__":

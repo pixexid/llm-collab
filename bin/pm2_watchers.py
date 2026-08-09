@@ -522,6 +522,35 @@ def _read_jlist_snapshot(*, budget=None) -> tuple[subprocess.CompletedProcess, o
     return result, entries
 
 
+def _refuse_unless_budget_can_verify(budget, *, per_call_bound: int) -> None:
+    """Refuse (sys.exit) BEFORE a mutation unless the budget can verify it.
+
+    A verification `pm2 jlist` read is bounded by per_call_bound (the per-call
+    ceiling), so the read that follows a start/startOrRestart can charge at most
+    that many bytes. If the remaining run budget is below it, that read could trip
+    the cumulative limit AFTER the mutation -- partial application, which the
+    third clause of AGENTS.md's "Bounded work" rule ("raise ... with no partial
+    state") forbids. The read can only be charged after it happens, and it happens
+    after the mutation, so the guard must come first: refusing here means a budget
+    refusal can never land after a mutation it did not have room to verify
+    (GH-684 head 2). With the run budget sized above one per-call read, a normal
+    multi-target run still completes; an adversarial run is capped and refused
+    cleanly before the next mutation. This bounds only BUDGET-caused partial
+    application -- a PM2 failure or crash mid-loop is outside this guard and
+    outside this PR's scope.
+    """
+    if budget is None:
+        return
+    if budget.spent + per_call_bound > budget.limit:
+        print(
+            f"[error] run budget cannot cover another verification read "
+            f"({budget.limit - budget.spent} bytes remaining < {per_call_bound}); "
+            f"aborting before mutating to avoid partial application",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _status_from_snapshot(
     result: subprocess.CompletedProcess, entries: object, agent_id: str
 ) -> tuple[subprocess.CompletedProcess, str | None]:
@@ -578,6 +607,9 @@ def start_agent(agent_id: str, *, budget=None) -> None:
             return
 
     name = app_name(agent_id)
+    # Reserve room for the verification read BEFORE mutating (GH-684 head 2): a
+    # budget refusal must never land after a start it had no room to verify.
+    _refuse_unless_budget_can_verify(budget, per_call_bound=PM2_JLIST_MAX_BYTES)
     started = pm2_run(["start", str(ecosystem_path()), "--only", name])
     if started.returncode != 0:
         print(f"[error] pm2 failed to start {name} (exit {started.returncode})", file=sys.stderr)
@@ -693,9 +725,16 @@ def main():
     # status reads jlist once (the #683 snapshot) so it charges once; start and
     # restart read fresh per target because the process table mutates between
     # reads, and those N reads now share this one total instead of N per-call
-    # bounds. Aborts never truncate: a parsed-but-truncated jlist reports a real
-    # watcher as absent (fail-open, GH-678).
-    run_budget = _Pm2ReadBudget(PM2_JLIST_MAX_BYTES)
+    # bounds. The limit is 2x the per-call bound (read at runtime so a test that
+    # patches PM2_JLIST_MAX_BYTES scales both together): the pre-mutation
+    # affordability check (_refuse_unless_budget_can_verify) reserves one full
+    # per-call read of headroom, so the budget must exceed one per-call read for a
+    # normal multi-target run to complete while that headroom is held. A budget
+    # refusal then always lands BEFORE the mutation it could not verify, never
+    # after (GH-684 head 2: no partial state). Aborts never truncate: a
+    # parsed-but-truncated jlist reports a real watcher as absent (fail-open,
+    # GH-678).
+    run_budget = _Pm2ReadBudget(PM2_JLIST_MAX_BYTES * 2)
     status_snapshot = _read_jlist_snapshot(budget=run_budget) if args.command == "status" else None
 
     if defer_sidecars:
@@ -719,6 +758,8 @@ def main():
             # exit code and verify online afterwards -- exactly what start does.
             # The return value used to be discarded, so start_watcher reported ok
             # for a watcher that was not running (GH-678).
+            # Reserve room for the verification read BEFORE mutating (GH-684 head 2).
+            _refuse_unless_budget_can_verify(run_budget, per_call_bound=PM2_JLIST_MAX_BYTES)
             restarted = pm2_run(["startOrRestart", str(ecosystem_path()), "--only", name])
             if restarted.returncode != 0:
                 print(f"[error] pm2 failed to restart {name} (exit {restarted.returncode})", file=sys.stderr)
