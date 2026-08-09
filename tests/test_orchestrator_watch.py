@@ -149,6 +149,38 @@ class EventDeliveryTest(unittest.TestCase):
                     f"{function.__name__} must use the shared flushing emitter",
                 )
 
+    def test_output_failure_does_not_escape_the_persistent_loop_path(self) -> None:
+        class BrokenStdout:
+            def write(self, _text):
+                raise OSError("reader closed")
+
+            def flush(self):
+                raise OSError("reader closed")
+
+        def failed():
+            raise watch.ProbeError("probe failed")
+
+        survived = True
+        with mock.patch.object(watch.sys, "stdout", BrokenStdout()):
+            try:
+                completed = watch.run_once(
+                    "heartbeat",
+                    "project-a",
+                    "session-a",
+                    failed,
+                )
+            except Exception:
+                survived = False
+                completed = True
+        self.assertTrue(
+            survived,
+            "a Monitor output failure must not terminate the persistent watcher",
+        )
+        self.assertFalse(
+            completed,
+            "surviving an output failure must not turn a failed cycle into success",
+        )
+
 
 class StatePersistenceTest(unittest.TestCase):
     def test_state_within_bound_round_trips_through_save_and_load(self) -> None:
@@ -425,6 +457,40 @@ class MarkerRefreshTest(unittest.TestCase):
                 "project-a", "session-a", False, sleep=lambda _seconds: None
             )
         writer.assert_not_called()
+
+    def test_intermediate_marker_failure_reports_and_wait_continues(self) -> None:
+        sleeps = []
+        messages = []
+        survived = True
+        with mock.patch.object(
+            watch._watcher_liveness,
+            "write_marker",
+            side_effect=[OSError("mount hiccup"), *([None] * 8)],
+        ) as writer:
+            try:
+                watch.heartbeat_wait(
+                    "project-a",
+                    "session-a",
+                    True,
+                    sleep=sleeps.append,
+                    emit=messages.append,
+                )
+            except OSError:
+                survived = False
+        self.assertTrue(
+            survived,
+            "an intermediate marker failure must not terminate the heartbeat watcher",
+        )
+        self.assertEqual(
+            watch.HEARTBEAT_REPORT_SECONDS,
+            sum(sleeps),
+            "the report wait must continue after an intermediate marker failure",
+        )
+        self.assertEqual(9, writer.call_count, "later marker refreshes must still run")
+        self.assertEqual(
+            ["HEARTBEAT MARKER WRITE FAILED — mount hiccup"],
+            messages,
+        )
 
     def test_pr_cycle_uses_one_cumulative_deadline_and_does_not_refresh_on_exhaustion(
         self,

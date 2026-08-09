@@ -53,7 +53,13 @@ class ProbeError(RuntimeError):
 
 def emit_event(line: str) -> None:
     """Make every watcher event immediately visible to a pipe-backed Monitor."""
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:
+        # The Monitor pipe is the reporting channel; if it is gone there is no
+        # second channel to report through, but its failure must not kill the
+        # watcher.
+        pass
 
 
 @dataclass(frozen=True)
@@ -393,6 +399,21 @@ def heartbeat_cycle(
     return complete
 
 
+def refresh_marker(
+    name: str,
+    project_id: str,
+    session_id: str,
+    *,
+    emit: Callable[[str], None] = emit_event,
+) -> bool:
+    try:
+        _watcher_liveness.write_marker(project_id, name, session_id)
+    except Exception as error:
+        emit(f"{name.upper()} MARKER WRITE FAILED — {error}")
+        return False
+    return True
+
+
 def run_once(
     name: str,
     project_id: str,
@@ -408,12 +429,7 @@ def run_once(
         return False
     if not complete:
         return False
-    try:
-        _watcher_liveness.write_marker(project_id, name, session_id)
-    except Exception as error:
-        emit(f"{name.upper()} MARKER WRITE FAILED — {error}")
-        return False
-    return True
+    return refresh_marker(name, project_id, session_id, emit=emit)
 
 
 def load_state(path: Path, default: dict) -> dict:
@@ -444,6 +460,7 @@ def heartbeat_wait(
     completed: bool,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    emit: Callable[[str], None] = emit_event,
 ) -> None:
     """Wait to the next report, refreshing only after a successful cycle."""
     if not completed:
@@ -452,7 +469,7 @@ def heartbeat_wait(
     remaining = HEARTBEAT_REPORT_SECONDS
     while remaining > HEARTBEAT_MARKER_REFRESH_SECONDS:
         sleep(HEARTBEAT_MARKER_REFRESH_SECONDS)
-        _watcher_liveness.write_marker(project_id, "heartbeat", session_id)
+        refresh_marker("heartbeat", project_id, session_id, emit=emit)
         remaining -= HEARTBEAT_MARKER_REFRESH_SECONDS
     sleep(remaining)
 
