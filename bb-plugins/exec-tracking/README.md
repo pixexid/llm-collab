@@ -101,16 +101,19 @@ documented contract cannot misclassify a non-executed row.
 
 `thread.created` is server-wide, so the recorder refuses to mis-attribute:
 
-- **Registry binding.** `--project` must be an EXACT registered llm-collab project
-  in `projects.json`, matched RAW — whitespace variants are rejected, not repaired;
-  an unregistered or padded id is refused. Refusal is observable (nonzero exit → warn).
-- **Scope match, raw not normalized (GH-695 P2-D).** The thread's bb project
-  (`thread.projectId`) must exactly match the configured project's `bb.project_id`
-  scope, and that registry value is matched RAW: a padded `bb.project_id` is
+- **One registry authority.** The Python recorder resolves `thread.projectId`
+  against every registered project carrying a `bb` block. The plugin performs no
+  second ownership lookup and has no project setting. A project without a `bb`
+  block remains outside recorder coverage.
+- **Scope match, raw not normalized (GH-695 P2-D).** The thread's bb project must
+  exactly match one candidate's `bb.project_id`, and that registry value is
+  matched RAW: a padded `bb.project_id` is
   **rejected** at both the recorder and `spawn_gate` (never stripped), so the two
-  authorities enforce the same scope. A thread for another llm-collab project is
-  **ignored observably** (exit 0 + `ignored scope_mismatch` → info log) rather than
-  recorded under the wrong file.
+  authorities enforce the same scope. No match is **ignored observably** (exit 0
+  + `ignored unknown_thread_project` → info log) and writes nowhere.
+- **Ambiguity and malformed candidates fail closed.** Duplicate native ids refuse
+  and name every colliding project. A malformed `bb` block or invalid/padded
+  native id refuses rather than silently disappearing from the candidate set.
 - **Every loaded row is scope-checked (GH-695 P2-C).** The loader validates
   `project_id` on every row read from disk and fails closed on a missing or
   mismatched value, so a cross-project row is never silently reused.
