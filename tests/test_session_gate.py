@@ -152,6 +152,21 @@ class MarkerFreshnessTest(unittest.TestCase):
             )
             self.assertEqual([], [e for e in report if e["status"] == "fresh"])
 
+    def test_future_dated_marker_is_never_fresh(self) -> None:
+        """A backward clock or future mtime must not keep a dead watcher
+        satisfying the gate: negative age classifies UNREADABLE, never FRESH."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            self._write_markers(
+                temporary, mtime=now + 2 * WATCHER_MARKER_STALE_AFTER_SECONDS
+            )
+            report = self._check(temporary, now=now)
+        self.assertEqual(
+            ["unreadable"] * len(WATCHER_NAMES), [e["status"] for e in report]
+        )
+        self.assertEqual([], [e for e in report if e["status"] == "fresh"])
+        self.assertIn("future", report[0]["detail"])
+
     def test_unreadable_marker_is_unreadable_never_fresh(self) -> None:
         with mock.patch.object(
             Path, "stat", side_effect=PermissionError("denied")
@@ -194,6 +209,10 @@ class MarkerOwnershipTest(unittest.TestCase):
 class MarkerWriterTest(unittest.TestCase):
     """write_marker is the single documented writing shape (GH-726 S2)."""
 
+    @staticmethod
+    def _registered(project_id: str):
+        return {"id": project_id} if project_id in {"project-a", "project-b"} else None
+
     def test_written_marker_reads_back_fresh_and_owned(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -201,6 +220,8 @@ class MarkerWriterTest(unittest.TestCase):
                 _watcher_liveness,
                 "project_state_dir",
                 side_effect=lambda project_id: root / project_id,
+            ), mock.patch.object(
+                _watcher_liveness, "get_project", side_effect=self._registered
             ):
                 marker = write_marker("project-a", "worker-lifecycle", "sess-1")
                 first = json.loads(marker.read_text(encoding="utf-8"))
@@ -220,11 +241,82 @@ class MarkerWriterTest(unittest.TestCase):
                 _watcher_liveness,
                 "project_state_dir",
                 side_effect=lambda project_id: Path(temporary) / project_id,
+            ), mock.patch.object(
+                _watcher_liveness, "get_project", side_effect=self._registered
             ):
                 with self.assertRaises(ValueError):
                     write_marker("project-a", "../escape", "sess-1")
                 with self.assertRaises(ValueError):
                     write_marker("project-a", "heartbeat", "")
+
+    def test_unregistered_or_path_bearing_project_refuses_and_writes_nothing(self) -> None:
+        """Project Boundary guard: a project-aware mutator demands an exact
+        registered project. The proof is the absence of the write, not only
+        the refusal."""
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(
+                _watcher_liveness,
+                "project_state_dir",
+                side_effect=lambda project_id: Path(temporary) / project_id,
+            ), mock.patch.object(
+                _watcher_liveness, "get_project", side_effect=self._registered
+            ), mock.patch.object(_watcher_liveness, "write_file_durably") as writer:
+                for bad in ("no-such-project", "../escape", "project-a/../project-a"):
+                    with self.subTest(project=bad), self.assertRaises(ValueError):
+                        write_marker(bad, "heartbeat", "sess-1")
+            writer.assert_not_called()
+
+    def test_oversized_existing_marker_is_not_preserved(self) -> None:
+        """Bounded work fails closed: an oversized existing marker is discarded,
+        not parsed unboundedly and not preserved into the next marker."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(
+                _watcher_liveness,
+                "project_state_dir",
+                side_effect=lambda project_id: root / project_id,
+            ), mock.patch.object(
+                _watcher_liveness, "get_project", side_effect=self._registered
+            ):
+                oversized = (
+                    json.dumps(
+                        {
+                            "session_id": "sess-1",
+                            "project_id": "project-a",
+                            "started_at": "1999-01-01T00:00:00+00:00",
+                        }
+                    )[:-1]
+                    + ', "pad": "'
+                    + "x" * _watcher_liveness.MAX_MARKER_BYTES
+                    + '"}\n'
+                )
+                marker = root / "project-a" / "watchers" / "heartbeat.alive"
+                marker.parent.mkdir(parents=True)
+                marker.write_text(oversized, encoding="utf-8")
+                write_marker("project-a", "heartbeat", "sess-1")
+                new = json.loads(marker.read_text(encoding="utf-8"))
+                size = marker.stat().st_size
+                report = check_markers("project-a")
+        self.assertLess(size, _watcher_liveness.MAX_MARKER_BYTES)
+        self.assertNotEqual("1999-01-01T00:00:00+00:00", new["started_at"])
+        self.assertNotIn("pad", new)
+        own = next(e for e in report if e["name"] == "heartbeat")
+        self.assertEqual("fresh", own["status"])
+
+
+class HookCommandTest(unittest.TestCase):
+    """The tracked hook resolves its interpreter through bin/llm-collab, so it
+    runs on any supported installation instead of silently doing nothing where
+    a hardcoded interpreter name is absent. Configured command, not a live run."""
+
+    def test_hook_command_resolves_through_the_launcher(self) -> None:
+        settings = json.loads(
+            (ROOT / ".claude" / "settings.json").read_text(encoding="utf-8")
+        )
+        command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertIn("bin/llm-collab", command)
+        self.assertIn("session_gate", command)
+        self.assertNotIn("python3.11", command)
 
 
 class _Completed:

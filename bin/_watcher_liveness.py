@@ -29,7 +29,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from _helpers import project_state_dir, write_file_durably
+from _helpers import get_project, project_state_dir, write_file_durably
 
 WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
 
@@ -72,15 +72,23 @@ def write_marker(project_id, name, session_id):
     """
     if name not in WATCHER_NAMES:
         raise ValueError(f"unknown watcher name {name!r}; expected one of {WATCHER_NAMES}")
-    if not isinstance(project_id, str) or not project_id:
-        raise ValueError("project_id is required")
+    if get_project(project_id) is None:
+        # Project Boundary: a project-aware mutator demands an exact registered
+        # project. A typo would report success while the intended project's
+        # markers stay stale; path components would escape the state tree.
+        raise ValueError(f"unregistered project {project_id!r}; refusing to write a marker")
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("session_id is required")
     marker = markers_dir(project_id) / f"{name}.alive"
     started_at = _utc_now_iso()
     try:
-        existing = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with open(marker, "rb") as handle:
+            data = handle.read(MAX_MARKER_BYTES + 1)
+        # Bounded read, fail closed: an oversized existing marker is not a
+        # marker — discard it rather than preserving its started_at into a new
+        # marker, and never parse unbounded input.
+        existing = json.loads(data.decode("utf-8")) if len(data) <= MAX_MARKER_BYTES else None
+    except (OSError, ValueError, UnicodeDecodeError):
         existing = None
     if (
         isinstance(existing, dict)
@@ -177,7 +185,15 @@ def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_S
         entry.update(owner)
         age = moment - mtime
         entry["age_seconds"] = round(age, 1)
-        entry["status"] = FRESH if age <= stale_after else STALE
+        if age < 0:
+            # A future mtime is not "old", so STALE would be a lie about the
+            # direction of the evidence; it is inconsistent evidence, which is
+            # what UNREADABLE reports. Never FRESH: a clock moved backward must
+            # not keep a dead watcher satisfying the gate.
+            entry["status"] = UNREADABLE
+            entry["detail"] = f"marker mtime is {-age:.1f}s in the future"
+        else:
+            entry["status"] = FRESH if age <= stale_after else STALE
         report.append(entry)
     return report
 

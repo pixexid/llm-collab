@@ -33,7 +33,12 @@ def main() -> int:
     parser.add_argument("--name", required=True, choices=WATCHER_NAMES)
     parser.add_argument("--session", required=True)
     args = parser.parse_args()
-    marker = write_marker(args.project, args.name, args.session)
+    try:
+        marker = write_marker(args.project, args.name, args.session)
+    except ValueError as error:
+        # Clean pre-write refusal: nothing was written.
+        print(f"REFUSED: {error}", file=sys.stderr)
+        return 1
     print(f"[watcher-marker] {args.name} -> {marker}")
     return 0
 
