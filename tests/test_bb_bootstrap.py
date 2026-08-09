@@ -27,6 +27,7 @@ from llm_collab.bb_bootstrap import (
     resolve_bootstrap_repo_id,
     execute_bootstrap,
     classify_first_delivery_assignment,
+    profile_is_authoring_qualified,
     ASSIGNMENT_READ_ONLY,
     ASSIGNMENT_AUTHORING,
     ASSIGNMENT_MALFORMED_ACTIVATION,
@@ -289,6 +290,31 @@ class FirstDeliveryAssignmentTest(unittest.TestCase):
                 {"activation": True, "worktree": "/repo/wt", "branch": "bb/feat-x"}
             ),
         )
+
+    def test_only_the_exact_slice_1a_profile_is_authoring_qualified(self):
+        from llm_collab.bb_bootstrap import AUTHORING_QUALIFIED_PROFILES
+        from llm_collab.bb_client import BbProfile, SLICE_1A_PROFILE
+
+        qualified = BbProfile("pi", "kimi-coding/k3", "high")
+        self.assertTrue(profile_is_authoring_qualified(qualified))
+        self.assertIn(SLICE_1A_PROFILE, AUTHORING_QUALIFIED_PROFILES)
+        self.assertFalse(
+            profile_is_authoring_qualified(
+                BbProfile("pi", "kimi-coding/k3", "low")
+            )
+        )
+
+    def test_authoring_qualification_is_shared_across_amiga_and_non_amiga(self):
+        from llm_collab.bb_client import BbProfile, SLICE_1A_PROFILE
+
+        for project_id in ("amiga", "nuvyr"):
+            with self.subTest(project_id=project_id):
+                self.assertTrue(profile_is_authoring_qualified(SLICE_1A_PROFILE))
+                self.assertFalse(
+                    profile_is_authoring_qualified(
+                        BbProfile("pi", "kimi-coding/k3", "max")
+                    )
+                )
 
     def test_a_non_mapping_is_read_only(self):
         self.assertEqual(ASSIGNMENT_READ_ONLY, classify_first_delivery_assignment(None))

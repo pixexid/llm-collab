@@ -24,6 +24,7 @@ import llm_collab.bb_managed_start as bb_managed_start  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
     SLICE_1A_PROFILE,
+    BbProfile,
     BbClient,
     BbRefusal,
     BbTransportResult,
@@ -774,8 +775,8 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         }
         return packet
 
-    def test_authoring_first_delivery_refuses_profile_unavailable_without_spawning(self) -> None:
-        """GH-596: a writer-lane first delivery must refuse, not launch K3."""
+    def test_authoring_first_delivery_is_admitted_for_slice_1a(self) -> None:
+        """GH-705: the exact qualified authoring profile may launch."""
         project = {"id": "project-one", "bb": {"enabled": True}}
         events: list[dict] = []
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-") as raw:
@@ -825,6 +826,19 @@ class BbWatcherBootstrapTest(unittest.TestCase):
             ) as start_factory, patch.object(
                 watch_inbox, "emit", side_effect=lambda event, _json: events.append(event)
             ):
+                start_factory.return_value = lambda _start_id: {
+                    "native_thread_id": "thread_bb_one",
+                    "project_id": "project-one",
+                    "environment_id": "environment_one",
+                    "provider_id": "pi",
+                    "status": "active",
+                    "endpoint_id": "endpoint_bb_one",
+                    "runtime_instance_id": "runtime_bb_one",
+                    "provider": "pi",
+                    "model": "kimi-coding/k3",
+                    "reasoning_level": "high",
+                    "source": "managed_bb_thread_start",
+                }
                 consumed = watch_inbox._bootstrap_bb_before_dispatch(
                     "glmpi",
                     False,
@@ -832,11 +846,20 @@ class BbWatcherBootstrapTest(unittest.TestCase):
                     repo_targets=["app"],
                     messages={"Chats/project/first.md": self._authoring_packet()},
                 )
-        self.assertEqual([], consumed, "an authoring refusal must not consume the packet")
-        self.assertFalse(start_factory.called, "the spawn must never run for a refused profile")
-        refused = [e for e in events if e.get("event") == "bb_bootstrap"]
-        self.assertEqual(1, len(refused), events)
-        self.assertEqual(BOOTSTRAP_PROFILE_UNAVAILABLE, refused[0]["reason"])
+        self.assertEqual(["Chats/project/first.md"], consumed)
+        self.assertTrue(start_factory.called, "the qualified authoring profile must spawn")
+        self.assertEqual(SLICE_1A_PROFILE, start_factory.call_args.kwargs["profile"])
+
+    def test_neighbouring_profile_remains_unavailable_for_authoring(self) -> None:
+        """GH-705: changing reasoning level must not widen authoring admission."""
+        neighboring = BbProfile("pi", "kimi-coding/k3", "low")
+        packet = self._authoring_packet()
+        frontmatter = packet["frontmatter"]
+        packet.update({key: frontmatter[key] for key in ("activation", "worktree", "branch")})
+        with patch("llm_collab.bb_client.SLICE_1A_PROFILE", neighboring):
+            outcome = session_autobridge.execute_bb_bootstrap_plan(None, packet, {})
+        self.assertEqual(BOOTSTRAP_PROFILE_UNAVAILABLE, outcome.state)
+        self.assertIn("pi / kimi-coding/k3 / low", outcome.detail)
 
     def test_malformed_activation_first_delivery_refuses_distinctly_without_spawning(self) -> None:
         """GH-596: a partial/malformed activation marker must fail closed too,

@@ -39,13 +39,14 @@ A Phase 2 selector must require the exact `provider`, `model`, and
 `reasoning_level` to be present and refuse as `profile_unavailable` otherwise;
 it must not fall back. The fail-closed half is implemented: a writer-lane first
 delivery (a packet carrying a complete `activation`/`worktree`/`branch`
-identity, i.e. an implementation/authoring assignment) refuses as
-`bb_bootstrap_profile_unavailable` in the bb bootstrap rather than launching on
-`SLICE_1A_PROFILE`, because no profile is authoring-qualified yet (GH-596), and
+identity, i.e. an implementation/authoring assignment) on the bootstrap path
+is admitted only when its resolved profile is in the exact one-member qualified
+set containing `pi / kimi-coding/k3 / high`; other profiles refuse on this path
+as `bb_bootstrap_profile_unavailable`, and
 a partial or malformed activation marker refuses as the distinct
-`bb_bootstrap_malformed_activation` before execution. Work-type → profile
-*routing* and per-model authoring evaluation remain Phase 2; this refusal is
-what a later authoring measurement lifts per model. `pi` is a multi-vendor
+`bb_bootstrap_malformed_activation` before execution. There is still no per-packet profile selection: the gate compares the
+resolved profile against the one-member qualified set, and other authoring
+evaluation remains Phase 2. `pi` is a multi-vendor
 provider, so its
 model IDs retain their vendor prefix, such as `kimi-coding/k3` or `zai/glm-5.2`.
 
@@ -77,8 +78,9 @@ the profile-resolution seam, before any ledger write or spawn. Only a packet
 with **no** activation marker of any kind may take the read-only launch on
 `SLICE_1A_PROFILE` (`pi / kimi-coding/k3 / high`). A complete, well-formed
 writer-lane identity (`activation: true` plus a canonical-absolute `worktree`
-and a non-blank `branch`) refuses as `bb_bootstrap_profile_unavailable` — no
-profile is authoring-qualified. Any **partial or malformed** marker (an
+and a non-blank `branch`) is admitted only for that exact qualified profile;
+other resolved profiles refuse as `bb_bootstrap_profile_unavailable`. Any
+**partial or malformed** marker (an
 activation marker without `activation: true`, a blank/non-string worktree or
 branch, or a worktree that is relative/home-relative or not in canonical lexical
 form) refuses as the distinct `bb_bootstrap_malformed_activation`, never
@@ -104,7 +106,7 @@ match proves availability, not capability.
 | `architect-fable-v1` | `claude-code / claude-fable-5 / xhigh` | Unmeasured; evaluation only. |
 | `engineer-sol-v1` | `codex / gpt-5.6-sol / high` | Unmeasured; no implementation assignment yet. |
 | `utility-luna-v1` | `codex / gpt-5.6-luna / medium` | Model measured for read-only analysis; reasoning-level-specific and authoring behavior unmeasured. |
-| `research-kimi-v1` | `pi / kimi-coding/k3 / high` | Model measured for read-only analysis; reasoning-level-specific and authoring behavior unmeasured. |
+| `research-kimi-v1` | `pi / kimi-coding/k3 / high` | Exact profile qualified for authoring; other reasoning levels remain unmeasured and unavailable. |
 
 ## Live catalog snapshot
 

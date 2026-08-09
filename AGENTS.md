@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 16 -->
+<!-- CONTRACT_VERSION: 17 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -53,6 +53,12 @@ live in
 [`Session Startup`](docs/workflows/session-startup.md#restarted-first-class-sessions).
 The version signal makes the stricter registration acceptance visible to cached
 workers. Related GH-538.
+
+Contract v17 (2026-08-09) qualifies exactly `pi / kimi-coding/k3 / high` for
+BB authoring on the bootstrap/first-delivery path, using the measured profile
+identity. The explicit `bb thread spawn` path is deliberately not covered and
+continues to rely on orchestrator review controls. Canonical details live in
+[`BB Workers`](docs/workflows/bb-workers.md). Related GH-705.
 
 Contract v15 (2026-08-08) makes measured BB model failures hard exclusions for
 every text-bearing assignment, read-only included. Read-only work produces the

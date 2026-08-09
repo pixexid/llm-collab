@@ -124,14 +124,13 @@ inferred default. Read-only assignments produce the evidence that gates
 decisions, and the measured glm-5.2 coordinate drift and muse-spark degeneration
 corrupt an audit as readily as a patch—worse, because no diff review catches a
 bad citation; see [`bb-worker-profiles.md`](bb-worker-profiles.md).
-The example records current practice, not an authoring qualification: no BB
-profile is authoring-qualified yet, and
-[GH-596](https://github.com/pixexid/llm-collab/issues/596) tracks that missing
-selector and evaluation. The compensating pre-merge control is the
-orchestrator's review of the real diff, focused tests, mutation proof when
-executable logic changes, and the connector pass—not a claimed property of the
-model. Until GH-596 lands, an explicitly selected writing lane operates under
-those controls even though the profile policy remains prospective.
+The example records current practice. On the BB bootstrap/first-delivery path,
+`pi / kimi-coding/k3 / high` is the only authoring-qualified coordinate: that gate
+admits an authoring assignment only when its resolved `BbProfile` is a member of
+that exact one-profile qualified set, and refuses other profiles. The explicit
+`bb thread spawn` writing path is not covered by this qualification gate; it
+operates under the orchestrator's review controls and is not claimed to be
+profile-qualified here.
 
 Known failure modes are hard exclusions for every text-bearing assignment. Do
 not assign
