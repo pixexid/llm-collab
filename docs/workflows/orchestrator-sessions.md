@@ -32,8 +32,15 @@ per-project: each project has exactly one orchestrator session, and that session
 runs one watcher set parameterized for its project. Starting another
 orchestrator is a project-topology decision, not an ad hoc concurrency choice.
 
-Each project's handoff file lives in that project's checkout at
-`<project-checkout>/scratchpad/orchestrator-handoff.md`. Its watcher markers live
+Each project's handoff file lives in that project's own runtime state at
+`{project_state_root}/{project_id}/orchestrator-handoff.md`. A handoff is project
+state, not a checkout document: a checkout is not a project, and two registered
+projects can coordinate the same product checkout — at which point a
+checkout-relative path makes both orchestrators overwrite one succession file and
+lose the other's live-lane and environment-delta state. Discoverability is served
+by the session-gate hook, which prints the handoff path for the project it
+resolved; a breadcrumb copy in the checkout would be a second thing to go stale.
+Its watcher markers live
 at `{project_state_root}/{project_id}/watchers/<name>.alive` and record the
 owning `session_id`, exact `project_id`, and `started_at`. The marker content and
 serialization are owned by the companion GH-722 implementation contract; this
@@ -48,6 +55,29 @@ template initializes `bb_cmd` from the exact project's configured
 `bb.executable`, using the same argv-preserving form as
 [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree); every native BB
 call in that template uses the resulting command array.
+
+> **The three shell templates below are PROVISIONAL and are being replaced by a
+> tested script under `bin/`.** They carry real invariants — bounded enumeration,
+> probe-failure visibility, terminal-state windows, ownership comparison — and
+> forty lines of subtle fail-closed bash embedded in Markdown cannot be unit
+> tested, so defects in them are found by review rather than by a suite. Two of
+> the findings below were introduced by fixes to earlier findings in these same
+> templates, which is the evidence for replacing the shape rather than continuing
+> to patch it.
+>
+> Known edges if you run them in the interim, deliberately not fixed here because
+> the code is scheduled for deletion:
+>
+> - The worker-lifecycle parser accepts a syntactically valid but wrong-shape
+>   response such as `{}` as a successful empty sample, because of its
+>   `d.get('threads', [])` fallback. A malformed non-list response therefore reads
+>   as a quiet repository.
+> - The PR watcher's terminal countdown is not reset when a PR reopens, so a PR
+>   that was previously close to retirement can lose its post-merge observation
+>   window after its eventual merge.
+>
+> Each becomes a test case in the replacement lane rather than another round of
+> prose here.
 
 The watchers report changes; they do not decide that work is complete.
 
@@ -277,7 +307,7 @@ re-deriving it.
 ## Succession protocol
 
 The per-generation handoff lives at
-`<project-checkout>/scratchpad/orchestrator-handoff.md`. It carries only state
+`{project_state_root}/{project_id}/orchestrator-handoff.md`. It carries only state
 that a successor cannot recover from the repository and GitHub:
 
 - handoff status and last-updated time, including `watchers stopped: yes` and
@@ -414,7 +444,10 @@ release pass.
    it unblocks. Use the normal one-writer and PR workflow, including the required
    verification and first automatic review; this is not an exception to those
    gates.
-7. Run `bb plugin reload exec-tracking`, launch one controlled probe, and require
+7. Run `"${bb_cmd[@]}" plugin reload exec-tracking` — the project's configured
+   executable, never a bare `bb`, or a wrapper project reloads the PATH
+   installation instead of the instance its spawns use, leaving the intended
+   plugin stale while the proof appears to run. Then launch one controlled probe and require
    a new recorded row in the configured project's executed-triple artifact. A
    running plugin does not follow a changed checkout, and a running status alone
    does not prove recording.
