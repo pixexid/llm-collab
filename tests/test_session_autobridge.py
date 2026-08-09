@@ -4826,21 +4826,38 @@ class SessionAutobridgeTest(unittest.TestCase):
     def test_load_binding_rejects_malformed_and_non_object_json(self):
         root = self.make_workspace()
         binding_root = root / "State" / "session_autobridge" / "bindings"
-        path = binding_root / "amiga" / "CHAT-BAD-BINDING" / "claude.json"
 
         with patch.object(session_autobridge_lib, "BINDINGS_DIR", binding_root):
-            for payload in ("{", "[]"):
-                with self.subTest(payload=payload):
-                    write(path, payload)
+            # GH-687: load_binding is a SHARED contract, so both registered projects -- Amiga and
+            # the non-Amiga Nuvyr -- must prove a binding that EXISTS but cannot be parsed is
+            # present-but-unreadable, not absent. It must raise BindingUnreadable so the dispatch
+            # seam leaves wake_fallback_allowed False. Callers dispatch on type, and
+            # FileNotFoundError means "there is no such binding" -- collapsing a corrupt record
+            # into it reports the real fault as "no binding" and reopens the wake fallback lane.
+            for project in ("amiga", "nuvyr"):
+                with self.subTest(project=project):
+                    path = binding_root / project / "CHAT-BAD-BINDING" / "claude.json"
+                    for payload in ("{", "[]"):
+                        with self.subTest(payload=payload):
+                            write(path, payload)
+                            with self.assertRaises(session_autobridge_lib.BindingUnreadable):
+                                session_autobridge_lib.load_binding(
+                                    project, "CHAT-BAD-BINDING", "claude"
+                                )
+                    path.write_bytes(b"\xff")
+                    with self.assertRaises(session_autobridge_lib.BindingUnreadable):
+                        session_autobridge_lib.load_binding(
+                            project, "CHAT-BAD-BINDING", "claude"
+                        )
+                    # Both directions: a genuinely ABSENT binding still raises FileNotFoundError
+                    # and still means "no binding". A refusal-only test could not tell this fix
+                    # from one that treats every missing binding as unreadable; this is the half
+                    # that guards the absent path.
+                    path.unlink(missing_ok=True)
                     with self.assertRaises(FileNotFoundError):
                         session_autobridge_lib.load_binding(
-                            "amiga", "CHAT-BAD-BINDING", "claude"
+                            project, "CHAT-BAD-BINDING", "claude"
                         )
-            path.write_bytes(b"\xff")
-            with self.assertRaises(FileNotFoundError):
-                session_autobridge_lib.load_binding(
-                    "amiga", "CHAT-BAD-BINDING", "claude"
-                )
 
     def test_inbox_publish_refuses_heuristic_runtime_discovery_for_all_families(self):
         root = self.make_workspace()
@@ -6011,9 +6028,16 @@ class SessionAutobridgeTest(unittest.TestCase):
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertTrue(result_payload["delivery_refused"])
         self.assertFalse(result_payload["durable_write"])
-        self.assertEqual(
-            session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
-            result_payload["autobridge_refusal_reason"],
+        # GH-687: a binding that EXISTS but cannot be parsed (here invalid UTF-8) is
+        # present-but-unreadable, NOT absent. It must surface as the binding_unreadable blocker --
+        # one of the two terminal states that suppress every wake lane -- not as
+        # exact_binding_required, which would report the real fault as "no binding" and leave the
+        # wake fallback open.
+        self.assertTrue(result_payload["binding_unreadable_blocker"])
+        self.assertTrue(
+            result_payload["autobridge_refusal_reason"].startswith(
+                session_autobridge_lib.BINDING_UNREADABLE_REASON),
+            f"expected the unreadable refusal, got {result_payload['autobridge_refusal_reason']!r}",
         )
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
 
@@ -6159,11 +6183,11 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
 
     def deliver_with_scope(self, root, chat_id, *, repo_targets=None, project="amiga",
-                           recipient="claude", expected_returncode=0):
+                           recipient="claude", expected_returncode=0, sender="codex"):
         """Run deliver.py and return its JSON payload plus stderr."""
         argv = [
             sys.executable, str(DELIVER_SCRIPT),
-            "--chat", chat_id, "--from", "codex", "--to", recipient,
+            "--chat", chat_id, "--from", sender, "--to", recipient,
             "--project", project, "--title", "Scope preflight probe",
             "--sender-session-id", "codex-session-9", "--body-file", "-",
         ]
@@ -6319,6 +6343,74 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(payload["watcher_pickup_ready"])
         self.assertIn("REFUSED before durable write", stderr)
         self.assertFalse(list(chat_dir.glob("*_to-relay_*.md")))
+
+    def test_an_unreadable_binding_suppresses_the_ax_doorbell_for_codex(self):
+        """GH-687 end-to-end: a corrupt codex binding must close the AX doorbell.
+
+        Codex is the one recipient the AX doorbell can reach, so this is the exact dangerous
+        state the issue names. Under the defect, load_binding collapsed the corrupt record into
+        FileNotFoundError, resolve_exact_dispatch_pair reported exact_binding_required, and
+        wake_fallback_allowed stayed True -- so the AX doorbell rang a recipient whose binding
+        could not be read. With the fix the corrupt binding raises BindingUnreadable, the
+        unreadable blocker is terminal, and every wake lane (the doorbell included) is closed
+        before the durable write.
+
+        load_binding and the routing that reads it are a SHARED contract, so the doorbell must
+        close on BOTH the Amiga and the non-Amiga (Nuvyr) project path -- a proof that only fires
+        on Amiga does not establish the shared contract.
+        """
+        root = self.make_workspace()
+        for agent_id, activation in (
+            ("codex", {"type": "cli_session", "watcher_enabled": True, "ax_app": "Codex"}),
+            ("claude", {"type": "cli_session", "watcher_enabled": True}),
+        ):
+            self.add_agent(
+                root,
+                {"id": agent_id, "display_name": agent_id.title(), "activation": activation},
+            )
+        for project in ("amiga", "nuvyr"):
+            with self.subTest(project=project):
+                chat_id = f"CHAT-UNREAD-DOORBELL-{project.upper()}"
+                chat_dir = self.create_chat(
+                    root,
+                    chat_dir_name=f"2026-08-08_unreadable-binding__{chat_id}",
+                    chat_id=chat_id,
+                    project_id=project,
+                )
+                # A binding that EXISTS but cannot be parsed -- the accident class (truncated
+                # write, byte fault). Present, so it is not "no binding"; unreadable, so it is
+                # terminal.
+                binding_path = (
+                    root
+                    / "State"
+                    / "session_autobridge"
+                    / "bindings"
+                    / project
+                    / chat_id
+                    / "codex.json"
+                )
+                binding_path.parent.mkdir(parents=True, exist_ok=True)
+                binding_path.write_text("{")
+
+                payload, stderr = self.deliver_with_scope(
+                    root, chat_id, project=project, recipient="codex", sender="claude",
+                    expected_returncode=2)
+
+                self.assertFalse(payload["autobridge_ready"])
+                self.assertTrue(payload.get("binding_unreadable_blocker"),
+                                f"{project}: a corrupt binding must surface as unreadable, not as absent")
+                self.assertNotEqual(
+                    "exact_binding_required", payload["autobridge_refusal_reason"],
+                    f"{project}: a corrupt binding must not be reported as absent (exact_binding_required)")
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(payload.get(flag),
+                                     f"{project}: {flag} must be false for an unreadable binding, got {payload.get(flag)!r}")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(payload.get(prompt),
+                                      f"{project}: {prompt} must be null, got {payload.get(prompt)!r}")
+                self.assertFalse(payload["watcher_pickup_ready"])
+                self.assertIn("REFUSED before durable write", stderr)
+                self.assertFalse(list(chat_dir.glob("*_to-codex_*.md")))
 
     def test_the_same_agent_shape_dispatches_when_scope_matches(self):
         root, _chat_dir = self.scoped_subscriber_workspace(

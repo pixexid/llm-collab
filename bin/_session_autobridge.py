@@ -255,11 +255,16 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise FileNotFoundError(
+        # Same record, same accident class as the oversized/permission-denied branch above: the
+        # binding IS present, it just cannot be parsed. Callers dispatch on type and treat
+        # FileNotFoundError as "there is no such binding"; collapsing a present-but-corrupt record
+        # into it reports an unreadable binding as an absent one and leaves the wake fallback open
+        # (GH-687). The BindingUnreadable docstring already names this rule; this closes the last gap.
+        raise BindingUnreadable(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc
     if not isinstance(payload, dict):
-        raise FileNotFoundError(
+        raise BindingUnreadable(
             f"Malformed binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
     return payload
