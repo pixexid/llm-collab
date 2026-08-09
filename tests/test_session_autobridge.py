@@ -1533,81 +1533,98 @@ class SessionAutobridgeTest(unittest.TestCase):
         )
         self.assertNotEqual(0, result["actions"][0]["runtime_result"]["returncode"])
 
-    def test_timed_out_wake_stays_suppressed_when_a_downstream_settlement_step_fails(self):
-        """GH-688 P1: the suppression is a property of durable state, not a dict.
+    def test_timed_out_wake_settlement_write_failure_does_not_re_run_the_command(self):
+        """GH-692: a settlement-write failure must not make a timed-out wake retryable.
 
-        A timed-out wake is ambiguous (the command may have landed), so once the
-        outcome is ambiguous every downstream failure must be retry-suppressing.
-        In HEAD 1 the seam returned returncode 0 but the processed state was only
-        written later, AFTER the operator-turn-summary and UI-refresh lease
-        assertions and the standard mark. If the UI-refresh lease refused (or
-        save_session failed) the packet stayed unprocessed and the next poll ran
-        the command again -- a second execution of a non-idempotent call whose
-        first outcome may have landed. The fix persists the processed state at the
-        execution boundary, before those steps, so a failing downstream
-        settlement step cannot make the timeout retryable. Parameterized over
-        Amiga and Nuvyr because this changes dispatch/retry behaviour in a shared
-        seam, and the mutation proof must fail on the non-Amiga path too.
+        A timed-out wake is ambiguous (the command may have landed). Head 2 of
+        #690 moved the settlement (mark_message_processed) to the execution
+        boundary, but that write can ITSELF fail (ENOSPC, EIO), and no reordering
+        makes a durable write infallible -- the same window reopened one step
+        earlier. This test exercises the REAL mark_message_processed (no in-memory
+        stand-in: the head-2 test stubbed exactly the operation whose durability
+        was the claim) and injects the failure INSIDE it, at the atomic write it
+        performs. Option (a): when the settlement cannot persist, dispatch
+        REFUSES to re-run the command for that session+message; a later poll
+        re-attempts ONLY the settlement write.
+
+        The consequence is asserted across two polls as the command invocation
+        COUNT, not as an exception type or a marker. Parameterized over Amiga and
+        Nuvyr (shared dispatch/retry seam); the mutation proof must fail on the
+        non-Amiga path too.
         """
-        real_fenced = session_autobridge_lib.activation_fenced_mutation
-
-        def fenced(_session, msg, *, boundary, mutation):
-            # The UI-refresh lease assertion is the failing downstream settlement
-            # step: it refuses AFTER the execution boundary. Under the defect it
-            # resets should_mark_processed and `continue`s past the mark, so the
-            # packet stays unprocessed and the next poll re-runs the command.
-            if boundary == "runtime_ui_refresh":
-                return False, {
-                    "event": "activation_assert_refused",
-                    "message_path": msg["path"],
-                    "boundary": boundary,
-                    "reason": "lease_refused_test",
-                    "owner": None,
-                }, None
-            return real_fenced(_session, msg, boundary=boundary, mutation=mutation)
-
+        real_atomic_write = session_autobridge_lib.write_regular_file_atomically
         for project in ("amiga", "nuvyr"):
             with self.subTest(project=project):
+                root = self.make_workspace()
+                sessions_dir = root / "State" / "session_autobridge" / "sessions"
+                sessions_dir.mkdir(parents=True, exist_ok=True)
+                session_id = f"SESSION-TIMEOUT-692-{project.upper()}"
+                message_path = f"Chats/timeout-692-{project}/packet.md"
                 session = {
-                    "session_id": f"SESSION-TIMEOUT-DURABLE-{project.upper()}",
+                    "session_id": session_id,
                     "agent_id": "claude",
                     "project_id": project,
                     "mode": "auto-read",
                     "wake_strategy": "runtime_trigger",
+                    "binding_id": f"binding-692-{project}",
                     "runtime": {
                         "family": "claude_app",
-                        "session_id": f"thread-{project}",
+                        "session_id": f"thread-692-{project}",
                         "command": ["wake-cli", "--prompt"],
                         "timeout_seconds": 1,
                     },
                 }
                 message = {
-                    "path": f"Chats/timeout-durable-{project}/packet.md",
+                    "path": message_path,
                     "frontmatter": {"from": "codex", "to": "claude"},
                 }
-                prepared = ({**session, "processed_messages": [message["path"]]}, "{}")
-
-                def settle(_session, path, *, prepared=None):
-                    _session.setdefault("processed_messages", [])
-                    if path not in _session["processed_messages"]:
-                        _session["processed_messages"].append(path)
-
+                # The initial session is persisted to the real (temp) sessions
+                # dir so dispatch_session's REAL load_session reads it each poll.
+                (sessions_dir / f"{session_id}.json").write_text(
+                    json.dumps(session, indent=2, sort_keys=True)
+                )
+                prepared_candidate = {**session, "processed_messages": [message_path]}
+                prepared = (
+                    prepared_candidate,
+                    json.dumps(prepared_candidate, indent=2, sort_keys=True),
+                )
                 run_mock = Mock(
                     side_effect=session_autobridge_lib.subprocess.TimeoutExpired(
                         cmd=session["runtime"]["command"], timeout=1
                     )
                 )
+                # Inject the settlement-write failure INSIDE the real
+                # mark_message_processed: the atomic write it performs raises on
+                # the first call (poll 1's settlement) and succeeds thereafter
+                # (poll 2's replay). mark_message_processed itself is NOT stubbed.
+                atomic_writes = []
+
+                def atomic_once_failing(path, content):
+                    atomic_writes.append(str(path))
+                    if len(atomic_writes) == 1:
+                        raise OSError("No space left on device")
+                    return real_atomic_write(path, content)
+
+                # The in-process refusal set is module-global: isolate this test.
+                session_autobridge_lib._UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS.discard(
+                    (session_id, message_path)
+                )
                 with patch.object(
-                    session_autobridge_lib, "load_session", return_value=session
+                    session_autobridge_lib, "SESSIONS_DIR", sessions_dir
+                ), patch.object(
+                    session_autobridge_lib,
+                    "SESSION_WRITE_LOCK",
+                    root / "State" / "session_autobridge" / ".session-write.lock",
+                ), patch.object(
+                    session_autobridge_lib,
+                    "write_regular_file_atomically",
+                    side_effect=atomic_once_failing,
                 ), patch.object(
                     session_autobridge_lib, "session_is_dispatchable",
                     return_value=(True, "ok"),
                 ), patch.object(
                     session_autobridge_lib, "matching_unread_messages",
                     return_value=[message],
-                ), patch.object(
-                    session_autobridge_lib, "processed_messages",
-                    side_effect=lambda s: set(s.get("processed_messages", [])),
                 ), patch.object(
                     session_autobridge_lib, "message_targets_session",
                     return_value=(True, "test"),
@@ -1617,9 +1634,6 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ), patch.object(
                     session_autobridge_lib, "resolve_effective_action",
                     return_value=("runtime_trigger", "test"),
-                ), patch.object(
-                    session_autobridge_lib, "resolve_session_receive_binding",
-                    return_value=(True, None),
                 ), patch.object(
                     session_autobridge_lib, "message_needs_canonical_materialization",
                     return_value=False,
@@ -1632,44 +1646,81 @@ class SessionAutobridgeTest(unittest.TestCase):
                 ), patch.object(
                     session_autobridge_lib.subprocess, "run", new=run_mock
                 ), patch.object(
-                    session_autobridge_lib, "activation_fenced_mutation",
-                    side_effect=fenced,
-                ), patch.object(
                     session_autobridge_lib, "refresh_runtime_ui", return_value={}
                 ), patch.object(
                     session_autobridge_lib, "write_operator_turn_summary",
                     return_value={},
                 ), patch.object(
                     session_autobridge_lib, "append_event"
-                ), patch.object(
-                    session_autobridge_lib, "mark_message_processed",
-                    side_effect=settle,
-                ) as mark_processed:
-                    # Poll 1: the wake times out, then the downstream UI-refresh
-                    # lease refuses.
-                    session_autobridge_lib.dispatch_session(
-                        session["session_id"], project_id=project
+                ):
+                    # Poll 1: the wake times out (count 1), then the REAL
+                    # settlement write fails inside mark_message_processed.
+                    with self.assertRaises(
+                        session_autobridge_lib.AmbiguousWakeSettlementUnpersistable
+                    ) as ctx:
+                        session_autobridge_lib.dispatch_session(
+                            session_id, project_id=project
+                        )
+                    self.assertEqual(
+                        message_path,
+                        ctx.exception.message_path,
+                        f"{project}: the fatal refusal must name the unsettled packet",
                     )
-                    first_poll_marks = mark_processed.call_count
-                    first_poll_runs = run_mock.call_count
-                    # Poll 2: the packet is durably processed, so the command must
-                    # NOT be executed a second time after an ambiguous outcome.
-                    session_autobridge_lib.dispatch_session(
-                        session["session_id"], project_id=project
+                    self.assertEqual(
+                        1,
+                        run_mock.call_count,
+                        f"{project}: poll 1 runs the wake exactly once",
                     )
-
-                self.assertEqual(
-                    1,
-                    first_poll_marks,
-                    f"{project}: the timed-out wake must be durably marked processed at "
-                    "the execution boundary even when a downstream settlement step fails",
-                )
-                self.assertEqual(
-                    first_poll_runs,
-                    run_mock.call_count,
-                    f"{project}: a timed-out wake must not be executed a second time after "
-                    "an ambiguous outcome, even when a downstream settlement step fails",
-                )
+                    self.assertEqual(
+                        1,
+                        len(atomic_writes),
+                        f"{project}: poll 1 reached the settlement write (the failure "
+                        "is injected inside the real mark_message_processed)",
+                    )
+                    self.assertIn(
+                        (session_id, message_path),
+                        session_autobridge_lib._UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS,
+                        f"{project}: an unpersistable settlement records the in-process "
+                        "refusal so the next poll does not re-run the command",
+                    )
+                    # The settlement write failed, so the packet is NOT processed.
+                    self.assertNotIn(
+                        message_path,
+                        session_autobridge_lib.load_session(session_id).get(
+                            "processed_messages", []
+                        ),
+                        f"{project}: poll 1 must leave the packet unprocessed when its "
+                        "settlement write fails",
+                    )
+                    # Poll 2: the in-process refusal is set, so dispatch re-attempts
+                    # ONLY the settlement write (never the command).
+                    session_autobridge_lib.dispatch_session(
+                        session_id, project_id=project
+                    )
+                    self.assertEqual(
+                        1,
+                        run_mock.call_count,
+                        f"{project}: a timed-out wake whose settlement write failed must "
+                        "NOT run the command a second time across two polls",
+                    )
+                    self.assertEqual(
+                        2,
+                        len(atomic_writes),
+                        f"{project}: poll 2 re-attempted the settlement write, not the "
+                        "command",
+                    )
+                    settled = session_autobridge_lib.load_session(session_id)
+                    self.assertIn(
+                        message_path,
+                        settled.get("processed_messages", []),
+                        f"{project}: once the settlement write succeeds the packet is "
+                        "durably processed (real mark_message_processed, real disk write)",
+                    )
+                    self.assertNotIn(
+                        (session_id, message_path),
+                        session_autobridge_lib._UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS,
+                        f"{project}: a successful replay clears the in-process refusal",
+                    )
 
     def test_watch_inbox_emits_a_distinct_ambiguous_event_for_a_timed_out_wake(self):
         """GH-688 P2: an ambiguous wake must not log as a successful wake.
