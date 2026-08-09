@@ -1,0 +1,27 @@
+{
+  "name": "bb-plugin-fan-out",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Fail-closed fan-out of read-only agents into isolated managed worktrees. See the plugin README for the contract.",
+  "engines": {
+    "bb": ">=0.9",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test server.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "bb": {
+    "name": "Fan Out",
+    "description": "Fans out read-only agents into distinct managed worktrees and fails closed on any incomplete agent.",
+    "branding": {
+      "icon": "GitBranch"
+    },
+    "server": "./server.ts"
+  }
+}
