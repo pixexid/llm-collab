@@ -28,6 +28,7 @@ def load_module():
 
 
 watch = load_module()
+RECORDED_THREAD_LIST = ROOT / "tests" / "fixtures" / "bb" / "thread_list.json"
 
 
 def config() -> watch.WatcherConfig:
@@ -43,9 +44,77 @@ def signature(*, state: str = "open", merged: bool = False, head: str = "a" * 40
     return {"state": state, "merged": merged, "head": head, "timeline": []}
 
 
+def recorded_thread_list() -> list[dict]:
+    return json.loads(RECORDED_THREAD_LIST.read_text(encoding="utf-8"))
+
+
+class RecordedThreadListTest(unittest.TestCase):
+    def test_recorded_live_thread_list_accepts_integer_archived_at(self) -> None:
+        payload = recorded_thread_list()
+        try:
+            rows = watch.thread_rows(payload)
+        except watch.ProbeError as error:
+            self.fail(f"recorded live bb data must accept integer archivedAt: {error}")
+        self.assertEqual(payload, rows)
+        self.assertGreater(
+            sum(row["archivedAt"] is not None for row in rows),
+            0,
+            "recorded fixture must contain archived rows",
+        )
+        self.assertGreater(
+            sum(row["archivedAt"] is None and row["status"] == "active" for row in rows),
+            0,
+            "recorded fixture must contain an active row",
+        )
+        self.assertTrue(
+            all(
+                type(row["archivedAt"]) is int
+                for row in rows
+                if row["archivedAt"] is not None
+            ),
+            "recorded archivedAt values must be integer timestamps",
+        )
+
+    def test_recorded_live_thread_list_completes_both_shared_probes(self) -> None:
+        payload = recorded_thread_list()
+        self.assertTrue(
+            watch.worker_cycle(config(), {}, call=lambda *_: payload, emit=lambda _line: None)
+        )
+
+        def call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            return payload
+
+        self.assertTrue(
+            watch.heartbeat_cycle(
+                config(), call=call, enumerate_open=lambda *_, **__: [], emit=lambda _line: None
+            )
+        )
+
+    def test_integer_archived_at_is_not_counted_as_a_live_worker(self) -> None:
+        payload = recorded_thread_list()
+        archived = next(row for row in payload if isinstance(row["archivedAt"], int))
+        active = next(row for row in payload if row["archivedAt"] is None and row["status"] == "active")
+        probe_rows = [{**archived, "archivedAt": 0, "status": "active"}, active]
+        messages = []
+
+        def call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            return probe_rows
+
+        self.assertTrue(
+            watch.heartbeat_cycle(
+                config(), call=call, enumerate_open=lambda *_, **__: [], emit=messages.append
+            )
+        )
+        self.assertIn("liveWorkers=1", messages[-1])
+
+
 class ProbeShapeTest(unittest.TestCase):
     def test_wrong_shape_valid_json_is_not_a_worker_sample_or_marker_refresh(self) -> None:
-        for payload in ({}, {"error": "backend unavailable"}):
+        for payload in ({}, {"error": "backend unavailable"}, "not a list"):
             with self.subTest(payload=payload), mock.patch.object(
                 watch._watcher_liveness, "write_marker"
             ) as writer:
@@ -91,6 +160,36 @@ class ProbeShapeTest(unittest.TestCase):
             self.assertFalse(
                 completed,
                 "wrong-shape valid JSON must not be a successful heartbeat sample",
+            )
+            writer.assert_not_called()
+
+    def test_wrong_shape_thread_list_is_not_a_heartbeat_sample_or_marker_refresh(self) -> None:
+        for thread_payload in ({}, {"error": "backend unavailable"}, "not a list"):
+            def call(_executable, argv, _timeout):
+                return (
+                    {"currentVersion": watch.PINNED_BB_VERSION}
+                    if argv[:2] == ("settings", "version")
+                    else thread_payload
+                )
+
+            with self.subTest(payload=thread_payload), mock.patch.object(
+                watch._watcher_liveness, "write_marker"
+            ) as writer:
+                completed = watch.run_once(
+                    "heartbeat",
+                    "project-a",
+                    "session-a",
+                    lambda: watch.heartbeat_cycle(
+                        config(),
+                        call=call,
+                        enumerate_open=lambda *_, **__: [],
+                        emit=lambda _line: None,
+                    ),
+                    emit=lambda _line: None,
+                )
+            self.assertFalse(
+                completed,
+                "wrong-shape thread data must not be a successful heartbeat sample",
             )
             writer.assert_not_called()
 

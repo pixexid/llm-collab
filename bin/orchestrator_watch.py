@@ -183,9 +183,9 @@ def thread_rows(payload) -> list[dict]:
             raise ProbeError("bb thread row title is not text")
         archived_at = row.get("archivedAt")
         if archived_at is not None and (
-            not isinstance(archived_at, str) or not archived_at.strip()
+            isinstance(archived_at, bool) or not isinstance(archived_at, int)
         ):
-            raise ProbeError("bb thread row archivedAt is not null or non-empty text")
+            raise ProbeError("bb thread row archivedAt is not null or integer timestamp")
     return rows
 
 
@@ -412,7 +412,7 @@ def heartbeat_cycle(
         )
         remaining_cycle_seconds(deadline, monotonic)
         workers = sum(
-            row["status"] in {"active", "starting"} and not row.get("archivedAt")
+            row["status"] in {"active", "starting"} and row.get("archivedAt") is None
             for row in rows
         )
     except Exception as error:
