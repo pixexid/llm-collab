@@ -20,7 +20,7 @@ path or format rule is how these drift. The project id is the caller's explicit
 choice — there is deliberately no default, so a caller that forgets it fails
 rather than silently reading another project's markers (AGENTS.md → "Project
 Boundary"). The writing side is the single documented shape in write_marker();
-the doc lane's watcher templates reference bin/touch_watcher_marker.py.
+bin/orchestrator_watch.py and bin/touch_watcher_marker.py both call it.
 """
 
 from __future__ import annotations
@@ -38,14 +38,11 @@ from _helpers import get_project, project_state_dir, write_file_durably
 
 WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
 
-# The code cannot know each watcher's own cycle period: the watchers are defined
-# by doc templates in docs/workflows/orchestrator-sessions.md, not by code in
-# this repository. The known watcher cycles in this workspace are minute-scale
-# at most (watch_inbox poll default 15s in pm2/ecosystem.config.cjs, pr_watch
-# --interval default 60s) and a marker is rewritten EVERY cycle, so 600s is a
-# 10x margin over the slowest known cycle while still surfacing a dead watcher
-# within the same work segment. If a watcher template ever gets a longer cycle,
-# raise this bound in the same change that introduces it.
+# The standard watcher periods live in bin/orchestrator_watch.py. All modes have
+# a 300s cumulative cycle deadline; heartbeat refreshes every 60s between 600s
+# reports. The 60s refresh gap plus 300s work bound leaves 240s of margin inside
+# this external bound. Any interval or deadline increase must revisit that margin
+# without weakening this shared bound.
 WATCHER_MARKER_STALE_AFTER_SECONDS = 600.0
 
 # A marker is a few hundred bytes of JSON written by write_marker. Anything
