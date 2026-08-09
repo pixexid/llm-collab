@@ -252,14 +252,18 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
         )
     except UnreadableFile as exc:
         raise BindingUnreadable(str(exc)) from exc
+    # A present-but-corrupt binding is terminal, exactly like the oversized branch above:
+    # FileNotFoundError means "no such binding" to every caller that catches it, so raising it
+    # here would report an existing unreadable record as absent -- and resolve_exact_dispatch_pair
+    # would then leave wake_fallback_allowed True for a binding nobody could read.
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise FileNotFoundError(
+        raise BindingUnreadable(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc
     if not isinstance(payload, dict):
-        raise FileNotFoundError(
+        raise BindingUnreadable(
             f"Malformed binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
     return payload
