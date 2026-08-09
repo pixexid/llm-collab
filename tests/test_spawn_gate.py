@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import bb_spawn  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
+    PINNED_BB_VERSION,
     REFUSAL_IDENTITY_MISMATCH,
     REFUSAL_ORPHANED_THREAD,
     REFUSAL_TRANSPORT_FAILED,
@@ -309,7 +310,9 @@ def bb_transport(*, environment_id: str = "env_expected"):
     def transport(argv, _timeout):  # noqa: ANN001 - transport protocol
         calls.append(list(argv))
         if list(argv[:2]) == ["settings", "version"]:
-            return BbTransportResult(0, '{"currentVersion":"0.35.1"}', "")
+            return BbTransportResult(
+                0, json.dumps({"currentVersion": PINNED_BB_VERSION}), ""
+            )
         if list(argv[:2]) == ["thread", "spawn"]:
             return BbTransportResult(0, json.dumps(spawn_payload), "")
         if list(argv[:2]) == ["thread", "log"]:
@@ -325,7 +328,7 @@ class BbClientSpawnOptionsTest(unittest.TestCase):
 
         def wrong_version(argv, _timeout):  # noqa: ANN001 - transport protocol
             calls.append(list(argv))
-            return BbTransportResult(0, '{"currentVersion":"0.36.0"}', "")
+            return BbTransportResult(0, '{"currentVersion":"0.0.1"}', "")
 
         version = BbClient(wrong_version, enabled=True).spawn(
             project_id="proj_llm_collab", prompt="audit", profile=PROFILE

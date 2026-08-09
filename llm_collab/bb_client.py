@@ -1,4 +1,4 @@
-"""bb 0.35.1 client and refusal surface (GH-563 Slice 1A).
+"""bb 0.36.0 client and refusal surface (GH-563 Slice 1A).
 
 This module is the SOLE place a bb response is parsed. Nothing else in the
 codebase may read a bb envelope; if a caller needs a field, it comes from a typed
@@ -10,7 +10,9 @@ write. It exists to freeze the response and failure contract that Slice 1B
 of inventing one mid-flight.
 
 Four properties are load-bearing and all four come from live observation against
-the installed 0.35.1 CLI, not from docs:
+the installed CLI, not from docs. They were first observed at 0.35.1 and
+re-observed unchanged at 0.36.0; the pin below is what makes that observation a
+control rather than a note, so moving it requires re-observing all four:
 
 * ``thread spawn --json`` returns the thread object at the TOP LEVEL, while
   ``thread show --json`` nests it under a ``thread`` key. One validator reused for
@@ -44,7 +46,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-PINNED_BB_VERSION = "0.35.1"
+PINNED_BB_VERSION = "0.36.0"
 
 # Refuse rather than parse past this. A response this large is a contract break,
 # and truncating it would turn a resource limit into a correctness bug.
@@ -227,7 +229,7 @@ def _require_seq(value: Any) -> int | None:
 
 
 class BbClient:
-    """Validating client for bb 0.35.1.
+    """Validating client for bb 0.36.0.
 
     Default OFF. With the adapter disabled, every operation returns
     ``REFUSAL_DISABLED`` without touching the transport at all — no process, no
