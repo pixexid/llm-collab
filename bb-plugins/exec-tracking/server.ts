@@ -28,12 +28,22 @@
  *     tripwire rather than a silent drop.
  *   - anything else (`client/turn/start`, absent, unrecognised) — refused as
  *     `ignored out_of_contract`, source named.
- * At `thread.created` the handler is fire-and-forget, so `defaultExecutionOptions`
- * usually still reports `client/thread/start` and the row is refused; when the
- * spawn turn advances before the loopback RPC finishes, the result carries
- * `client/turn/requested` and the executed triple records. This slice does not
- * build deterministic turn-event sourcing — it records the authoritative source
- * when it is observable and refuses the rest observably.
+ * What was measured at `thread.created` (GH-706): `defaultExecutionOptions`
+ * reported `client/turn/requested` in 8 of 8 probes, varying provider (`pi` and
+ * `claude-code`), model, visibility, parentage, an idle fork, and a spawn with no
+ * explicit provider or model. None reported `client/thread/start`. An idle fork
+ * emitted `client/turn/requested` BEFORE `client/thread/start`, so there is no
+ * pre-turn window to sample.
+ *
+ * The SDK documents no ordering: `bb-plugin-sdk.d.ts` declares the `source` enum
+ * and says nothing about when each value is produced. So treat the above as
+ * measurement, not as a guarantee — do not write code that assumes it holds.
+ *
+ * If a `client/thread/start` result does occur, it refuses with its own distinct
+ * `thread_start_not_executed` reason and is logged, so it is visible rather than
+ * silent. There is no retry: this slice records the authoritative source when it
+ * is observable and refuses the rest observably. That is a known limitation of
+ * the slice, not an oversight.
  *
  * Why this shape:
  *
