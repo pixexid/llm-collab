@@ -49,6 +49,11 @@ from llm_collab.bb_client import (
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bb"
 
+# A version bb will never report, so a future pin bump cannot silently turn the
+# mismatch case into a match. The previous literal was the next release and did
+# exactly that when the pin moved to it.
+MISMATCHED_BB_VERSION = "0.0.1"
+
 # The exact identities the recorded fixtures carry. Tests name them rather than
 # passing placeholders, because identity binding is now part of the contract:
 # a test that asked for "thr_x" and accepted a fixture for another thread would
@@ -176,7 +181,7 @@ class VersionPinTest(unittest.TestCase):
     def test_version_mismatch_refuses_and_performs_no_task_bearing_call(self):
         """AC1: a mismatch must not spawn. The proof is the absent spawn argv."""
         payload = json.loads(fixture("settings_version.json"))
-        payload["currentVersion"] = "0.36.0"
+        payload["currentVersion"] = MISMATCHED_BB_VERSION
         client, transport = enabled_client(
             {"settings version": BbTransportResult(0, json.dumps(payload), "")}
         )

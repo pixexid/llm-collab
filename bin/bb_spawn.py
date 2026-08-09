@@ -81,13 +81,21 @@ def main(argv: list[str] | None = None) -> int:
                 key: resolve_project_repo_path(args.collab_project, key) for key in keys
             },
         }
-    environment = (
-        NewWorktree()
-        if args.new_environment
-        else Attached(args.environment)
-        if args.environment is not None
-        else None
-    )
+    if args.new_environment:
+        # Refuse BEFORE the non-idempotent spawn, not after it. bb provisions a new
+        # worktree asynchronously and returns `environmentId: null`, which the client
+        # rejects as malformed — but only once a real thread exists, so every attempt
+        # would leave an orphan with no assignment record. A clean pre-execution
+        # refusal performs nothing and is honest about a path that cannot succeed.
+        # Create the environment first and pass --environment. Removing this guard
+        # requires GH-718's resolution semantics, not making the field optional.
+        _emit(
+            "REFUSED: new_worktree_unsupported: bb returns environmentId=null for an "
+            "asynchronously provisioned worktree; create the environment first and pass "
+            "--environment <id>. See GH-718."
+        )
+        return 1
+    environment = Attached(args.environment) if args.environment is not None else None
     plan = plan_spawn(
         assignment_kind=args.assignment_kind,
         registry_entry=registry_entry,

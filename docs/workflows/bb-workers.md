@@ -32,18 +32,40 @@ project's default source checkout. That is the shared checkout in the current
 fleet. `--permission-mode full` bypasses sandbox and approval protections, so
 combining it with that default is a live write hazard.
 
-A read-only assignment may create its worktree and start in one command. This
-form also provisions the environment for a later writing lane, but BB has no
-read-only permission mode: `accept-edits`, `auto`, and `full` are all
+Provisioning is not an assignment, and the distinction decides which command to
+use. The preflight below carries no delegated work: it creates the worktree and
+reports what it found. It therefore runs on the native command, which is the
+only thing that can create an environment, and it is not an exception to the
+sanctioned-path rule. Every assignment that follows — read-only or writing —
+goes through `bin/bb_spawn.py` with `--environment <verified-id>`.
+
+`bin/bb_spawn.py --new-environment worktree` refuses rather than doing this
+step for you. bb provisions a new worktree asynchronously and returns
+`environmentId: null`, so that form would create a real thread and only then
+reject the envelope, leaving an orphan with no assignment record. The refusal is
+deliberate containment; resolution semantics are
+[GH-718](https://github.com/pixexid/llm-collab/issues/718). Until that lands,
+create the environment here and attach to it.
+
+BB has no read-only permission mode: `accept-edits`, `auto`, and `full` are all
 write-capable. `accept-edits` below is the least-permissive available mode, not
-an enforcement control. The no-write prompt bounds the assignment; the exact
+an enforcement control. The no-write prompt bounds the preflight; the exact
 post-turn checks below provide the proof. Resolve and record the requested base
 SHA before spawning:
 
+Resolve it **in the selected repository**, not in whatever checkout you happen to
+be standing in. Unscoped `git` reads the current checkout's `origin`, so on any
+multi-project or multi-repo lane it yields a SHA from an unrelated repository and
+provisioning either fails to resolve it or silently starts from the wrong commit.
+Ask the repository for the path rather than rebuilding it from `projects.json`:
+the value may be absolute, relative to `projects_root`, or `..`-relative, and
+`resolve_project_repo_path` already owns those rules.
+
 ```bash
+repo_root=$(python3.11 -c "import sys; sys.path.insert(0, 'bin'); from _helpers import resolve_project_repo_path; print(resolve_project_repo_path('<project-id>', '<repo-id>'))")
 base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
-git fetch origin "$base_branch"
-base_sha=$(git rev-parse "origin/$base_branch")
+git -C "$repo_root" fetch origin "$base_branch"
+base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
 bb thread spawn \
   --project <bb-project-id> \
   --new-environment worktree \
@@ -65,9 +87,11 @@ created a worktree at `03431b9a`, 44 commits behind `origin/main` at
 `headSha == mergeBase.baseRef` both passed; only comparison with the
 independently resolved SHA caught the stale base.
 
-BB 0.35.1 has no standalone environment-create command, and `bb thread spawn`
-requires `--prompt`; it cannot create a chosen-base worktree without starting a
-turn. Do not put a writing delegation in that first turn. Wait for the probe to
+BB has no standalone environment-create command — verified against 0.35.1 and
+again at 0.36.0, where `bb environment` exposes only inspect-and-operate
+subcommands — and `bb thread spawn` requires `--prompt`, so it cannot create a
+chosen-base worktree without starting a turn. That is why provisioning takes a
+turn at all. Do not put a writing delegation in that first turn. Wait for the probe to
 become idle, then inspect the provisioned environment:
 
 ```bash
@@ -92,9 +116,12 @@ base SHA in the frozen writing delegation. Only then attach the writing worker
 to the verified environment:
 
 ```bash
-bb thread spawn \
-  --project <bb-project-id> \
+python3.11 bin/bb_spawn.py \
+  --assignment-kind writing \
+  --collab-project <project-id> \
+  --repo-target <repo-id> \
   --environment <verified-environment-id> \
+  --base-sha "$base_sha" \
   --provider codex \
   --model gpt-5.6-sol \
   --reasoning-level high \
@@ -103,6 +130,11 @@ bb thread spawn \
   --prompt "<frozen writing delegation with the verified path, branch, base ref, and base SHA>" \
   --json
 ```
+
+The assignment goes through the script, not the native command: that is what
+applies the spawn gate and writes the assignment record. Write the delegation to
+a file and pass `"$(cat <file>)"` — `bb thread tell` and shell interpolation both
+eat backticks, and a prompt that arrives with a hole in it still reports success.
 
 The probe must be idle before that spawn and must receive no further messages.
 After the writer successfully returns the same environment ID, archive the

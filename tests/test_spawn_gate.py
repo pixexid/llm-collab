@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import bb_spawn  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
+    PINNED_BB_VERSION,
     REFUSAL_IDENTITY_MISMATCH,
     REFUSAL_ORPHANED_THREAD,
     REFUSAL_TRANSPORT_FAILED,
@@ -60,8 +61,18 @@ CLI_ARGS = [
     "--model", PROFILE.model,
     "--reasoning-level", PROFILE.reasoning_level,
     "--base-sha", SHA,
-    "--new-environment", "worktree",
+    "--environment", "env_expected",
     "--prompt", "audit",
+]
+
+# The CLI's entire coverage used to run through `--new-environment worktree`, the
+# one form that cannot succeed against a live server, so nothing here exercised a
+# launch shape an orchestrator can actually use. The new-worktree form now has a
+# single dedicated test asserting it performs nothing.
+NEW_WORKTREE_CLI_ARGS = [
+    *CLI_ARGS[: CLI_ARGS.index("--environment")],
+    "--new-environment", "worktree",
+    *CLI_ARGS[CLI_ARGS.index("--environment") + 2 :],
 ]
 
 
@@ -309,7 +320,9 @@ def bb_transport(*, environment_id: str = "env_expected"):
     def transport(argv, _timeout):  # noqa: ANN001 - transport protocol
         calls.append(list(argv))
         if list(argv[:2]) == ["settings", "version"]:
-            return BbTransportResult(0, '{"currentVersion":"0.35.1"}', "")
+            return BbTransportResult(
+                0, json.dumps({"currentVersion": PINNED_BB_VERSION}), ""
+            )
         if list(argv[:2]) == ["thread", "spawn"]:
             return BbTransportResult(0, json.dumps(spawn_payload), "")
         if list(argv[:2]) == ["thread", "log"]:
@@ -325,7 +338,7 @@ class BbClientSpawnOptionsTest(unittest.TestCase):
 
         def wrong_version(argv, _timeout):  # noqa: ANN001 - transport protocol
             calls.append(list(argv))
-            return BbTransportResult(0, '{"currentVersion":"0.36.0"}', "")
+            return BbTransportResult(0, '{"currentVersion":"0.0.1"}', "")
 
         version = BbClient(wrong_version, enabled=True).spawn(
             project_id="proj_llm_collab", prompt="audit", profile=PROFILE
@@ -388,6 +401,30 @@ class CliPhaseTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("--assignment-kind", result.stdout)
+
+    def test_new_worktree_refuses_before_planning_or_spawning_anything(self) -> None:
+        """The refusal must land before the non-idempotent call, not after it.
+
+        bb provisions a new worktree asynchronously and returns environmentId=null,
+        which the client rejects as malformed — but only once a real thread exists.
+        Asserting the exit code alone would pass even if the thread were created and
+        then orphaned, so the proof is that plan_spawn and the client are never
+        reached at all.
+        """
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn") as plan, mock.patch.object(
+            bb_spawn, "_configured_client"
+        ) as client, mock.patch.object(bb_spawn, "_emit") as emit:
+            exit_code = bb_spawn.main(NEW_WORKTREE_CLI_ARGS)
+        # Order matters: assert the never-reached calls BEFORE the exit code. With
+        # the exit-code check first, a regression that spawns and then fails some
+        # other way trips that assertion instead, and the test reports a failure
+        # while never measuring the property it is named for.
+        plan.assert_not_called()
+        client.assert_not_called()
+        self.assertIn("new_worktree_unsupported", emit.call_args.args[0])
+        self.assertEqual(1, exit_code)
 
     def test_gate_refusal_is_retryable_exit_one(self) -> None:
         refusal = GateRefusal("invalid_base_sha", "branch name")
