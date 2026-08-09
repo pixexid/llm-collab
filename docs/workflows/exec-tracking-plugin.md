@@ -42,17 +42,16 @@ npm run typecheck          # FAILS on an undeclared identifier before you instal
 bb plugin install --yes .  # operator step — only after typecheck is green
 bb plugin config exec-tracking set checkoutPath /path/to/llm-collab
 bb plugin config exec-tracking set pythonPath  /abs/path/to/python3.11   # server PATH is narrow
-bb plugin config exec-tracking set projectId   <project-id>             # must be registered in projects.json
 bb plugin reload exec-tracking
 ```
 
 `checkoutPath` and `pythonPath` must be set before any row is recorded; until then
 the handler logs a warning and records nothing (rather than guess a path).
-`projectId` must exist in that checkout's `projects.json` with a `bb.project_id`
-matching the bb project its threads spawn under. In that project's entry in the
-workspace `projects.json`, set the native bb project id (the `projectId` reported
-by bb itself, for example `bb thread show <thread-id> --json`), not the
-llm-collab registry slug:
+The plugin has no project setting: its Python child resolves each native thread
+project against every registered project carrying a `bb` block, so the registry
+lookup exists in one place. In each covered project's workspace `projects.json`
+entry, set the native bb project id (the `projectId` reported by bb itself, for
+example `bb thread show <thread-id> --json`), not the llm-collab registry slug:
 
 ```json
 "bb": {
@@ -60,8 +59,8 @@ llm-collab registry slug:
 }
 ```
 
-Without this recorder-only block, the recorder falls back to the registry slug and
-every event is ignored as a scope mismatch. Leave out `enabled`: setting
+Without a `bb` block, that project remains outside recorder coverage and its
+native thread id is ignored with a reason. Leave out `enabled`: setting
 `enabled: true` also activates bootstrap, continuation, and the spawn gate.
 
 After an SDK bump, regenerate the declarations with `bb plugin types .` and

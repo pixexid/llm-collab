@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 PY = sys.executable
 
 RECORD_FILE = "thread-executed-triples.jsonl"
+NATIVE_PROJECT = {"amiga": "proj_amiga", "nuvyr_app": "proj_nuvyr"}
 
 
 def run_record(workspace: Path, *args: str) -> subprocess.CompletedProcess:
@@ -63,11 +64,12 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         ])
         self.addCleanup(shutil.rmtree, self.workspace, True)
 
-    def _resolved(self, project: str, thread_id: str, thread_project: str = "proj_amiga",
+    def _resolved(self, project: str, thread_id: str, thread_project: str | None = None,
                   *, model: str = "zai/glm-5.2", reasoning: str = "high",
                   source: str = "client/turn/requested", provider: str = "pi") -> subprocess.CompletedProcess:
-        return run_record(self.workspace, "--project", project, "--thread-id", thread_id,
-                          "--thread-project", thread_project, "--provider", provider,
+        native = thread_project if thread_project is not None else NATIVE_PROJECT[project]
+        return run_record(self.workspace, "--thread-id", thread_id,
+                          "--thread-project", native, "--provider", provider,
                           "--model", model, "--reasoning-level", reasoning, "--source", source)
 
     # -- resolved direction -------------------------------------------------
@@ -170,7 +172,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         """An unresolved row records a FAILED resolution — no value was read, so
         there is no source and no evidence label (a failed resolution executed
         nothing). It must not inherit `executed` (the assume-the-label defect)."""
-        run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_U",
+        run_record(self.workspace, "--thread-id", "thr_U",
                    "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
         row = rows_for(self.workspace, "amiga")[0]
         self.assertNotIn("evidence", row, "an unresolved row has no source to derive a label from")
@@ -213,7 +215,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
 
     def test_unresolved_then_resolved_completes(self) -> None:
         """unresolved -> resolved is the one legal write against an existing row."""
-        run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_C",
+        run_record(self.workspace, "--thread-id", "thr_C",
                    "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
         self.assertEqual("unresolved", rows_for(self.workspace, "amiga")[0]["status"])
         r = self._resolved("amiga", "thr_C", model="m", reasoning="low")
@@ -227,7 +229,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         """A resolved->unresolved re-fire keeps the resolved row (the truth) and surfaces
         a conflict; the failure does not overwrite established provenance."""
         self._resolved("amiga", "thr_R", model="m", reasoning="low")
-        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_R",
+        r = run_record(self.workspace, "--thread-id", "thr_R",
                        "--thread-project", "proj_amiga", "--unresolved", "profile_not_resolved")
         self.assertEqual(0, r.returncode, r.stderr[:500])
         self.assertIn("conflict", r.stdout)
@@ -255,7 +257,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertNotIn("preset", json.dumps(rows[0]))
 
     def test_absent_provider_recorded_as_null(self) -> None:
-        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_P",
+        r = run_record(self.workspace, "--thread-id", "thr_P",
                        "--thread-project", "proj_amiga",
                        "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
         self.assertEqual(0, r.returncode, r.stderr[:500])
@@ -264,7 +266,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
     # -- unresolved direction ----------------------------------------------
 
     def test_unresolvable_profile_records_typed_failure(self) -> None:
-        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_U",
+        r = run_record(self.workspace, "--thread-id", "thr_U",
                        "--thread-project", "proj_amiga", "--provider", "pi",
                        "--unresolved", "profile_not_resolved")
         self.assertEqual(0, r.returncode, r.stderr[:500])
@@ -284,7 +286,7 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertEqual({"resolved", "unresolved"}, {row["status"] for row in rows})
 
     def test_resolution_error_carries_detail(self) -> None:
-        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_E",
+        r = run_record(self.workspace, "--thread-id", "thr_E",
                        "--thread-project", "proj_amiga",
                        "--unresolved", "profile_resolution_error", "--failure-detail", "loopback timeout")
         self.assertEqual(0, r.returncode, r.stderr[:500])
@@ -292,34 +294,75 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertEqual("profile_resolution_error", row["failure_reason"])
         self.assertEqual("loopback timeout", row["failure_detail"])
 
-    # -- F1: project scope per thread --------------------------------------
+    # -- S1 / T1: native project ownership ---------------------------------
 
-    def test_thread_for_another_project_is_ignored(self) -> None:
-        """A thread whose bb project does not match the configured scope is IGNORED
-        observably (exit 0 + 'ignored scope_mismatch') and writes no row, rather than
-        mis-attributing it to the configured project's file."""
-        r = run_record(self.workspace, "--project", "amiga", "--thread-id", "thr_other",
-                       "--thread-project", "proj_nuvyr", "--provider", "pi",
-                       "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
+    def test_amiga_thread_records_only_amiga(self) -> None:
+        r = self._resolved("amiga", "thr_amiga", thread_project="proj_amiga", model="m1")
         self.assertEqual(0, r.returncode, r.stderr[:500])
-        self.assertIn("ignored scope_mismatch", r.stdout)
-        self.assertEqual([], rows_for(self.workspace, "amiga"), "no row written for an out-of-scope thread")
-
-        # An in-scope thread in the same run still records normally.
-        self._resolved("amiga", "thr_ok")
-        self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
-
-    def test_separate_projects_do_not_collide(self) -> None:
-        self._resolved("amiga", "thr_1", thread_project="proj_amiga", model="m1")
-        self._resolved("nuvyr_app", "thr_1", thread_project="proj_nuvyr", model="m2")
+        self.assertEqual(
+            [], rows_for(self.workspace, "nuvyr_app"),
+            "an Amiga thread must write into no other project's artifact",
+        )
         amiga = rows_for(self.workspace, "amiga")
-        nuvyr = rows_for(self.workspace, "nuvyr_app")
-        self.assertEqual(1, len(amiga))
-        self.assertEqual(1, len(nuvyr))
-        self.assertEqual("m1", amiga[0]["model"])
-        self.assertEqual("m2", nuvyr[0]["model"])
+        self.assertEqual(1, len(amiga), "the native Amiga id must resolve exactly to Amiga")
         self.assertEqual("amiga", amiga[0]["project_id"])
+
+    def test_non_amiga_thread_records_only_non_amiga(self) -> None:
+        r = self._resolved("nuvyr_app", "thr_nuvyr", thread_project="proj_nuvyr", model="m2")
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertEqual(
+            [], rows_for(self.workspace, "amiga"),
+            "a non-Amiga thread must write into no other project's artifact",
+        )
+        nuvyr = rows_for(self.workspace, "nuvyr_app")
+        self.assertEqual(1, len(nuvyr), "the native Nuvyr id must resolve exactly to Nuvyr")
         self.assertEqual("nuvyr_app", nuvyr[0]["project_id"])
+
+    def test_unknown_native_project_is_ignored_and_writes_nothing(self) -> None:
+        r = run_record(
+            self.workspace, "--thread-id", "thr_unknown", "--thread-project", "proj_outside",
+            "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested",
+        )
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("ignored unknown_thread_project", r.stdout)
+        self.assertIn("proj_outside", r.stdout)
+        self.assertEqual([], any_record_file(self.workspace), "an unknown native id writes nowhere")
+
+    def test_duplicate_native_project_refuses_and_names_collision(self) -> None:
+        write_projects(self.workspace, [
+            {"id": "amiga", "bb": {"project_id": "proj_shared"}},
+            {"id": "nuvyr_app", "bb": {"project_id": "proj_shared"}},
+        ])
+        r = self._resolved("amiga", "thr_collision", thread_project="proj_shared")
+        self.assertNotEqual(0, r.returncode, "duplicate native ownership must fail closed")
+        self.assertIn("collision", r.stderr)
+        self.assertIn("amiga", r.stderr)
+        self.assertIn("nuvyr_app", r.stderr)
+        self.assertEqual([], any_record_file(self.workspace), "a collided native id writes nowhere")
+
+    def test_malformed_bb_block_refuses_instead_of_dropping_candidate(self) -> None:
+        write_projects(self.workspace, [
+            {"id": "amiga", "bb": {"project_id": "proj_amiga"}},
+            {"id": "nuvyr_app", "bb": "proj_nuvyr"},
+        ])
+        r = self._resolved("amiga", "thr_malformed", thread_project="proj_amiga")
+        self.assertNotEqual(0, r.returncode, "a malformed bb block must fail closed")
+        self.assertIn("bb block is malformed", r.stderr)
+        self.assertIn("nuvyr_app", r.stderr)
+        self.assertEqual([], any_record_file(self.workspace), "malformed registry ownership writes nowhere")
+
+    def test_project_without_bb_block_remains_uncovered(self) -> None:
+        write_projects(self.workspace, [
+            {"id": "amiga", "bb": {"project_id": "proj_amiga"}},
+            {"id": "docs"},
+        ])
+        r = run_record(
+            self.workspace, "--thread-id", "thr_docs", "--thread-project", "docs",
+            "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested",
+        )
+        self.assertEqual(0, r.returncode, r.stderr[:500])
+        self.assertIn("ignored unknown_thread_project", r.stdout)
+        self.assertEqual([], any_record_file(self.workspace), "a project without a bb block stays uncovered")
 
     # -- GH-695 P2-C: cross-project rows refused on load -------------------
 
@@ -398,39 +441,6 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertTrue(path.exists(), path)
         self.assertTrue("project-state" in path.parts, f"under configured state root: {path}")
         self.assertNotIn("records", path.parts, "no second runtime-state root")
-
-    # -- F3: registry binding ----------------------------------------------
-
-    def test_unregistered_project_refused_and_creates_no_file(self) -> None:
-        """An unregistered project_id is refused (nonzero) before the lock or record,
-        reproducing neither the builtin tasks self-declared-project defect nor a
-        phantom authoritative file."""
-        for bad in ("amigaa", "../escape", "nonexistent", "AMIGA"):
-            with self.subTest(bad=bad):
-                r = run_record(self.workspace, "--project", bad, "--thread-id", "thr",
-                               "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
-                self.assertNotEqual(0, r.returncode, f"{bad!r} should be refused")
-        self.assertEqual([], any_record_file(self.workspace), "no record file created for a refused project")
-
-    # -- N2: exact identifiers, never normalized ---------------------------
-
-    def test_project_whitespace_variant_rejected_not_repaired(self) -> None:
-        """A whitespace-padded project id is NOT normalized to the registered id — an
-        exactness requirement cannot survive normalize-then-compare. Repairing operator
-        configuration silently is how a typo becomes authoritative state."""
-        for padded in (" amiga", "amiga ", " amiga ", "\tamiga"):
-            with self.subTest(padded=padded):
-                r = run_record(self.workspace, "--project", padded, "--thread-id", "thr",
-                               "--thread-project", "proj_amiga",
-                               "--model", "m", "--reasoning-level", "low", "--source", "client/turn/requested")
-                self.assertNotEqual(0, r.returncode, f"padded {padded!r} must be refused, not repaired")
-        # The exact, un-padded id still records normally (control direction).
-        r_ok = self._resolved("amiga", "thr_ok")
-        self.assertEqual(0, r_ok.returncode, r_ok.stderr[:500])
-        self.assertEqual(1, len(rows_for(self.workspace, "amiga")))
-        self.assertEqual([], any_record_file(self.workspace)[1:] if any_record_file(self.workspace) else [],
-                         "only the exact project's file exists")
 
     # -- F4: budget boundary ------------------------------------------------
 
@@ -512,11 +522,17 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         close-handler can log it — a silent refusal is indistinguishable from an event
         that never happened."""
         # registry refusal
-        r_reg = run_record(self.workspace, "--project", "amigaa", "--thread-id", "t",
+        write_projects(self.workspace, [{"id": "amiga", "bb": "proj_amiga"}])
+        r_reg = run_record(self.workspace, "--thread-id", "t",
                            "--thread-project", "proj_amiga", "--model", "m",
                            "--reasoning-level", "low", "--source", "client/turn/requested")
         self.assertNotEqual(0, r_reg.returncode)
         self.assertTrue(r_reg.stderr.strip(), "registry refusal must explain itself on stderr")
+
+        write_projects(self.workspace, [
+            {"id": "amiga", "bb": {"enabled": True, "project_id": "proj_amiga"}},
+            {"id": "nuvyr_app", "bb": {"enabled": True, "project_id": "proj_nuvyr"}},
+        ])
 
         # write-boundary refusal
         import record_executed_triples as mod  # type: ignore

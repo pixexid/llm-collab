@@ -62,19 +62,17 @@ Load-bearing design points (unchanged from the recorder's first slice):
 - **Records, never gates.** A ``thread.created`` handler is fire-and-forget with
   no veto hook (GH-630 probe). Enforcement stays at our CLI call sites.
 
-- **Exact identifiers, never normalized.** ``--project`` is matched against
-  ``projects.json`` RAW — whitespace variants are rejected, not repaired, because
-  repairing operator configuration silently is how a typo becomes authoritative
-  state (GH-630 review, N2). The registry ``bb.project_id`` scope is likewise
-  matched RAW: a padded ``bb.project_id`` is REJECTED, never stripped, so the
-  recorder and ``spawn_gate`` enforce the same scope (GH-695 P2-D).
+- **Exact identifiers, never normalized.** The thread's native bb project id is
+  matched RAW against every registered project's ``bb.project_id``. A padded
+  ``bb.project_id`` is REJECTED, never stripped, so the recorder and
+  ``spawn_gate`` enforce the same scope (GH-695 P2-D).
 
-- **Project-scoped, registry-bound, and every loaded row is scope-checked.**
-  ``--project`` must be an EXACT registered llm-collab project; the thread's bb
-  project (``--thread-project``) must exactly match that project's ``bb.project_id``
-  scope. Every row loaded from disk is validated against the requested
-  ``project_id`` and a cross-project row fails closed rather than being silently
-  reused (GH-695 P2-C).
+- **Project-scoped, registry-bound, and every loaded row is scope-checked.** The
+  thread's bb project (``--thread-project``) must exactly identify one registered
+  project carrying a ``bb`` block. No match is ignored observably; duplicate
+  matches and malformed candidate blocks fail closed. Every row loaded from disk
+  is validated against the resolved ``project_id`` and a cross-project row fails
+  closed rather than being silently reused (GH-695 P2-C).
 
 - **Fail closed, observably.** Every refusal exits nonzero with a message on
   stderr so the plugin's async close-handler can log it; a silent refusal is
@@ -102,7 +100,7 @@ from _python_runtime import require_python  # noqa: E402
 require_python()
 
 from _helpers import (  # noqa: E402
-    get_project,
+    load_projects,
     project_state_dir,
     utc_iso,
     write_file_durably,
@@ -228,6 +226,37 @@ def _resolve_native_bb_project(entry: object) -> str:
     return native
 
 
+def _resolve_thread_project(thread_project: str) -> str | None:
+    """Resolve one native bb project id to its sole registered owner.
+
+    Only projects carrying a ``bb`` block participate. A malformed participating
+    block is a registry defect, not an absent candidate, so it fails closed rather
+    than silently shrinking the ownership set.
+    """
+    matches: list[str] = []
+    for entry in load_projects():
+        if not isinstance(entry, dict):
+            raise SystemExit("registered project entry is not an object; refusing to record")
+        if "bb" not in entry:
+            continue
+        if not isinstance(entry["bb"], dict):
+            raise SystemExit(
+                f"project {entry.get('id')!r} bb block is malformed; refusing to record"
+            )
+        native = _resolve_native_bb_project(entry)
+        if thread_project == native:
+            matches.append(entry["id"])
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise SystemExit(
+            f"native bb project {thread_project!r} is claimed by registered projects "
+            f"{', '.join(repr(project_id) for project_id in matches)}; refusing to record collision"
+        )
+    return matches[0]
+
+
 def _load_existing(path: Path, project_id: str) -> list[dict]:
     """Read and parse the JSONL log under one cumulative budget. Fails closed.
 
@@ -350,9 +379,8 @@ def _build_unresolved_row(project_id: str, thread_id: str, provider: str | None,
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    result.add_argument("--project", required=True, help="registered llm-collab project_id (matched RAW; scopes the record file)")
     result.add_argument("--thread-id", required=True, help="BB thread id whose executed triple is recorded")
-    result.add_argument("--thread-project", required=True, help="bb projectId from the thread.created event DTO (scope match)")
+    result.add_argument("--thread-project", required=True, help="bb projectId from the thread.created event DTO (resolved RAW through projects.json)")
     result.add_argument("--provider", default=None, help="providerId from the thread.created event DTO (may be omitted)")
     result.add_argument("--model", help="executed model (resolved case)")
     result.add_argument("--reasoning-level", help="executed reasoning level (resolved case)")
@@ -375,7 +403,6 @@ def main(argv: list[str] | None = None) -> int:
     # N2: identifiers are matched RAW — a whitespace variant is rejected by the
     # registry/scope check, never repaired. `.strip()` is used ONLY to test for an
     # empty value; the raw value is what flows downstream.
-    project_id = _reject_nul("project", args.project)  # RAW; registry enforces exactness (N2)
     thread_id = _reject_nul("thread-id", args.thread_id)
     if not thread_id.strip():
         raise SystemExit("--thread-id is empty")
@@ -384,20 +411,16 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--thread-project is empty")
     provider = _reject_nul("provider", args.provider) if args.provider else None
 
-    # F3: exact registry match BEFORE the lock or any record. An unregistered id
-    # must not create a phantom authoritative file. Refusal is observable.
-    entry = get_project(project_id)
-    if entry is None:
-        raise SystemExit(f"project {project_id!r} is not registered in projects.json; refusing to record")
-
-    # F1 + GH-695 P2-D: the thread's bb project must exactly match this project's
-    # scope, matched RAW (a padded bb.project_id is rejected at resolution above).
-    # A thread for another llm-collab project is IGNORED observably (exit 0 +
-    # stdout marker) rather than mis-attributed. The plugin captures this marker
-    # and logs it (N3).
-    native = _resolve_native_bb_project(entry)
-    if thread_project != native:
-        print(f"ignored scope_mismatch {thread_id}: thread project {thread_project!r} != {project_id!r} scope {native!r}")
+    # S1 / I1: resolve the native thread project against every registered project
+    # carrying a bb block. The registry lookup lives only here; the plugin passes
+    # the native id unchanged. No match is ordinary and quiet (exit 0 + info
+    # marker); ambiguity or malformed candidate configuration fails closed.
+    project_id = _resolve_thread_project(thread_project)
+    if project_id is None:
+        print(
+            f"ignored unknown_thread_project {thread_id}: native bb project "
+            f"{thread_project!r} has no registered project with a bb block"
+        )
         return 0
 
     path = record_path(project_id)

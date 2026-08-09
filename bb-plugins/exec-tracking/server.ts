@@ -89,13 +89,12 @@ const SCRIPT_REL = path.join("bin", "record_executed_triples.py");
 const STDOUT_CAP = 4096;
 const STDERR_CAP = 4096;
 // Recorder stdout lines that are observable-but-not-failure: a correctly-ignored
-// scope mismatch or a correctly-conflicted re-resolution. Matched with
+// unknown native project or a correctly-conflicted re-resolution. Matched with
 // startsWith, so each marker includes its trailing space.
 const INFO_MARKERS = ["ignored ", "conflict "] as readonly string[];
 
 interface Settings {
   checkoutPath: string | undefined;
-  projectId: string;
   pythonPath: string | undefined;
 }
 
@@ -104,11 +103,6 @@ export default function plugin(bb: BbPluginApi): void {
     checkoutPath: {
       type: "string",
       label: "Absolute path to the llm-collab checkout (where bin/, projects.json, and collab.config.json live)",
-    },
-    projectId: {
-      type: "string",
-      label: "Registered llm-collab project_id this instance records (must exist in projects.json)",
-      default: "llm-collab",
     },
     pythonPath: {
       type: "string",
@@ -210,8 +204,6 @@ function spawnRecorder(
   const argv = [
     cfg.pythonPath as string,
     script,
-    "--project",
-    cfg.projectId,
     "--thread-id",
     threadId,
     "--thread-project",
@@ -228,7 +220,7 @@ function spawnRecorder(
     //
     // Both streams are piped and drained so a verbose process cannot fill the
     // pipe buffer and block. stdout is captured so an informational marker — a
-    // scope-mismatched thread that was correctly ignored (F1), or a conflicting
+    // unknown native project that was correctly ignored (S1), or a conflicting
     // re-resolution that was correctly rejected (N1) — is logged rather than
     // silently dropped, and a recorder failure (nonzero) is logged with stderr.
     // F5 / N3.
