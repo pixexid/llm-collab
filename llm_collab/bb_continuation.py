@@ -11,6 +11,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from typing import Mapping
+from collections.abc import Iterable
 
 from llm_collab.bb_client import (
     REFUSAL_AMBIGUOUS,
@@ -212,7 +213,15 @@ def _receipt_evidence(
     correlation_id: str,
     observed_at_utc: str,
     detail: Mapping[str, object],
+    dispatch_seq: int,
 ) -> dict[str, object]:
+    # GH-700: stamp the marker's dispatch_seq into the receipt evidence. It is
+    # part of the SHA-protected body, so it is tamper-evident, and the in-flight
+    # guard reads it back to ask "was THIS send delivered" -- the question
+    # attempt_id (a pure hash, re-materialized to attempt_index=0 every poll)
+    # could never answer.
+    extensions = dict(detail)
+    extensions["x_note_dispatch_seq"] = dispatch_seq
     return _state_evidence(
         workspace_id=str(context["workspace_id"]),
         project_id=str(context["project_id"]),
@@ -227,7 +236,7 @@ def _receipt_evidence(
         authority=BbLifecycleProvider().authority(),
         correlation_id=correlation_id,
         observed_at_utc=observed_at_utc,
-        native_detail=detail,
+        native_detail=extensions,
     )
 
 
@@ -244,6 +253,7 @@ def _append_receipt(
     correlation_id: str,
     observed_at_utc: str,
     detail: Mapping[str, object],
+    dispatch_seq: int,
     in_transaction: bool = False,
 ) -> tuple[str, bool]:
     evidence = _receipt_evidence(
@@ -256,6 +266,7 @@ def _append_receipt(
         correlation_id=correlation_id,
         observed_at_utc=observed_at_utc,
         detail=detail,
+        dispatch_seq=dispatch_seq,
     )
     kwargs = dict(
         store=store,
@@ -304,6 +315,7 @@ def _advance(
     ids: tuple[str, str, str] | None = None,
     native_request_id: str | None = None,
     native_turn_id: str | None = None,
+    dispatch_seq: int | None = None,
 ) -> dict[str, object]:
     message_id, delivery_id, attempt_id = ids or (None, None, None)
     return store.advance_bb_thread_observation(
@@ -324,6 +336,7 @@ def _advance(
         last_attempt_id=attempt_id,
         native_request_id=native_request_id,
         native_turn_id=native_turn_id,
+        dispatch_seq=dispatch_seq,
     )
 
 
@@ -342,6 +355,60 @@ def _ambiguous_without_retry(
         last_event_seq=int(row["last_event_seq"]),
         native_called=False,
     )
+
+
+def _receipt_dispatch_seq(selected: object) -> int | None:
+    """Read this send's dispatch_seq off a selected receipt's evidence.
+
+    Returns None for a missing receipt, a receipt with no evidence, or a
+    legacy receipt predating the column -- all of which therefore fail the
+    ``receipt_seq == marker_seq`` guard and strand rather than authorize a
+    retry (GH-700).
+    """
+    if not isinstance(selected, Mapping):
+        return None
+    evidence = selected.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return None
+    extensions = evidence.get("extensions")
+    if not isinstance(extensions, Mapping):
+        return None
+    value = extensions.get("x_note_dispatch_seq")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _receipt_proves_current_send_rejected(
+    delivery: Mapping[str, object], marker_seq: int
+) -> bool:
+    """Does any receipt on this delivery prove the marker's CURRENT send was
+    rejected before acceptance? (GH-700.)
+
+    Each pre-send marker bumps dispatch_seq by one and stamps it onto exactly
+    that send's receipt, so the receipt carrying ``marker_seq`` is the current
+    send's receipt. A ``rejected_before_acceptance`` receipt at that seq proves
+    the current send was refused BEFORE bb accepted it (nothing landed), which
+    authorizes a retry. An ambiguous receipt at that seq (may have landed) or no
+    receipt at that seq leaves the send unproven, so the guard strands.
+
+    Consults EVERY receipt rather than read_canonical_delivery's folded
+    selection: that fold's tie-break among equal-rank receipts is the
+    lexicographically smallest receipt_id, which has no relationship to which
+    send a receipt belongs to, so it can hide the marker-matching rejection
+    behind an earlier send's receipt and strand permanently.
+    """
+    receipts = delivery.get("receipts")
+    if not isinstance(receipts, Iterable):
+        return False
+    for receipt in receipts:
+        if not isinstance(receipt, Mapping):
+            continue
+        if receipt.get("state") != "rejected_before_acceptance":
+            continue
+        if _receipt_dispatch_seq(receipt) == marker_seq:
+            return True
+    return False
 
 
 def continue_bb_thread(
@@ -396,16 +463,38 @@ def continue_bb_thread(
         row.get("last_delivery_id"),
         row.get("last_attempt_id"),
     )
-    if row.get("dispatch_state") in {"queued", "ambiguous"} and all(
+    inflight = row.get("dispatch_state") in {"queued", "ambiguous"} and all(
         isinstance(value, str) for value in pending_ids
-    ):
+    )
+    marker_seq = int(row["dispatch_seq"])
+    # GH-700: consult EVERY receipt for the delivery, not
+    # read_canonical_delivery's folded selection. The fold's tie-break among
+    # equal-rank receipts is the lexicographically smallest receipt_id, which
+    # has no relationship to which send a receipt belongs to: two
+    # rejected_before_acceptance receipts (seq 1 and seq 2) fold to whichever has
+    # the smaller receipt_id, so with marker seq 2 the fold can return the seq-1
+    # receipt and strand permanently -- even though the seq-2 receipt right here
+    # proves the current send was rejected. A receipt carries the marker's
+    # dispatch_seq iff it is the current send's receipt; if that receipt is
+    # rejected_before_acceptance it authorizes a retry. An ambiguous receipt at
+    # that seq (may have landed), a legacy receipt (dispatch_seq None), or no
+    # receipt at that seq leaves the send unproven, so the guard strands --
+    # ambiguous-when-unproven is the deliberate trade: a strand is recoverable,
+    # a double-send is not.
+    proven_rejected = _receipt_proves_current_send_rejected(delivery, marker_seq)
+    if inflight and not proven_rejected:
         return _ambiguous_without_retry(
             ids=(message_id, delivery_id, attempt_id),
-            detail="a durable bb delivery has no receipt; reconcile before retry",
+            detail=(
+                "a durable bb delivery may already have landed; no receipt proves "
+                f"the current send (dispatch_seq {marker_seq}) was rejected before "
+                "acceptance; reconcile before retry"
+            ),
             row=row,
         )
 
     current_seq = int(row["last_event_seq"])
+    next_seq = marker_seq + 1
     _advance(
         store,
         context,
@@ -413,6 +502,7 @@ def continue_bb_thread(
         dispatch_state="queued",
         now=observed_at_utc,
         ids=(message_id, delivery_id, attempt_id),
+        dispatch_seq=next_seq,
     )
 
     try:
@@ -457,6 +547,7 @@ def continue_bb_thread(
                 correlation_id=_correlation(attempt_id, receipt_state),
                 observed_at_utc=observed_at_utc,
                 detail={"x_note_bb_refusal": native.reason, "x_note_detail": native.detail},
+                dispatch_seq=next_seq,
             )
         except Exception as error:
             try:
@@ -524,6 +615,7 @@ def continue_bb_thread(
             correlation_id=_correlation(attempt_id, "accepted"),
             observed_at_utc=observed_at_utc,
             detail={"x_note_bb_mode": native.mode},
+            dispatch_seq=next_seq,
         )
     except Exception as error:
         try:
@@ -758,6 +850,7 @@ def observe_bb_thread(
             correlation_id=_correlation(ids[2], event.event_id),
             observed_at_utc=observed_at_utc,
             detail=detail,
+            dispatch_seq=int(row["dispatch_seq"]),
             in_transaction=True,
         )
         next_row = store._advance_bb_thread_observation_locked(
