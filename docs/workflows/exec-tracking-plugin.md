@@ -11,11 +11,8 @@ AGENTS.md "this file is the source of truth" rule, and the 27-packet incident it
 cites). If a flag, a type-generation command, or an install step changes, it
 changes here once.
 
-The plugin records ONLY the thread's creation-time default execution options for
-BB threads on `thread.created` (source `client/thread/start`); turn-derived
-sources are refused observably and deferred to the `client/turn/requested` re-scope
-(GH-695 P1-B). Its design, project scope, and immutability semantics are documented
-in `bb-plugins/exec-tracking/README.md`. This doc owns only the operator procedure.
+Its design, project scope, and immutability semantics are documented in
+`bb-plugins/exec-tracking/README.md`. This doc owns only the operator procedure.
 
 ## Why a typecheck gate is required
 
@@ -38,17 +35,30 @@ cd bb-plugins/exec-tracking
 bb plugin types .          # (re)write types/bb-plugin-sdk.d.ts for this bb
 npm install                # install typescript + @types/node (devDependencies)
 npm run typecheck          # FAILS on an undeclared identifier before you install
-bb plugin install .        # operator step — only after typecheck is green
+bb plugin install --yes .  # operator step — only after typecheck is green
 bb plugin config exec-tracking set checkoutPath /path/to/llm-collab
 bb plugin config exec-tracking set pythonPath  /abs/path/to/python3.11   # server PATH is narrow
-bb plugin config exec-tracking set projectId   amiga                     # must be registered in projects.json
+bb plugin config exec-tracking set projectId   <project-id>             # must be registered in projects.json
 bb plugin reload exec-tracking
 ```
 
 `checkoutPath` and `pythonPath` must be set before any row is recorded; until then
 the handler logs a warning and records nothing (rather than guess a path).
 `projectId` must exist in that checkout's `projects.json` with a `bb.project_id`
-matching the bb project its threads spawn under.
+matching the bb project its threads spawn under. In that project's entry in the
+workspace `projects.json`, set the native bb project id (the `projectId` reported
+by bb itself, for example `bb thread show <thread-id> --json`), not the
+llm-collab registry slug:
+
+```json
+"bb": {
+  "project_id": "<native-bb-project-id>"
+}
+```
+
+Without this recorder-only block, the recorder falls back to the registry slug and
+every event is ignored as a scope mismatch. Leave out `enabled`: setting
+`enabled: true` also activates bootstrap, continuation, and the spawn gate.
 
 After an SDK bump, regenerate the declarations with `bb plugin types .` and
 re-run `npm run typecheck` before reinstalling.
