@@ -26,7 +26,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _watcher_liveness import FRESH, check_markers, foreign_fresh, handoff_file  # noqa: E402
+from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
 from llm_collab.bb_client import PINNED_BB_VERSION, subprocess_transport  # noqa: E402
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
@@ -122,43 +122,43 @@ def current_session_id(stdin) -> str | None:
 
 
 def watcher_checks(own_session_id: str | None) -> list[tuple[str, str, str]]:
-    """Watcher liveness markers; stale/absent/unreadable is FAIL, never a pass.
+    """Render the shared coverage verdict (evaluate_coverage); never re-derive it.
 
     A FRESH marker owned by a DIFFERENT session is the predecessor-watchers
     incident: the previous session's watchers were never stopped and are
     double-notifying this one. Loud, and it names the foreign session id.
     """
     results = []
-    report = check_markers(HOOK_PROJECT_ID)
-    foreign = {entry["name"] for entry in foreign_fresh(report, own_session_id)}
-    for entry in report:
-        check = f"watcher {entry['name']} [{HOOK_PROJECT_ID}]"
-        if entry["status"] == FRESH and entry["name"] in foreign:
+    verdicts = evaluate_coverage(check_markers(HOOK_PROJECT_ID), own_session_id)
+    for verdict in verdicts:
+        check = f"watcher {verdict['name']} [{HOOK_PROJECT_ID}]"
+        reason = verdict["reason"]
+        if reason == "covered":
+            results.append((
+                check,
+                PASS,
+                f"marker {verdict['age_seconds']}s old, owned by this session",
+            ))
+        elif reason == "foreign":
             results.append((
                 check,
                 FAIL,
-                f"fresh marker owned by FOREIGN session {entry['session_id']} — "
+                f"fresh marker owned by FOREIGN session {verdict['session_id']} — "
                 "a predecessor session's watcher is still running and "
                 "double-notifying this one; message that session to TaskStop "
                 "its watchers, or escalate to the operator",
             ))
-        elif entry["status"] == FRESH and own_session_id is None:
+        elif reason == "owner_unknown":
             results.append((
                 check,
                 UNKNOWN,
-                f"fresh marker owned by session {entry.get('session_id')}; "
+                f"fresh marker owned by session {verdict.get('session_id')}; "
                 "current session identity unavailable, ownership unverified",
             ))
-        elif entry["status"] == FRESH:
-            results.append((
-                check,
-                PASS,
-                f"marker {entry['age_seconds']}s old, owned by this session",
-            ))
-        elif entry["status"] == "unreadable":
-            results.append((check, UNKNOWN, f"marker unreadable: {entry.get('detail', '?')}"))
-        else:
-            results.append((check, FAIL, f"marker {entry['status']} ({entry['marker']})"))
+        elif reason == "unreadable":
+            results.append((check, UNKNOWN, f"marker unreadable: {verdict.get('detail', '?')}"))
+        else:  # stale / absent
+            results.append((check, FAIL, f"marker {reason} ({verdict['marker']})"))
     return results
 
 

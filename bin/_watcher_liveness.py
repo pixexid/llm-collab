@@ -58,6 +58,23 @@ STALE = "stale"
 ABSENT = "absent"
 UNREADABLE = "unreadable"
 
+# Verdict reasons from evaluate_coverage for FRESH markers. Non-fresh markers
+# keep their marker status as the reason.
+COVERED = "covered"
+FOREIGN = "foreign"
+OWNER_UNKNOWN = "owner_unknown"
+
+# Where the future-dated line is drawn. A watcher that atomically rewrites its
+# marker between our descriptor read and our clock sample yields a small
+# NEGATIVE age — a benign race against a live watcher, and classifying it
+# UNREADABLE made the future-dated guard report healthy coverage as broken
+# (intermittently, at every watcher cycle). A genuinely future timestamp — a
+# moved clock, a dead watcher whose marker carries a future mtime — is seconds
+# to minutes out, not milliseconds. 5s absorbs the race and filesystem mtime
+# granularity while extending the future-dated exposure by at most 5s against
+# the 600s staleness bound.
+FUTURE_TOLERANCE_SECONDS = 5.0
+
 
 def markers_dir(project_id):
     return project_state_dir(project_id) / "watchers"
@@ -156,8 +173,10 @@ def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_S
     stat'ed or whose content does not parse for THIS project is
     indistinguishable from a dead or foreign watcher and must not read as a
     pass. Freshness stays an mtime question; the content carries the owner.
+    When `now` is not supplied the clock is sampled AFTER each descriptor
+    read, so a concurrent rewrite reads as a small negative age (see
+    FUTURE_TOLERANCE_SECONDS), not as a far-future timestamp.
     """
-    moment = time.time() if now is None else now
     try:
         directory = markers_dir(project_id)
     except (Exception, SystemExit) as error:
@@ -200,16 +219,19 @@ def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_S
             report.append(entry)
             continue
         entry.update(owner)
+        moment = now if now is not None else time.time()
         age = moment - mtime
         entry["age_seconds"] = round(age, 1)
-        if age < 0:
-            # A future mtime is not "old", so STALE would be a lie about the
+        if age < -FUTURE_TOLERANCE_SECONDS:
+            # Genuinely future: not "old", so STALE would be a lie about the
             # direction of the evidence; it is inconsistent evidence, which is
             # what UNREADABLE reports. Never FRESH: a clock moved backward must
             # not keep a dead watcher satisfying the gate.
             entry["status"] = UNREADABLE
             entry["detail"] = f"marker mtime is {-age:.1f}s in the future"
         else:
+            # A small negative age (a concurrent rewrite landing between the
+            # descriptor read and the clock sample) is a LIVE watcher.
             entry["status"] = FRESH if age <= stale_after else STALE
         report.append(entry)
     return report
@@ -219,18 +241,42 @@ def not_fresh(report):
     return [entry for entry in report if entry["status"] != FRESH]
 
 
-def foreign_fresh(report, current_session_id):
-    """Fresh markers whose RECORDED owner is not the current session.
+def evaluate_coverage(report, current_session_id):
+    """The ONE watcher-coverage verdict: freshness AND ownership folded in.
 
-    A None/empty current_session_id means the caller could not establish its
-    own identity: ownership cannot be compared, so this returns nothing and
-    the caller must say the check did not run — an unknown-owner comparison
-    must never silently read as a pass (GH-726 I5).
+    Both consumers call this and neither re-derives any subset of the policy:
+    the SessionStart hook (bin/session_gate.py) renders it, the writing-spawn
+    gate (bin/bb_spawn.py) acts on it. Two consumers applying different
+    subsets of one signal is how a fresh-but-foreign marker passed the spawn
+    gate while the hook called the same marker foreign coverage.
+
+    A FRESH marker owned by a DIFFERENT session is not coverage — it is a
+    predecessor's watcher still firing into this session. A FRESH marker whose
+    owner cannot be compared because the caller has no session identity is not
+    coverage either: unknown is never a pass (GH-726 I5).
+
+    Each verdict: {name, acceptable, reason, ...marker fields}. reason is
+    COVERED / FOREIGN / OWNER_UNKNOWN for fresh markers, else the marker
+    status (stale / absent / unreadable).
     """
-    if not current_session_id:
-        return []
-    return [
-        entry
-        for entry in report
-        if entry["status"] == FRESH and entry.get("session_id") != current_session_id
-    ]
+    verdicts = []
+    for entry in report:
+        verdict = {"name": entry["name"], "acceptable": False}
+        for key in ("session_id", "age_seconds", "detail", "marker"):
+            if key in entry:
+                verdict[key] = entry[key]
+        if entry["status"] != FRESH:
+            verdict["reason"] = entry["status"]
+        elif current_session_id is None:
+            verdict["reason"] = OWNER_UNKNOWN
+        elif entry.get("session_id") == current_session_id:
+            verdict["acceptable"] = True
+            verdict["reason"] = COVERED
+        else:
+            verdict["reason"] = FOREIGN
+        verdicts.append(verdict)
+    return verdicts
+
+
+def uncovered(verdicts):
+    return [verdict for verdict in verdicts if not verdict["acceptable"]]

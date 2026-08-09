@@ -64,6 +64,45 @@ def read_regular_file_bounded_with_identity(path: Path, limit: int) -> tuple[byt
     return payload, identity.get("mtime")
 
 
+def read_regular_file_prefix(path: Path, limit: int) -> bytes:
+    """Read at most `limit` bytes from the START of a REGULAR file, without blocking.
+
+    Same open/fstat discipline as read_regular_file_bounded — non-blocking open,
+    regular-file requirement, read loop — for callers whose contract IS a
+    bounded prefix (a header-marker scan of a file legitimately larger than the
+    window). read_regular_file_bounded deliberately REFUSES a file larger than
+    its limit; that is correct for whole-content parses and wrong here. The
+    truncation is declared by the name, so this must never be used where the
+    whole content is parsed.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise UnreadableFile(f"cannot open {path}: {error}") from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnreadableFile(f"{path} is not a regular file; refusing to read it")
+        chunks: list[bytes] = []
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as error:
+        raise UnreadableFile(f"cannot read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if _ACTIVE_READ_BUDGET:
+        _ACTIVE_READ_BUDGET[-1].charge(len(raw), path)
+    return raw
+
+
 def read_regular_file_bounded(path: Path, limit: int, *, _identity_out: dict | None = None) -> bytes:
     """Read at most `limit` bytes from a REGULAR file, without ever blocking on open().
 

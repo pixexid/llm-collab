@@ -14,13 +14,19 @@ from _python_runtime import require_python
 
 require_python()
 
+from _activation_lease import runtime_id_from_env  # noqa: E402
 from _helpers import (  # noqa: E402
     get_project,
     project_state_dir,
     resolve_project_repo_path,
     write_file_durably,
 )
-from _watcher_liveness import WATCHER_NAMES, check_markers, not_fresh  # noqa: E402
+from _watcher_liveness import (  # noqa: E402
+    WATCHER_NAMES,
+    check_markers,
+    evaluate_coverage,
+    uncovered,
+)
 from llm_collab.bb_client import BbClient  # noqa: E402
 from llm_collab.bb_continuation import (  # noqa: E402
     BbContinuationRefused,
@@ -132,25 +138,33 @@ def main(argv: list[str] | None = None) -> int:
     watcher_gate: dict | None = None
     if args.assignment_kind == "writing":
         try:
-            marker_report = check_markers(args.collab_project)
+            # The shared verdict: freshness AND ownership, evaluated once in
+            # _watcher_liveness. This gate acts on it; it does not re-derive a
+            # subset. The session identity comes from the runtime environment
+            # (the same helper bootstrap uses); where it cannot be established,
+            # fresh markers are owner-unknown, and unknown is never a pass.
+            verdicts = evaluate_coverage(
+                check_markers(args.collab_project), runtime_id_from_env()
+            )
         except Exception as error:
             # A gate probe that breaks must not render as a pass.
-            marker_report = [
+            verdicts = [
                 {
                     "name": name,
-                    "status": "unreadable",
+                    "acceptable": False,
+                    "reason": "unreadable",
                     "detail": f"gate probe broke: {type(error).__name__}: {error}",
                 }
                 for name in WATCHER_NAMES
             ]
-        overdue = not_fresh(marker_report)
+        overdue = uncovered(verdicts)
         lines = "\n".join(
-            f"  {entry['name']}: {entry['status']}" for entry in overdue
+            f"  {verdict['name']}: {verdict['reason']}" for verdict in overdue
         )
         if overdue and not args.allow_stale_watchers:
             _emit(
                 "⚠️  REFUSED: watcher_markers_not_fresh — orchestrator watcher "
-                "markers are stale or absent:\n"
+                "markers are stale, absent, or foreign-owned:\n"
                 f"{lines}\n"
                 "  A writing spawn admitted now runs without live watcher "
                 "coverage. Pass --allow-stale-watchers to override; the "
@@ -159,15 +173,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if overdue:
             _emit(
-                "⚠️  WATCHER GATE OVERRIDE — proceeding with stale/absent watcher "
-                "markers (--allow-stale-watchers); this override is recorded in "
-                f"the assignment record:\n{lines}"
+                "⚠️  WATCHER GATE OVERRIDE — proceeding with stale/absent/foreign "
+                "watcher markers (--allow-stale-watchers); this override is "
+                f"recorded in the assignment record:\n{lines}"
             )
             watcher_gate = {
                 "override": "--allow-stale-watchers",
                 "not_fresh": [
-                    {"name": entry["name"], "status": entry["status"]}
-                    for entry in overdue
+                    {"name": verdict["name"], "status": verdict["reason"]}
+                    for verdict in overdue
                 ],
             }
 

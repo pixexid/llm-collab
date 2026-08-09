@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import project_issue_queue as issue_queue
 from _ax_trust import format_ax_status, probe_ax_trust
 from _activation_lease import runtime_id_from_env
+from _bounded_io import UnreadableFile, read_regular_file_prefix
 from _helpers import (
     InboxScanLimitExceeded,
     ROOT,
@@ -265,8 +266,9 @@ def queue_summaries() -> list[dict]:
 # The CONTRACT_VERSION marker lives in the leading HTML comment of AGENTS.md.
 # The shared bounded reader (bin/_bounded_io.py) deliberately REFUSES a file
 # larger than its limit, which fits markers but not a deliberate prefix scan of
-# a tracked file that is legitimately tens of KB — so the bound is local: read
-# only this many bytes, then apply the same 200-character window as before.
+# a tracked file that is legitimately tens of KB — so this uses its prefix
+# sibling: same non-blocking open and regular-file requirement (a FIFO here
+# must not stall every SessionStart), with truncation as the declared contract.
 CONTRACT_HEADER_READ_BYTES = 4096
 
 
@@ -279,9 +281,10 @@ def contract_version(path=None) -> str:
     """
     target = path if path is not None else ROOT / "AGENTS.md"
     try:
-        with open(target, "rb") as handle:
-            head = handle.read(CONTRACT_HEADER_READ_BYTES).decode("utf-8", errors="replace")[:200]
-    except OSError:
+        head = read_regular_file_prefix(target, CONTRACT_HEADER_READ_BYTES).decode(
+            "utf-8", errors="replace"
+        )[:200]
+    except (FileNotFoundError, UnreadableFile, OSError):
         return "unknown"
     marker = re.search(r"CONTRACT_VERSION:\s*(\S+)", head)
     return marker.group(1) if marker else "unknown"

@@ -79,8 +79,13 @@ WRITING_CLI_ARGS = ["--assignment-kind", "writing", *CLI_ARGS[2:]]
 WRITING_OVERRIDE_CLI_ARGS = [*WRITING_CLI_ARGS, "--allow-stale-watchers"]
 
 
-def marker_report(status: str) -> list[dict]:
-    return [{"name": name, "status": status} for name in WATCHER_NAMES]
+def marker_report(status: str, session_id: str | None = None) -> list[dict]:
+    report = [{"name": name, "status": status} for name in WATCHER_NAMES]
+    if session_id is not None:
+        for entry in report:
+            entry["session_id"] = session_id
+            entry["age_seconds"] = 5.0
+    return report
 
 
 class GitTransport:
@@ -623,6 +628,33 @@ class WatcherGateCliTest(unittest.TestCase):
         self.assertIn("watcher_markers_not_fresh", emit.call_args.args[0])
         self.assertEqual(1, exit_code)
 
+    def test_writing_spawn_with_foreign_owned_fresh_markers_refuses(self) -> None:
+        """The discriminating ownership test: fresh markers owned by a DIFFERENT
+        session are not coverage — a predecessor's watchers still firing — so
+        the writing spawn is refused before anything is spawned or recorded."""
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "check_markers",
+            return_value=marker_report("fresh", session_id="sess-predecessor"),
+        ), mock.patch.object(
+            bb_spawn, "runtime_id_from_env", return_value="sess-current"
+        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+            bb_spawn, "persist_assignment"
+        ) as persist, mock.patch.object(bb_spawn, "_emit") as emit:
+            exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        # Order matters: assert the never-reached calls BEFORE the exit code, so
+        # a regression that spawns and then fails some other way cannot trip the
+        # exit-code assertion while never measuring the refusal.
+        client.assert_not_called()
+        persist.assert_not_called()
+        rendered = emit.call_args.args[0]
+        self.assertIn("watcher_markers_not_fresh", rendered)
+        self.assertIn("foreign", rendered)
+        self.assertEqual(1, exit_code)
+
     def test_writing_spawn_override_proceeds_and_records_the_override(self) -> None:
         plan = planned(assignment_kind="writing")
         self.assertIsInstance(plan, SpawnPlan)
@@ -659,7 +691,10 @@ class WatcherGateCliTest(unittest.TestCase):
             with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
                 bb_spawn, "resolve_project_repo_path", return_value=REPO
             ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
-                bb_spawn, "check_markers", return_value=marker_report("fresh")
+                bb_spawn, "check_markers",
+                return_value=marker_report("fresh", session_id="sess-test"),
+            ), mock.patch.object(
+                bb_spawn, "runtime_id_from_env", return_value="sess-test"
             ), mock.patch.object(
                 bb_spawn, "project_state_dir", return_value=Path(temporary)
             ), mock.patch.object(
@@ -683,6 +718,8 @@ class WatcherGateCliTest(unittest.TestCase):
         ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
             bb_spawn, "check_markers"
         ) as markers, mock.patch.object(
+            bb_spawn, "evaluate_coverage"
+        ) as evaluate, mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
         ), mock.patch.object(
             bb_spawn, "_configured_client", return_value=self._running_client()
@@ -691,6 +728,7 @@ class WatcherGateCliTest(unittest.TestCase):
         ), mock.patch("builtins.print"):
             exit_code = bb_spawn.main(CLI_ARGS)
         markers.assert_not_called()
+        evaluate.assert_not_called()
         self.assertEqual(0, exit_code)
 
 

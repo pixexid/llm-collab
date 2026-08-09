@@ -21,6 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
+import _bounded_io  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import session_bootstrap  # noqa: E402
 import session_gate  # noqa: E402
@@ -29,7 +30,7 @@ from _watcher_liveness import (  # noqa: E402
     WATCHER_MARKER_STALE_AFTER_SECONDS,
     WATCHER_NAMES,
     check_markers,
-    foreign_fresh,
+    evaluate_coverage,
     not_fresh,
     write_marker,
 )
@@ -223,6 +224,18 @@ class MarkerFreshnessTest(unittest.TestCase):
         self.assertGreaterEqual(_watcher_liveness.MAX_MARKER_BYTES, 256)
         self.assertLessEqual(_watcher_liveness.MAX_MARKER_BYTES, 1_000_000)
 
+    def test_benign_concurrent_rewrite_negative_age_is_still_fresh(self) -> None:
+        """A watcher that atomically rewrites its marker between our descriptor
+        read and our clock sample yields a small negative age — a LIVE watcher,
+        not a future-dated marker. The line is FUTURE_TOLERANCE_SECONDS: beyond
+        it the timestamp is genuinely future and never fresh (the far-future
+        test above keeps that side)."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            self._write_markers(temporary, mtime=now + 2)
+            report = self._check(temporary, now=now)
+        self.assertEqual(["fresh"] * len(WATCHER_NAMES), [e["status"] for e in report])
+
     def test_unreadable_marker_is_unreadable_never_fresh(self) -> None:
         with mock.patch.object(
             _watcher_liveness,
@@ -237,7 +250,7 @@ class MarkerFreshnessTest(unittest.TestCase):
 
 
 class MarkerOwnershipTest(unittest.TestCase):
-    """foreign_fresh: fresh markers owned by a DIFFERENT session, and only those."""
+    """evaluate_coverage: the ONE coverage verdict — freshness AND ownership."""
 
     @staticmethod
     def _report(owner: str) -> list[dict]:
@@ -246,22 +259,30 @@ class MarkerOwnershipTest(unittest.TestCase):
             for name in WATCHER_NAMES
         ]
 
-    def test_same_session_owner_is_not_foreign(self) -> None:
-        self.assertEqual([], foreign_fresh(self._report("sess-mine"), "sess-mine"))
+    def test_same_session_owner_is_covered(self) -> None:
+        verdicts = evaluate_coverage(self._report("sess-mine"), "sess-mine")
+        self.assertEqual(["covered"] * len(WATCHER_NAMES), [v["reason"] for v in verdicts])
+        self.assertTrue(all(v["acceptable"] for v in verdicts))
 
-    def test_different_session_owner_is_foreign(self) -> None:
-        foreign = foreign_fresh(self._report("sess-predecessor"), "sess-current")
-        self.assertEqual(len(WATCHER_NAMES), len(foreign))
-        self.assertEqual({"sess-predecessor"}, {e["session_id"] for e in foreign})
+    def test_different_session_owner_is_foreign_and_not_coverage(self) -> None:
+        verdicts = evaluate_coverage(self._report("sess-predecessor"), "sess-current")
+        self.assertEqual(["foreign"] * len(WATCHER_NAMES), [v["reason"] for v in verdicts])
+        self.assertEqual([], [v for v in verdicts if v["acceptable"]])
+        self.assertEqual({"sess-predecessor"}, {v["session_id"] for v in verdicts})
 
-    def test_unknown_current_identity_compares_nothing(self) -> None:
-        self.assertEqual([], foreign_fresh(self._report("sess-predecessor"), None))
+    def test_unknown_current_identity_is_never_a_pass(self) -> None:
+        verdicts = evaluate_coverage(self._report("sess-predecessor"), None)
+        self.assertEqual(
+            ["owner_unknown"] * len(WATCHER_NAMES), [v["reason"] for v in verdicts]
+        )
+        self.assertEqual([], [v for v in verdicts if v["acceptable"]])
 
     def test_stale_foreign_marker_is_not_a_fresh_foreign_alert(self) -> None:
         report = self._report("sess-predecessor")
         for entry in report:
             entry["status"] = "stale"
-        self.assertEqual([], foreign_fresh(report, "sess-current"))
+        verdicts = evaluate_coverage(report, "sess-current")
+        self.assertEqual(["stale"] * len(WATCHER_NAMES), [v["reason"] for v in verdicts])
 
 
 class MarkerWriterTest(unittest.TestCase):
@@ -393,38 +414,29 @@ class ContractHeaderReadTest(unittest.TestCase):
             path.write_text(
                 "<!-- CONTRACT_VERSION: 99 -->\n" + "x" * 1_000_000, encoding="utf-8"
             )
-            read_sizes: list[int] = []
-            real_open = open
-
-            class _Spy:
-                def __init__(self, handle) -> None:
-                    self._handle = handle
-
-                def read(self, n=-1):
-                    read_sizes.append(n)
-                    return self._handle.read(n)
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *exc):
-                    self._handle.close()
-                    return False
-
-            with mock.patch.object(
-                session_bootstrap, "open", create=True, side_effect=None
-            ) as patched:
-                patched.side_effect = lambda *a, **k: _Spy(real_open(*a, **k))
+            # Spy at the raw read: every os.read issued for this parse must
+            # request a POSITIVE size at most the bound. An unbounded read
+            # requests the whole file (or -1 through a buffered wrapper) and
+            # fails here — the bound is asserted, not the presence of a read.
+            with mock.patch.object(_bounded_io.os, "read", wraps=os.read) as spy:
                 version = session_bootstrap.contract_version(path=path)
+        sizes = [call.args[1] for call in spy.call_args_list]
         self.assertEqual("99", version)
-        self.assertTrue(read_sizes)
-        # Every recorded read must be a POSITIVE size at most the bound: an
-        # unbounded read() records -1, which passes a bare `max <= bound`
-        # check. Assert the bound, not the presence of a read.
+        self.assertTrue(sizes)
         self.assertTrue(
-            all(0 < n <= session_bootstrap.CONTRACT_HEADER_READ_BYTES for n in read_sizes),
-            read_sizes,
+            all(0 < n <= session_bootstrap.CONTRACT_HEADER_READ_BYTES for n in sizes),
+            sizes,
         )
+
+    def test_contract_header_read_does_not_block_on_a_special_file(self) -> None:
+        """A FIFO at AGENTS.md must not stall every SessionStart: the prefix
+        reader opens non-blocking and refuses non-regular files. Completing at
+        all is the no-hang assertion."""
+        with tempfile.TemporaryDirectory() as temporary:
+            fifo = Path(temporary) / "AGENTS.md"
+            os.mkfifo(fifo)
+            version = session_bootstrap.contract_version(path=fifo)
+        self.assertEqual("unknown", version)
 
 
 class HookCommandTest(unittest.TestCase):
