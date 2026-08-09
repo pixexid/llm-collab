@@ -55,7 +55,7 @@ Each watcher also refreshes one externally visible marker on every completed
 cycle:
 
 ```text
-{project_state_root}/llm-collab/watchers/<name>.alive
+{project_state_root}/<COLLAB_PROJECT_ID>/watchers/<name>.alive
 ```
 
 `<name>` is `worker-lifecycle`, `pr-artifacts`, or `heartbeat`. A watcher that
@@ -73,21 +73,26 @@ bb_cmd=()
 while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<COLLAB_PROJECT_ID>") | (.bb.executable // ["bb"])[] | ., "\u0000"' projects.json)
 [ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
 D=$SD/bbstat2
-W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('llm-collab') / 'watchers')")
+W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('<COLLAB_PROJECT_ID>') / 'watchers')")
 mkdir -p "$D"
 mkdir -p "$W"
 CYC=0
 while true; do
   CYC=$((CYC+1)); [ $((CYC % 20)) -eq 0 ] && echo "WATCHER LIVE (worker-lifecycle) cycle $CYC"
-  "${bb_cmd[@]}" thread list --project <PROJECT_ID> --include-hidden --json 2>/dev/null \
+  if ! "${bb_cmd[@]}" thread list --project <PROJECT_ID> --include-hidden --json 2>/dev/null \
     | python3.11 -c "
 import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
+d=json.load(sys.stdin)            # a decode failure must raise, never exit 0
 rows = d if isinstance(d,list) else d.get('threads',[])
 for t in rows:
     print(t.get('id'), t.get('status'), (t.get('title') or '')[:40].replace(' ','_'))
-" > "$D/now.txt" 2>/dev/null
+" > "$D/now.txt.tmp" 2>/dev/null; then
+    echo "WORKER PROBE FAILED — bb thread list errored or returned malformed JSON. This cycle is NOT a lifecycle sample; a BB outage otherwise renders as a quiet repository."
+    rm -f "$D/now.txt.tmp"
+    sleep 45
+    continue
+  fi
+  mv "$D/now.txt.tmp" "$D/now.txt"
   while read -r id st title; do
     [ -z "$id" ] && continue
     prev=$(cat "$D/$id" 2>/dev/null)
@@ -114,13 +119,19 @@ bb_cmd=()
 while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<COLLAB_PROJECT_ID>") | (.bb.executable // ["bb"])[] | ., "\u0000"' projects.json)
 [ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
 D=$SD/prsig
-W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('llm-collab') / 'watchers')")
+W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('<COLLAB_PROJECT_ID>') / 'watchers')")
 mkdir -p "$D"
 mkdir -p "$W"
 CYC=0
 while true; do
   CYC=$((CYC+1)); [ $((CYC % 20)) -eq 0 ] && echo "WATCHER LIVE (pr-artifacts) cycle $CYC"
-  for pr in $(gh pr list --repo <OWNER/REPO> --state open --json number --jq '.[].number' 2>/dev/null); do
+  open_prs=$(gh pr list --repo <OWNER/REPO> --state open --json number --jq '.[].number' 2>/dev/null)
+  # Poll every armed PR, not just the open ones. A PR merged between two samples
+  # otherwise leaves the open list and is never polled again, so the connector's
+  # asynchronous post-merge re-pass produces no notification at all — the exact
+  # window in which real findings have landed against already-merged heads.
+  armed=$(ls "$D" 2>/dev/null)
+  for pr in $(printf '%s\n%s\n' "$open_prs" "$armed" | sort -un | grep -E '^[0-9]+$'); do
     sig=$(python3.11 bin/pr_watch.py --repo <OWNER/REPO> --pr "$pr" --once 2>/dev/null | tr -d ' \n')
     [ -z "$sig" ] && { echo "PR #$pr watcher got EMPTY signature — pr_watch.py may be failing, investigate"; continue; }
     if [ ! -f "$D/$pr" ]; then echo "$sig" > "$D/$pr"; echo "PR #$pr armed (baseline captured)"; continue; fi
@@ -128,12 +139,29 @@ while true; do
       echo "$sig" > "$D/$pr"
       echo "PR #$pr TIMELINE CHANGED — inspect the complete reviewed artifact set at head $(gh pr view "$pr" --repo <OWNER/REPO> --json headRefOid --jq .headRefOid 2>/dev/null | cut -c1-7)"
     fi
+    # Keep polling a terminal PR through the post-merge re-pass window before
+    # retiring it. One extra poll is not enough: on PR #719 the connector's
+    # post-merge pass arrived about 11 minutes after the merge, and it carried a
+    # real finding. 30 cycles at 45s is roughly 22 minutes, which covers that
+    # observation with margin; widen it if a later re-pass lands outside.
+    case "$sig" in *'"merged":true'*|*'"state":"closed"'*)
+      left=$(cat "$D/$pr.terminal" 2>/dev/null || echo 30)
+      left=$((left - 1))
+      if [ "$left" -le 0 ]; then
+        rm -f "$D/$pr" "$D/$pr.terminal"
+        echo "PR #$pr retired from the watch set after the post-merge window"
+      else
+        echo "$left" > "$D/$pr.terminal"
+      fi ;;
+    esac
   done
   touch "$W/pr-artifacts.alive"
   sleep 45
 done
 ```
 
+A merged or closed PR stays in the watch set through the post-merge re-pass
+window, then retires.
 An empty signature is an alert, never a quiet continuation. `pr_watch.py --once`
 covers the timeline, reactions, and check runs; in particular, a clean connector
 pass can be reaction-only. The meaning of connector artifacts and the required
@@ -151,7 +179,7 @@ cd <REPO>
 bb_cmd=()
 while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<COLLAB_PROJECT_ID>") | (.bb.executable // ["bb"])[] | ., "\u0000"' projects.json)
 [ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
-W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('llm-collab') / 'watchers')")
+W=$(python3.11 -c "import sys; sys.path.insert(0,'bin'); from _helpers import project_state_dir; print(project_state_dir('<COLLAB_PROJECT_ID>') / 'watchers')")
 mkdir -p "$W"
 CYC=0
 while true; do
@@ -164,15 +192,15 @@ while true; do
     echo "BB VERSION MISMATCH pin=$pin installed=$cur — bin/bb_spawn.py will refuse bb_version_mismatch; run the bb-update procedure before starting lanes"
   fi
   prs=$(gh pr list --repo <OWNER/REPO> --state open --json number --jq 'length' 2>/dev/null || echo "?")
-  lanes=$("${bb_cmd[@]}" thread list --project <PROJECT_ID> --json 2>/dev/null | python3.11 -c "
+  workers=$("${bb_cmd[@]}" thread list --project <PROJECT_ID> --json 2>/dev/null | python3.11 -c "
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: print('?'); raise SystemExit
 rows=d if isinstance(d,list) else d.get('threads',[])
-print(len([t for t in rows if t.get('status')=='active']))
+print(len([t for t in rows if t.get('status') in ('active','starting') and not t.get('archivedAt')]))
 " 2>/dev/null || echo "?")
   issues=$(gh issue list --repo <OWNER/REPO> --state open --json number --jq 'length' 2>/dev/null || echo "?")
-  echo "HEARTBEAT openPRs=$prs activeLanes=$lanes openIssues=$issues — if lanes<2 AND a startable issue exists (not blocked-on-external, not parked-by-decision, not an epic) start it; a drained queue is a status, not an order; never invent work"
+  echo "HEARTBEAT openPRs=$prs liveWorkers=$workers openIssues=$issues — NEITHER number is the writing-lane count; derive that from your own lane list. If writing lanes<2 AND a startable issue exists (not blocked-on-external, not parked-by-decision, not an epic) start it; a drained queue is a status, not an order; never invent work"
   touch "$W/heartbeat.alive"
   sleep 600
 done
@@ -181,6 +209,17 @@ done
 This states a comparison rule, not a current version. `PINNED_BB_VERSION` in
 `llm_collab/bb_client.py` is pin authority; `settings version --json` is the
 live installed-value check.
+
+**The heartbeat reports inputs, and deliberately does not compute the lane
+count.** A BB thread's status is not a lane: an idle writer waiting on review
+still holds its lane, and an active read-only probe holds none. No store in this
+repository records writing-lane occupancy, so a number derived here would be a
+plausible wrong answer — worse than none, because it would be acted on. The
+orchestrator holds the lane list and applies the cap; the definition and the
+exemptions live in
+[`Lane WIP limit`](task-intake-and-delegation.md#lane-wip-limit). If a
+lane-occupancy store is ever added, this line should read it rather than
+re-deriving it.
 
 ## Verification traps
 
