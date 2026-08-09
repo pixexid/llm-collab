@@ -34,6 +34,13 @@ HEARTBEAT_ENUM_CAP = 1000
 TERMINAL_CYCLES = 30
 MAX_STATE_BYTES = 1 << 20
 
+# Heartbeat reports remain 10 minutes apart, but liveness refreshes every 60s
+# between successful reports. That is 10x inside the external 600s staleness
+# bound and leaves 540s for the next synchronous check; a check wedged longer
+# than that correctly lets the marker go stale rather than masking the wedge.
+HEARTBEAT_REPORT_SECONDS = 600.0
+HEARTBEAT_MARKER_REFRESH_SECONDS = 60.0
+
 
 class ProbeError(RuntimeError):
     """A watcher check did not produce one complete sample."""
@@ -355,6 +362,25 @@ def save_state(path: Path, state: dict) -> None:
     write_file_durably(path, json.dumps(state, sort_keys=True) + "\n")
 
 
+def heartbeat_wait(
+    project_id: str,
+    session_id: str,
+    completed: bool,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Wait to the next report, refreshing only after a successful cycle."""
+    if not completed:
+        sleep(HEARTBEAT_REPORT_SECONDS)
+        return
+    remaining = HEARTBEAT_REPORT_SECONDS
+    while remaining > HEARTBEAT_MARKER_REFRESH_SECONDS:
+        sleep(HEARTBEAT_MARKER_REFRESH_SECONDS)
+        _watcher_liveness.write_marker(project_id, "heartbeat", session_id)
+        remaining -= HEARTBEAT_MARKER_REFRESH_SECONDS
+    sleep(remaining)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=_watcher_liveness.WATCHER_NAMES)
@@ -408,7 +434,7 @@ def main() -> int:
         elif args.mode == "pr-artifacts":
             time.sleep(45)
         else:
-            time.sleep(600)
+            heartbeat_wait(args.project, args.session, completed)
 
 
 if __name__ == "__main__":

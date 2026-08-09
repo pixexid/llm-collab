@@ -273,6 +273,37 @@ class PrTerminalWindowTest(unittest.TestCase):
 
 
 class MarkerRefreshTest(unittest.TestCase):
+    def test_heartbeat_marker_stays_fresh_during_nontrivial_next_cycle_checks(self) -> None:
+        now = 0.0
+        last_refresh = 0.0  # the preceding completed cycle's run_once marker
+
+        def sleep(seconds):
+            nonlocal now
+            now += seconds
+
+        def write_marker(_project, _name, _session):
+            nonlocal last_refresh
+            last_refresh = now
+
+        with mock.patch.object(
+            watch._watcher_liveness, "write_marker", side_effect=write_marker
+        ):
+            watch.heartbeat_wait("project-a", "session-a", True, sleep=sleep)
+        sleep(90.0)  # the next cycle is alive but its four probes take real time
+        age = now - last_refresh
+        self.assertLessEqual(
+            age,
+            watch._watcher_liveness.WATCHER_MARKER_STALE_AFTER_SECONDS,
+            "heartbeat marker must stay fresh during non-trivial cycle checks",
+        )
+
+    def test_failed_heartbeat_cycle_does_not_refresh_during_report_wait(self) -> None:
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
+            watch.heartbeat_wait(
+                "project-a", "session-a", False, sleep=lambda _seconds: None
+            )
+        writer.assert_not_called()
+
     def test_every_watcher_refreshes_only_after_a_completed_cycle(self) -> None:
         for name in watch._watcher_liveness.WATCHER_NAMES:
             with self.subTest(name=name), mock.patch.object(
