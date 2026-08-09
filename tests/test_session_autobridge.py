@@ -4832,15 +4832,35 @@ class SessionAutobridgeTest(unittest.TestCase):
             for payload in ("{", "[]"):
                 with self.subTest(payload=payload):
                     write(path, payload)
-                    with self.assertRaises(FileNotFoundError):
+                    with self.assertRaises(session_autobridge_lib.BindingUnreadable):
                         session_autobridge_lib.load_binding(
                             "amiga", "CHAT-BAD-BINDING", "claude"
                         )
             path.write_bytes(b"\xff")
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaises(session_autobridge_lib.BindingUnreadable):
                 session_autobridge_lib.load_binding(
                     "amiga", "CHAT-BAD-BINDING", "claude"
                 )
+
+    def test_load_binding_absent_still_raises_file_not_found(self):
+        """The genuinely-absent path is unchanged: a MISSING binding means "no binding",
+        not "unreadable binding". A fix that collapsed both into BindingUnreadable would
+        pass the corrupt cases above and fail here."""
+        root = self.make_workspace()
+        binding_root = root / "State" / "session_autobridge" / "bindings"
+        with patch.object(session_autobridge_lib, "BINDINGS_DIR", binding_root):
+            with self.assertRaises(FileNotFoundError):
+                session_autobridge_lib.load_binding(
+                    "amiga", "CHAT-NO-BINDING", "claude"
+                )
+            pair, reason, _ = session_autobridge_lib.resolve_exact_dispatch_pair(
+                "amiga", "CHAT-NO-BINDING", "claude"
+            )
+            self.assertIsNone(pair)
+            self.assertEqual(
+                session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON, reason,
+                "absent must still resolve as no-binding, never as unreadable",
+            )
 
     def test_inbox_publish_refuses_heuristic_runtime_discovery_for_all_families(self):
         root = self.make_workspace()
@@ -6011,9 +6031,14 @@ class SessionAutobridgeTest(unittest.TestCase):
         result_payload = json.loads(deliver_result.stdout.split("\n\n", 1)[0])
         self.assertTrue(result_payload["delivery_refused"])
         self.assertFalse(result_payload["durable_write"])
-        self.assertEqual(
+        self.assertIn(
+            session_autobridge_lib.BINDING_UNREADABLE_REASON,
+            result_payload["autobridge_refusal_reason"],
+        )
+        self.assertNotIn(
             session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
             result_payload["autobridge_refusal_reason"],
+            "a corrupt binding EXISTS; it must not be reported as absent",
         )
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
 
@@ -6762,6 +6787,128 @@ class SessionAutobridgeTest(unittest.TestCase):
         self.assertFalse(payload["durable_write"])
         self.assertIn("REFUSED before durable write", done.stderr)
         self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
+
+    def corrupt_recipient_binding(self, root, content, chat_id="CHAT-SCOPE1", agent="claude"):
+        path = (root / "State" / "session_autobridge" / "bindings" / "amiga" / chat_id
+                / f"{agent}.json")
+        self.assertTrue(path.exists(), f"expected a binding at {path}")
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_a_corrupt_recipient_binding_refuses_before_write(self):
+        """Corrupt JSON and a non-dict payload are the same terminal state as oversized:
+        the record EXISTS and was refused, so the reason says binding_unreadable and the
+        write never happens."""
+        for content in ("{", "[]"):
+            with self.subTest(content=content):
+                root, chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
+                self.corrupt_recipient_binding(root, content)
+                payload, stderr = self.deliver_with_scope(
+                    root,
+                    "CHAT-SCOPE1",
+                    repo_targets="llm-collab",
+                    expected_returncode=2,
+                )
+                self.assertFalse(payload["autobridge_ready"])
+                self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+                self.assertNotIn("exact_binding_required", payload["autobridge_refusal_reason"],
+                                 "a corrupt binding EXISTS; it must not be reported as absent")
+                self.assertTrue(payload["binding_unreadable_blocker"],
+                                "the blocker flag is the only machine-readable signal in this state")
+                self.assertTrue(payload["delivery_refused"])
+                self.assertFalse(payload["durable_write"])
+                self.assertFalse(list(chat_dir.glob("*_to-claude_*.md")))
+                self.assertNotIn("Traceback", stderr)
+
+    def test_a_corrupt_recipient_binding_wakes_nobody(self):
+        """The CONSEQUENCE this issue exists for: a present-but-corrupt binding is
+        terminal, so the AX doorbell stays CLOSED even though the recipient declares an
+        ax_app. A test of only the exception type would not show the wake lane closed."""
+        for content in ("{", "[]"):
+            with self.subTest(content=content):
+                root, _chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude")
+                self.corrupt_recipient_binding(root, content)
+                payload, _stderr = self.deliver_with_scope(
+                    root,
+                    "CHAT-SCOPE1",
+                    repo_targets="llm-collab",
+                    expected_returncode=2,
+                )
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(payload.get(flag),
+                                     f"{flag} must be false: an unreadable binding is terminal, "
+                                     "and the wake fallback must not open behind it")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(payload.get(prompt))
+
+    def test_a_corrupt_codex_binding_closes_the_ax_doorbell(self):
+        """The consequence on the exact lane the issue names: the recipient is AX-ELIGIBLE
+        (Codex), so under the old FileNotFoundError collapse this case resolved as
+        exact_binding_required and ax_doorbell_required came back True -- the doorbell
+        OPENED behind an unreadable authoritative binding. The claude-recipient variant
+        above cannot see that: a non-Codex recipient never gets the doorbell either way."""
+        for content in ("{", "[]"):
+            with self.subTest(content=content):
+                root, chat_dir = self.scoped_subscriber_workspace(
+                    subscriber_repo_targets=["llm-collab"], subscriber_agent="codex",
+                    subscriber_ax_app="Codex", runtime_family="codex_app")
+                self.add_agent(root, {
+                    "id": "claude",
+                    "display_name": "Claude",
+                    "activation": {"type": "cli_session", "watcher_enabled": True},
+                })
+                self.corrupt_recipient_binding(root, content, agent="codex")
+                done = subprocess.run(
+                    [
+                        sys.executable, str(DELIVER_SCRIPT),
+                        "--chat", "CHAT-SCOPE1",
+                        "--from", "claude",
+                        "--to", "codex",
+                        "--project", "amiga",
+                        "--title", "Corrupt codex binding probe",
+                        "--repo-targets", "llm-collab",
+                        "--body-file", "-",
+                    ],
+                    cwd=root, text=True, input="doorbell must stay closed",
+                    capture_output=True, check=False,
+                )
+                self.assertEqual(2, done.returncode,
+                                 f"stdout:\n{done.stdout[-1500:]}\nstderr:\n{done.stderr[-1500:]}")
+                payload = json.loads(done.stdout.split("\n\n", 1)[0])
+                self.assertIn("binding_unreadable", payload["autobridge_refusal_reason"])
+                self.assertTrue(payload["binding_unreadable_blocker"])
+                for flag in self.WAKE_FLAGS:
+                    self.assertFalse(payload.get(flag),
+                                     f"{flag} must be false: an unreadable binding is terminal "
+                                     "even for an AX-eligible recipient")
+                for prompt in self.WAKE_PROMPTS:
+                    self.assertIsNone(payload.get(prompt))
+                self.assertFalse(payload["durable_write"])
+                self.assertFalse(list(chat_dir.glob("*_to-codex_*.md")))
+
+    def test_an_ABSENT_recipient_binding_still_reports_no_binding(self):
+        """The other direction, through the same deliver path: a genuinely MISSING binding
+        still means no-binding -- exact_binding_required, never binding_unreadable, and no
+        blocker flag. A fix that treated absent as unreadable would pass the corrupt tests
+        above and fail this one. The doorbell-open consequence for an absent AX-eligible
+        binding is covered by test_external_workers_can_still_ring_codex_for_amiga_and_non_amiga."""
+        root, _chat_dir = self.scoped_subscriber_workspace(
+            subscriber_repo_targets=["llm-collab"], subscriber_ax_app="Claude",
+            register_session=False)
+        payload, _stderr = self.deliver_with_scope(
+            root,
+            "CHAT-SCOPE1",
+            repo_targets="llm-collab",
+            expected_returncode=2,
+        )
+        self.assertFalse(payload["autobridge_ready"])
+        self.assertEqual(session_autobridge_lib.EXACT_BINDING_REQUIRED_REASON,
+                         payload["autobridge_refusal_reason"])
+        self.assertNotIn("binding_unreadable", payload["autobridge_refusal_reason"])
+        self.assertFalse(payload["binding_unreadable_blocker"],
+                         "absent is not unreadable: the terminal blocker flag must stay false")
 
     def test_a_readable_binding_is_unaffected(self):
         """The control: this must still dispatch, or the tests above prove only that I broke it."""

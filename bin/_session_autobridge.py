@@ -255,11 +255,14 @@ def load_binding(project_id: str, chat_id: str, agent_id: str) -> dict:
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise FileNotFoundError(
+        # Present-but-corrupt is the same terminal state as oversized/permission-denied
+        # above: the record EXISTS and was refused. Collapsing it into FileNotFoundError
+        # reported it as absent and left the wake fallback open behind it.
+        raise BindingUnreadable(
             f"Unreadable binding: project={project_id} chat={chat_id} agent={agent_id}"
         ) from exc
     if not isinstance(payload, dict):
-        raise FileNotFoundError(
+        raise BindingUnreadable(
             f"Malformed binding: project={project_id} chat={chat_id} agent={agent_id}"
         )
     return payload
