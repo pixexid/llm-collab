@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
 import bb_spawn  # noqa: E402
+from _watcher_liveness import WATCHER_NAMES  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
     REFUSAL_IDENTITY_MISMATCH,
@@ -74,6 +75,12 @@ NEW_WORKTREE_CLI_ARGS = [
     "--new-environment", "worktree",
     *CLI_ARGS[CLI_ARGS.index("--environment") + 2 :],
 ]
+WRITING_CLI_ARGS = ["--assignment-kind", "writing", *CLI_ARGS[2:]]
+WRITING_OVERRIDE_CLI_ARGS = [*WRITING_CLI_ARGS, "--allow-stale-watchers"]
+
+
+def marker_report(status: str) -> list[dict]:
+    return [{"name": name, "status": status} for name in WATCHER_NAMES]
 
 
 class GitTransport:
@@ -560,6 +567,130 @@ class CliPhaseTest(unittest.TestCase):
         rendered = emit.call_args.args[0]
         self.assertIn(REFUSAL_TRANSPORT_FAILED, rendered)
         self.assertNotIn("DO NOT RETRY", rendered)
+
+
+class WatcherGateCliTest(unittest.TestCase):
+    """The delegation-time watcher gate (GH-722), both directions.
+
+    Writing spawns are gated on orchestrator watcher marker freshness;
+    read-only spawns are exempt. Warn-with-recorded-override, never a silent
+    pass and never a hard refusal without an override path.
+    """
+
+    def _running_client(self) -> mock.Mock:
+        client = mock.Mock()
+        client.spawn.return_value = BbThread(
+            "thr_worker1", "proj_llm_collab", "env_expected", "codex", "starting"
+        )
+        return client
+
+    def test_writing_spawn_with_absent_markers_refuses_before_any_spawn_call(self) -> None:
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "check_markers", return_value=marker_report("absent")
+        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+            bb_spawn, "persist_assignment"
+        ) as persist, mock.patch.object(bb_spawn, "_emit") as emit:
+            exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        # Order matters: assert the never-reached calls BEFORE the exit code. With
+        # the exit-code check first, a regression that spawns and then fails some
+        # other way trips that assertion instead, and the test reports a failure
+        # while never measuring the property it is named for (PR #719).
+        client.assert_not_called()
+        persist.assert_not_called()
+        rendered = emit.call_args.args[0]
+        self.assertIn("watcher_markers_not_fresh", rendered)
+        self.assertIn("--allow-stale-watchers", rendered)
+        self.assertEqual(1, exit_code)
+
+    def test_writing_spawn_with_a_broken_marker_probe_refuses(self) -> None:
+        """A gate probe that itself breaks must not render as a pass."""
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "check_markers", side_effect=OSError("state root gone")
+        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        client.assert_not_called()
+        self.assertIn("watcher_markers_not_fresh", emit.call_args.args[0])
+        self.assertEqual(1, exit_code)
+
+    def test_writing_spawn_override_proceeds_and_records_the_override(self) -> None:
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+                bb_spawn, "resolve_project_repo_path", return_value=REPO
+            ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+                bb_spawn, "check_markers", return_value=marker_report("stale")
+            ), mock.patch.object(
+                bb_spawn, "project_state_dir", return_value=Path(temporary)
+            ), mock.patch.object(
+                bb_spawn, "_configured_client", return_value=self._running_client()
+            ), mock.patch.object(bb_spawn, "_emit") as emit:
+                exit_code = bb_spawn.main(WRITING_OVERRIDE_CLI_ARGS)
+            record = json.loads(
+                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertIn("OVERRIDE", emit.call_args.args[0])
+        self.assertEqual(
+            "--allow-stale-watchers", record["watcher_gate"]["override"]
+        )
+        self.assertEqual(
+            [{"name": name, "status": "stale"} for name in WATCHER_NAMES],
+            record["watcher_gate"]["not_fresh"],
+        )
+        self.assertEqual(0, exit_code)
+
+    def test_writing_spawn_with_fresh_markers_passes_silently(self) -> None:
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+                bb_spawn, "resolve_project_repo_path", return_value=REPO
+            ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+                bb_spawn, "check_markers", return_value=marker_report("fresh")
+            ), mock.patch.object(
+                bb_spawn, "project_state_dir", return_value=Path(temporary)
+            ), mock.patch.object(
+                bb_spawn, "_configured_client", return_value=self._running_client()
+            ), mock.patch.object(bb_spawn, "_emit") as emit:
+                exit_code = bb_spawn.main(WRITING_OVERRIDE_CLI_ARGS[:-1])
+            record = json.loads(
+                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        emit.assert_not_called()
+        self.assertNotIn("watcher_gate", record)
+        self.assertEqual(0, exit_code)
+
+    def test_read_only_spawn_never_reads_the_markers(self) -> None:
+        plan = planned()
+        self.assertIsInstance(plan, SpawnPlan)
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "check_markers"
+        ) as markers, mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path("/state")
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=self._running_client()
+        ), mock.patch.object(
+            bb_spawn, "persist_assignment", return_value=Path("/state/thr_worker1.json")
+        ), mock.patch("builtins.print"):
+            exit_code = bb_spawn.main(CLI_ARGS)
+        markers.assert_not_called()
+        self.assertEqual(0, exit_code)
 
 
 if __name__ == "__main__":

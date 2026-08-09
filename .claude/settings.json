@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3.11 \"$CLAUDE_PROJECT_DIR/bin/session_gate.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

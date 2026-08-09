@@ -20,6 +20,7 @@ from _helpers import (  # noqa: E402
     resolve_project_repo_path,
     write_file_durably,
 )
+from _watcher_liveness import WATCHER_NAMES, check_markers, not_fresh  # noqa: E402
 from llm_collab.bb_client import BbClient  # noqa: E402
 from llm_collab.bb_continuation import (  # noqa: E402
     BbContinuationRefused,
@@ -48,6 +49,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--title")
     result.add_argument("--prompt", required=True)
     result.add_argument("--json", action="store_true")
+    result.add_argument(
+        "--allow-stale-watchers",
+        action="store_true",
+        help=(
+            "Admit a writing spawn despite stale or absent orchestrator watcher "
+            "markers. The override is recorded in the assignment record."
+        ),
+    )
     isolation = result.add_mutually_exclusive_group()
     isolation.add_argument("--new-environment", choices=("worktree",))
     isolation.add_argument("--environment")
@@ -113,6 +122,55 @@ def main(argv: list[str] | None = None) -> int:
         _emit(f"REFUSED: {plan.reason}: {plan.detail}")
         return 1
 
+    # Delegation-time watcher gate (GH-722): a WRITING spawn admitted while the
+    # orchestrator watchers are down runs without lifecycle/artifact/heartbeat
+    # coverage. Warn-with-recorded-override, not hard refusal: a gate with no
+    # override would deadlock the session that is still standing its watchers
+    # up, since standing them up requires writing spawns. Read-only spawns are
+    # exempt, mirroring the lane-cap exemption. Pre-execution: refusing here
+    # performs nothing, and the override path is recorded in the assignment.
+    watcher_gate: dict | None = None
+    if args.assignment_kind == "writing":
+        try:
+            marker_report = check_markers()
+        except Exception as error:
+            # A gate probe that breaks must not render as a pass.
+            marker_report = [
+                {
+                    "name": name,
+                    "status": "unreadable",
+                    "detail": f"gate probe broke: {type(error).__name__}: {error}",
+                }
+                for name in WATCHER_NAMES
+            ]
+        overdue = not_fresh(marker_report)
+        lines = "\n".join(
+            f"  {entry['name']}: {entry['status']}" for entry in overdue
+        )
+        if overdue and not args.allow_stale_watchers:
+            _emit(
+                "⚠️  REFUSED: watcher_markers_not_fresh — orchestrator watcher "
+                "markers are stale or absent:\n"
+                f"{lines}\n"
+                "  A writing spawn admitted now runs without live watcher "
+                "coverage. Pass --allow-stale-watchers to override; the "
+                "override is recorded in the assignment record."
+            )
+            return 1
+        if overdue:
+            _emit(
+                "⚠️  WATCHER GATE OVERRIDE — proceeding with stale/absent watcher "
+                "markers (--allow-stale-watchers); this override is recorded in "
+                f"the assignment record:\n{lines}"
+            )
+            watcher_gate = {
+                "override": "--allow-stale-watchers",
+                "not_fresh": [
+                    {"name": entry["name"], "status": entry["status"]}
+                    for entry in overdue
+                ],
+            }
+
     client = _configured_client(registry_entry)
     if isinstance(client, GateRefusal):
         _emit(f"REFUSED: {client.reason}: {client.detail}")
@@ -134,7 +192,8 @@ def main(argv: list[str] | None = None) -> int:
             title=plan.title,
         )
         record_path = persist_assignment(
-            plan, outcome, state_dir, write_durably=write_file_durably
+            plan, outcome, state_dir, write_durably=write_file_durably,
+            watcher_gate=watcher_gate,
         )
         print(
             json.dumps(
