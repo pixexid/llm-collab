@@ -4353,6 +4353,46 @@ def create_relay_prompt(session: dict, message: dict) -> dict[str, Any]:
     return {"prompt_path": str(prompt_path.relative_to(STATE_ROOT)), "prompt": prompt}
 
 
+# GH-692: a timed-out wake is ambiguous (the command may have landed), so once
+# the outcome is ambiguous the settlement (mark_message_processed) MUST persist
+# before anything can make the packet look retryable. But the settlement write
+# itself can fail (ENOSPC, EIO) -- and unlike the lease steps, no reordering
+# makes a durable write infallible, so "persist earlier" has no fixed point
+# (head 1 and head 2 of #690 each relocated the same window). Chosen answer:
+# option (a) REFUSE TO RE-RUN the command when the settlement cannot persist.
+# The refusal is held IN-PROCESS -- the one store that does NOT share the
+# session write's disk dependency, so the ENOSPC-class fault that fails the
+# settlement cannot also fail this record (the event log and ledger share the
+# same filesystem, so option (b) has no independent local store). A later poll
+# re-attempts ONLY the settlement write (never the command); on success the
+# refusal self-heals. Residual, named not hidden: the in-process refusal is
+# lost on watcher restart, so a restart re-executes the wake once before the
+# still-failing settlement re-triggers the refusal. Irreducible here -- a
+# durable marker (b) needs a separate device and an idempotent wake (c) is not
+# knowable for an arbitrary operator-configured command.
+_UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS: set[tuple[str, str]] = set()
+
+
+class AmbiguousWakeSettlementUnpersistable(RuntimeError):
+    """A timed-out wake's retry-suppressing settlement could not be persisted.
+
+    Raised AFTER the wake command already ran, so a later poll must not re-run
+    it. It is a normal Exception: the watcher's per-session guard catches it,
+    logs it loudly, and continues OTHER sessions. The affected session is
+    refused re-execution through the in-process marker above until the
+    settlement write succeeds again.
+    """
+
+    def __init__(self, session_id: str, message_path: str, cause: BaseException):
+        super().__init__(
+            f"ambiguous wake for {session_id} / {message_path} could not be "
+            f"persisted ({type(cause).__name__}: {cause}); refusing to re-run "
+            "the wake command"
+        )
+        self.session_id = session_id
+        self.message_path = message_path
+
+
 def dispatch_session(
     session_id: str,
     *,
@@ -4714,12 +4754,33 @@ def dispatch_session(
                 )
             else:
                 runtime_trigger = lambda: execute_runtime_trigger(session, message)
-            asserted, assertion_event, runtime_result = activation_fenced_mutation(
-                session,
-                message,
-                boundary="runtime_trigger",
-                mutation=runtime_trigger,
-            )
+            # GH-692: a prior poll timed out and the settlement write failed, so
+            # this session+message is held in the in-process refusal set. The
+            # wake may already have landed; re-attempt ONLY the settlement write
+            # (never the command) by short-circuiting the trigger with the same
+            # ambiguous surface the seam produces, then letting the shared
+            # settlement block below persist it and clear the refusal.
+            replaying_unpersistable_ambiguous_wake = (
+                session_id,
+                message["path"],
+            ) in _UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS
+            if replaying_unpersistable_ambiguous_wake:
+                asserted, assertion_event = True, None
+                runtime_result = {
+                    "returncode": 0,
+                    "terminal_status": "unobserved",
+                    "delivery_observed": False,
+                    "timed_out": True,
+                    "delivery_accepted": False,
+                    "ambiguous_settlement_replay": True,
+                }
+            else:
+                asserted, assertion_event, runtime_result = activation_fenced_mutation(
+                    session,
+                    message,
+                    boundary="runtime_trigger",
+                    mutation=runtime_trigger,
+                )
             if assertion_event is not None:
                 event.setdefault("activation_assertions", []).append(assertion_event)
             if not asserted:
@@ -4742,9 +4803,29 @@ def dispatch_session(
             # outcome retryable. The standard mark below is skipped for this
             # message because the settlement is already durable.
             if runtime_result.get("timed_out"):
-                mark_message_processed(
-                    session, message["path"], prepared=prepared_result
-                )
+                # GH-692: the settlement write itself can fail (ENOSPC, EIO). A
+                # durable write can always fail, so "persist earlier" has no
+                # fixed point -- do NOT move the write again. Instead, when this
+                # settlement cannot persist, record the refusal in-process (the
+                # one store independent of the failing disk write) and raise
+                # fatally: the watcher logs it and the next poll re-attempts ONLY
+                # the settlement (above), never the command. The write stays at
+                # the execution boundary; this adds handling for its failure.
+                try:
+                    mark_message_processed(
+                        session, message["path"], prepared=prepared_result
+                    )
+                except Exception as settlement_error:
+                    _UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS.add(
+                        (session_id, message["path"])
+                    )
+                    raise AmbiguousWakeSettlementUnpersistable(
+                        session_id, message["path"], settlement_error
+                    ) from settlement_error
+                if replaying_unpersistable_ambiguous_wake:
+                    _UNPERSISTABLE_AMBIGUOUS_WAKE_KEYS.discard(
+                        (session_id, message["path"])
+                    )
                 ambiguous_wake_settled_early = True
                 event["ambiguous_wake_settled_early"] = True
             if runtime_delivery_accepted(runtime_result):
