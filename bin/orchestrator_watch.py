@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import os
 import re
@@ -66,7 +65,7 @@ PR_HEAD_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 THREAD_ENUM_MAX_RESPONSE_CHARS = MAX_RESPONSE_CHARS
 TLS_CAPTURE_TIMEOUT_SECONDS = 5.0
 TLS_CAPTURE_MAX_RESPONSE_CHARS = 1 << 20
-TLS_RECORD_RETENTION_LIMIT = 200
+TLS_CAPTURE_MTIME_FLOOR_SECONDS = 30.0
 PROXY_ENV_KEYS = (
     "HTTPS_PROXY",
     "https_proxy",
@@ -76,9 +75,6 @@ PROXY_ENV_KEYS = (
     "all_proxy",
     "NO_PROXY",
     "no_proxy",
-)
-TLS_CERTIFICATE_PATTERN = re.compile(
-    r"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL
 )
 TLS_HOST_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.-])"
@@ -521,36 +517,19 @@ def endpoint_host_from_error(error: BaseException) -> str | None:
     return host.group(1) if host else None
 
 
-def dns64_synthesis_matches(
-    system_a: Sequence[str], system_aaaa: Sequence[str]
-) -> list[dict[str, str]]:
-    ipv4 = {str(ipaddress.IPv4Address(address)) for address in system_a}
-    matches = []
-    for address in system_aaaa:
-        ipv6 = ipaddress.IPv6Address(address)
-        embedded = str(ipaddress.IPv4Address(int(ipv6) & 0xFFFFFFFF))
-        if embedded in ipv4:
-            matches.append({"aaaa": str(ipv6), "embedded_ipv4": embedded})
-    return matches
+def proxy_environment_section() -> str:
+    lines = ["=== PROXY ENVIRONMENT ==="]
+    configured = [
+        f"{key}: {'empty' if os.environ[key] == '' else 'set (value redacted)'}"
+        for key in PROXY_ENV_KEYS
+        if key in os.environ
+    ]
+    lines.extend(configured or ["(none set)"])
+    return "\n".join(lines)
 
 
-def sanitized_proxy_environment() -> dict[str, str | None]:
-    values = {}
-    for key in PROXY_ENV_KEYS:
-        value = os.environ.get(key)
-        if value and key.lower() != "no_proxy":
-            value = re.sub(
-                r"^([a-z][a-z0-9+.-]*://)?[^/@\s]+@",
-                lambda match: f"{match.group(1) or ''}<redacted>@",
-                value,
-                flags=re.IGNORECASE,
-            )
-        values[key] = value
-    return values
-
-
-def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
-    """Fetch chain, route, proxy, and DNS evidence within one hard deadline."""
+def fetch_tls_evidence(host: str | None, timeout_seconds: float) -> str:
+    """Capture raw command output within one shared hard deadline."""
     deadline = time.monotonic() + timeout_seconds
 
     def remaining() -> float:
@@ -559,229 +538,118 @@ def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
             raise TimeoutError("TLS forensic capture timed out")
         return value
 
-    def run(executable: Sequence[str], argv: Sequence[str], cap: float):
+    def run(executable: Sequence[str], argv: Sequence[str]):
         # Despite its bb-named parameter, subprocess_transport is the shared
         # bounded-process primitive. This coupling gives every forensic probe
         # one launch deadline, bounded reads, and the existing child cleanup.
         return subprocess_transport(
             executable, max_response_chars=TLS_CAPTURE_MAX_RESPONSE_CHARS
-        )(argv, min(cap, remaining()))
+        )(argv, remaining())
 
-    dns_snapshot = {
-        "best_effort": True,
-        "captured": False,
-        "system_resolver": {"a": [], "aaaa": [], "error": None},
-        "public_resolver": {
-            "server": "1.1.1.1",
-            "a": [],
-            "aaaa": [],
-            "error": None,
-        },
-        "dns64_synthesis_signature_present": None,
-        "dns64_matches": [],
-        "error": None,
-    }
-    resolver_script = (
-        "import json,socket,sys; "
-        "print(json.dumps(sorted({row[4][0] for row in "
-        "socket.getaddrinfo(sys.argv[1],443,type=socket.SOCK_STREAM)})))"
-    )
-    try:
-        result = run((sys.executable,), ("-c", resolver_script, host), 0.6)
-        if result.exit_code != 0:
-            raise RuntimeError(result.stderr.strip() or f"exit {result.exit_code}")
-        addresses = json.loads(result.stdout)
-        if not isinstance(addresses, list) or any(
-            not isinstance(address, str) for address in addresses
-        ):
-            raise ValueError("system resolver returned an invalid address list")
-        for address in addresses:
-            parsed = ipaddress.ip_address(address)
-            dns_snapshot["system_resolver"]["a" if parsed.version == 4 else "aaaa"].append(
-                str(parsed)
-            )
-    except Exception as error:
-        dns_snapshot["system_resolver"]["error"] = str(error) or type(error).__name__
-
-    dig = shutil.which("dig")
-    public_errors = []
-    if dig is None:
-        public_errors.append("dig executable not found")
-    else:
-        for record_type, key in (("A", "a"), ("AAAA", "aaaa")):
-            try:
-                result = run(
-                    (dig,),
-                    (
-                        "@1.1.1.1",
-                        "+time=1",
-                        "+tries=1",
-                        "+short",
-                        host,
-                        record_type,
-                    ),
-                    0.6,
-                )
-                if result.exit_code != 0:
-                    raise RuntimeError(result.stderr.strip() or f"exit {result.exit_code}")
-                for token in result.stdout.split():
-                    try:
-                        parsed = ipaddress.ip_address(token.rstrip("."))
-                    except ValueError:
-                        continue
-                    if (record_type == "A" and parsed.version == 4) or (
-                        record_type == "AAAA" and parsed.version == 6
-                    ):
-                        dns_snapshot["public_resolver"][key].append(str(parsed))
-            except Exception as error:
-                public_errors.append(
-                    f"{record_type}: {str(error) or type(error).__name__}"
-                )
-    if public_errors:
-        dns_snapshot["public_resolver"]["error"] = "; ".join(public_errors)
-
-    system = dns_snapshot["system_resolver"]
-    public = dns_snapshot["public_resolver"]
-    if system["error"] is None:
-        matches = dns64_synthesis_matches(system["a"], system["aaaa"])
-        dns_snapshot["dns64_matches"] = matches
-        dns_snapshot["dns64_synthesis_signature_present"] = bool(matches)
-    dns_errors = [
-        error
-        for error in (system["error"], public["error"])
-        if isinstance(error, str) and error
-    ]
-    dns_snapshot["captured"] = not dns_errors
-    dns_snapshot["error"] = "; ".join(dns_errors) if dns_errors else None
-
-    proxy_environment = sanitized_proxy_environment()
-    proxy_configuration = {
-        "best_effort": True,
-        "captured": False,
-        "environment": proxy_environment,
-        "explicit_environment_proxy_present": any(
-            value
-            for key, value in proxy_environment.items()
-            if key.lower() != "no_proxy"
-        ),
-        "system": {"command": None, "output": "", "error": None},
-    }
-    scutil = shutil.which("scutil")
-    if scutil is None:
-        proxy_configuration["system"]["error"] = "scutil executable not found"
-    else:
-        proxy_configuration["system"]["command"] = [scutil, "--proxy"]
+    def command_section(
+        label: str,
+        display_command: str,
+        executable: Sequence[str] | None,
+        argv: Sequence[str] = (),
+        *,
+        unavailable: str | None = None,
+    ) -> str:
+        lines = [f"=== {label} ===", f"$ {display_command}"]
+        if unavailable is not None:
+            lines.append(f"FAILED: {unavailable}")
+            return "\n".join(lines)
         try:
-            result = run((scutil,), ("--proxy",), 0.4)
-            output = result.stdout.strip() or result.stderr.strip()
-            proxy_configuration["system"].update(
-                output=output,
-                error=None if result.exit_code == 0 else f"exit {result.exit_code}",
-            )
-            proxy_configuration["captured"] = result.exit_code == 0
+            assert executable is not None
+            result = run(executable, argv)
+            output = result.stdout + result.stderr
+            if output:
+                lines.append(output.rstrip("\n"))
+            if result.exit_code != 0:
+                lines.append(f"FAILED: exit {result.exit_code}")
+            elif not output:
+                lines.append("(command returned no output)")
         except Exception as error:
-            proxy_configuration["system"]["error"] = (
-                str(error) or type(error).__name__
-            )
+            lines.append(f"FAILED: {str(error) or type(error).__name__}")
+        return "\n".join(lines)
 
-    route_context = {
-        "best_effort": True,
-        "captured": False,
-        "command": None,
-        "output": "",
-        "error": None,
-    }
-    route = shutil.which("route")
-    ip = shutil.which("ip") if route is None else None
-    route_command = (
-        (route, "-n", "get", host)
-        if route is not None
-        else (ip, "route", "get", host)
-        if ip is not None
-        else ()
-    )
-    if not route_command:
-        route_context["error"] = "no route or ip executable found"
+    if host is None:
+        missing = "endpoint host could not be determined"
+        openssl_section = command_section("OPENSSL S_CLIENT", "not run", None, unavailable=missing)
+        system_dns_section = command_section(
+            "SYSTEM DNS (A AND AAAA)", "not run", None, unavailable=missing
+        )
+        public_dns_section = command_section(
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)", "not run", None, unavailable=missing
+        )
     else:
-        route_context["command"] = list(route_command)
-        try:
-            result = run((route_command[0],), route_command[1:], 0.4)
-            output = result.stdout.strip() or result.stderr.strip()
-            route_context.update(
-                captured=bool(output),
-                output=output,
-                error=None if result.exit_code == 0 else f"exit {result.exit_code}",
-            )
-        except Exception as error:
-            route_context["error"] = str(error) or type(error).__name__
-
-    chain: list[str] = []
-    chain_error: str | None = None
-    target = f"[{host}]:443" if ":" in host else f"{host}:443"
-    openssl_command = [
-        "openssl",
-        "s_client",
-        "-connect",
-        target,
-        "-servername",
-        host,
-        "-showcerts",
-    ]
-    openssl_result = {"command": openssl_command, "exit_code": None, "stderr": ""}
-    openssl = shutil.which("openssl")
-    if openssl is None:
-        chain_error = "openssl executable not found"
-    else:
-        shell_command = (
+        target = f"[{host}]:443" if ":" in host else f"{host}:443"
+        openssl = shutil.which("openssl")
+        openssl_display = (
+            f"openssl s_client -connect {target} -servername {host} "
+            "-showcerts </dev/null"
+        )
+        openssl_shell = (
             "/bin/sh",
             "-c",
             'exec "$1" s_client -connect "$2" -servername "$3" '
             "-showcerts </dev/null",
             "tls-capture",
-            openssl,
+            openssl or "openssl",
             target,
             host,
         )
-        try:
-            result = run(shell_command, (), remaining())
-            openssl_result.update(exit_code=result.exit_code, stderr=result.stderr)
-            chain = TLS_CERTIFICATE_PATTERN.findall(result.stdout)
-            if not chain:
-                chain_error = (
-                    result.stderr.strip()
-                    or f"openssl exited {result.exit_code} without a presented certificate"
-                )
-        except Exception as error:
-            chain_error = f"openssl s_client failed: {str(error) or type(error).__name__}"
+        openssl_section = command_section(
+            "OPENSSL S_CLIENT",
+            openssl_display,
+            openssl_shell if openssl is not None else None,
+            unavailable=None if openssl is not None else "openssl executable not found",
+        )
 
-    return {
-        "presented_certificate_chain_pem": chain,
-        "chain_error": chain_error,
-        "openssl": openssl_result,
-        "network_route_context": route_context,
-        "proxy_configuration": proxy_configuration,
-        "route_fidelity": {
-            "equivalent_to_failing_client": False,
-            "reason": (
-                "The OpenSSL probe used an independent direct connection; equivalence "
-                "to the failing client's route was not established."
-            ),
-        },
-        "dns_resolution_snapshot": dns_snapshot,
-    }
+        dig = shutil.which("dig")
+        dig_shell = (
+            '"$1" +time=1 +tries=1 "$2" A; '
+            '"$1" +time=1 +tries=1 "$2" AAAA'
+        )
+        system_dns_section = command_section(
+            "SYSTEM DNS (A AND AAAA)",
+            f"dig {host} A; dig {host} AAAA",
+            (
+                "/bin/sh",
+                "-c",
+                dig_shell,
+                "tls-capture",
+                dig or "dig",
+                host,
+            )
+            if dig is not None
+            else None,
+            unavailable=None if dig is not None else "dig executable not found",
+        )
+        public_dns_section = command_section(
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)",
+            f"dig @1.1.1.1 {host} A; dig @1.1.1.1 {host} AAAA",
+            (
+                "/bin/sh",
+                "-c",
+                '"$1" @1.1.1.1 +time=1 +tries=1 "$2" A; '
+                '"$1" @1.1.1.1 +time=1 +tries=1 "$2" AAAA',
+                "tls-capture",
+                dig or "dig",
+                host,
+            )
+            if dig is not None
+            else None,
+            unavailable=None if dig is not None else "dig executable not found",
+        )
 
-
-def prune_tls_records(directory: Path, current: Path) -> None:
-    records = sorted(
-        (path for path in directory.glob("*.json") if path.is_file()),
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
-        reverse=True,
+    return "\n\n".join(
+        (
+            openssl_section,
+            system_dns_section,
+            public_dns_section,
+            proxy_environment_section(),
+        )
     )
-    newest = [current, *(path for path in records if path != current)]
-    keep = set(newest[:TLS_RECORD_RETENTION_LIMIT])
-    for path in records:
-        if path not in keep:
-            path.unlink()
 
 
 def capture_tls_failure(
@@ -790,149 +658,55 @@ def capture_tls_failure(
     error: BaseException,
     timeout_seconds: float,
     *,
-    fetcher: Callable[[str, float], Mapping] = fetch_tls_evidence,
+    failure_count: int = 1,
+    fetcher: Callable[[str | None, float], str] = fetch_tls_evidence,
     timestamp: Callable[[], str] = utc_iso,
-) -> Path:
+    wall_time: Callable[[], float] = time.time,
+) -> Path | None:
+    directory = project_state_dir(project_id) / "tls-forensics"
+    sentinel = directory / ".last-capture"
+    now = wall_time()
+    try:
+        if now - sentinel.stat().st_mtime < TLS_CAPTURE_MTIME_FLOOR_SECONDS:
+            return None
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
     captured_at = timestamp()
     host = endpoint_host_from_error(error)
-    evidence: Mapping = {}
-    fetch_error: str | None = None
-    if host is None:
-        fetch_error = "endpoint host could not be determined from the watcher error"
-    elif timeout_seconds <= 0:
-        fetch_error = "watcher cycle deadline exhausted before chain capture"
-    else:
-        try:
-            evidence = fetcher(host, timeout_seconds)
-            if not isinstance(evidence, Mapping):
-                raise TypeError("TLS evidence fetcher returned a non-object")
-        except Exception as capture_error:
-            fetch_error = str(capture_error) or type(capture_error).__name__
-            evidence = {}
+    try:
+        sections = fetcher(host, timeout_seconds)
+        if not isinstance(sections, str):
+            raise TypeError("TLS evidence fetcher returned non-text output")
+    except Exception as capture_error:
+        detail = str(capture_error) or type(capture_error).__name__
+        sections = "\n\n".join(
+            (
+                f"=== OPENSSL S_CLIENT ===\nFAILED: {detail}",
+                f"=== SYSTEM DNS (A AND AAAA) ===\nFAILED: {detail}",
+                f"=== PUBLIC DNS 1.1.1.1 (A AND AAAA) ===\nFAILED: {detail}",
+                proxy_environment_section(),
+            )
+        )
 
-    chain = evidence.get("presented_certificate_chain_pem", [])
-    chain_captured = (
-        isinstance(chain, list)
-        and bool(chain)
-        and all(isinstance(certificate, str) and certificate for certificate in chain)
-    )
-    if not chain_captured:
-        chain = []
-    chain_reason = None if chain_captured else (
-        fetch_error
-        or evidence.get("chain_error")
-        or "no presented certificate chain was captured"
-    )
-    route_context = evidence.get("network_route_context")
-    if not isinstance(route_context, Mapping):
-        route_context = {
-            "best_effort": True,
-            "captured": False,
-            "command": None,
-            "output": "",
-            "error": fetch_error or "route context was not returned",
-        }
-
-    route_context = dict(route_context)
-    route_context["best_effort"] = True
-    route_fidelity = evidence.get("route_fidelity")
-    if not isinstance(route_fidelity, Mapping):
-        route_fidelity = {
-            "equivalent_to_failing_client": False,
-            "reason": "Capture-route equivalence was not established.",
-        }
-    proxy_configuration = evidence.get("proxy_configuration")
-    if not isinstance(proxy_configuration, Mapping):
-        proxy_configuration = {
-            "best_effort": True,
-            "captured": False,
-            "environment": {},
-            "system": {"command": None, "output": "", "error": fetch_error},
-        }
-    proxy_configuration = dict(proxy_configuration)
-    proxy_configuration["best_effort"] = True
-    route_equivalent = route_fidelity.get("equivalent_to_failing_client") is True
-    proxy_captured = proxy_configuration.get("captured") is True
-    dns_snapshot = evidence.get("dns_resolution_snapshot")
-    dns_captured = (
-        isinstance(dns_snapshot, Mapping)
-        and dns_snapshot.get("captured") is True
-        and isinstance(dns_snapshot.get("dns64_synthesis_signature_present"), bool)
-    )
-    if not isinstance(dns_snapshot, Mapping):
-        dns_snapshot = {
-            "best_effort": True,
-            "captured": False,
-            "system_resolver": {"a": [], "aaaa": [], "error": fetch_error},
-            "public_resolver": {
-                "server": "1.1.1.1",
-                "a": [],
-                "aaaa": [],
-                "error": fetch_error,
-            },
-            "dns64_synthesis_signature_present": None,
-            "dns64_matches": [],
-            "error": fetch_error or "DNS resolution snapshot was not returned",
-        }
-    dns_snapshot = dict(dns_snapshot)
-    dns_snapshot["best_effort"] = True
-    dns_reason = None if dns_captured else (
-        fetch_error
-        or dns_snapshot.get("error")
-        or "DNS resolution snapshot was incomplete"
-    )
-    record = {
-        "captured_at_utc": captured_at,
-        "watcher_name": name,
-        "error_text": str(error),
-        "endpoint": {
-            "host": host,
-            "note": (
-                "determined from watcher error text"
-                if host is not None
-                else "could not be determined from watcher error text"
-            ),
-        },
-        "capture_timeout_seconds": timeout_seconds,
-        "presented_certificate_chain_pem": chain,
-        "openssl": evidence.get("openssl"),
-        "network_route_context": route_context,
-        "route_fidelity": dict(route_fidelity),
-        "proxy_configuration": proxy_configuration,
-        "dns_resolution_snapshot": dns_snapshot,
-        "completeness": {
-            "capture_complete": (
-                chain_captured and dns_captured and route_equivalent and proxy_captured
-            ),
-            "chain_captured": chain_captured,
-            "chain_reason": chain_reason,
-            "route_equivalence_established": route_equivalent,
-            "route_equivalence_reason": route_fidelity.get("reason"),
-            "proxy_configuration_captured": proxy_captured,
-            "proxy_configuration_reason": (
-                None
-                if proxy_captured
-                else (
-                    proxy_configuration.get("system", {}).get("error")
-                    or "Proxy configuration was incomplete"
-                )
-                if isinstance(proxy_configuration.get("system"), Mapping)
-                else "Proxy configuration was incomplete"
-            ),
-            "dns_snapshot_captured": dns_captured,
-            "dns_snapshot_reason": dns_reason,
-        },
-    }
+    header = [
+        f"UTC timestamp: {captured_at}",
+        f"Watcher: {name}",
+        f"Error: {error}",
+        f"Endpoint host: {host or 'could not be determined'}",
+        f"Cycle failure count: {failure_count}",
+    ]
+    if failure_count > 1:
+        header.append("Captured failure: first only")
     stamp = re.sub(r"[^0-9A-Za-z]+", "-", captured_at).strip("-")
     safe_name = re.sub(r"[^0-9A-Za-z-]+", "-", name).strip("-")
-    path = (
-        project_state_dir(project_id)
-        / "tls-forensics"
-        / f"{stamp}-{safe_name}-{uuid.uuid4().hex[:8]}.json"
-    )
-    write_file_durably(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    path = directory / f"{stamp}-{safe_name}-{uuid.uuid4().hex[:8]}.txt"
+    write_file_durably(path, "\n".join(header) + "\n\n" + sections + "\n")
     try:
-        prune_tls_records(path.parent, path)
+        write_file_durably(sentinel, captured_at + "\n")
+        os.utime(sentinel, (now, now))
     except Exception:
         pass
     return path
@@ -960,7 +734,7 @@ def run_once(
     check: Callable[[], bool],
     *,
     emit: Callable[[str], None] = emit_event,
-    tls_fetcher: Callable[[str, float], Mapping] = fetch_tls_evidence,
+    tls_fetcher: Callable[[str | None, float], str] = fetch_tls_evidence,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
     deadline = cycle_deadline(None, monotonic)
@@ -968,16 +742,8 @@ def run_once(
         complete = check()
     except Exception as error:
         already_emitted = isinstance(error, HeartbeatProbeFailure)
-        forensic_error = error
-        if already_emitted:
-            forensic_error = next(
-                (
-                    failure
-                    for failure in error.failures
-                    if is_certificate_verification_failure(failure)
-                ),
-                error,
-            )
+        forensic_error = error.failures[0] if already_emitted else error
+        failure_count = len(error.failures) if already_emitted else 1
         if is_certificate_verification_failure(forensic_error):
             try:
                 capture_tls_failure(
@@ -988,6 +754,7 @@ def run_once(
                         TLS_CAPTURE_TIMEOUT_SECONDS,
                         max(0.0, deadline - monotonic()),
                     ),
+                    failure_count=failure_count,
                     fetcher=tls_fetcher,
                 )
             except (KeyboardInterrupt, SystemExit):

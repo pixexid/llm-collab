@@ -424,14 +424,19 @@ class TlsForensicCaptureTest(unittest.TestCase):
         'Get "https://api.github.com/repos": tls: failed to verify certificate: '
         "x509: certificate signed by unknown authority"
     )
+    RAW_SECTIONS = "\n\n".join(
+        (
+            "=== OPENSSL S_CLIENT ===\npresented certificate bytes",
+            "=== SYSTEM DNS (A AND AAAA) ===\nsystem resolver bytes",
+            "=== PUBLIC DNS 1.1.1.1 (A AND AAAA) ===\npublic resolver bytes",
+            "=== PROXY ENVIRONMENT ===\n(none set)",
+        )
+    )
 
-    def record_for(self, directory: str) -> dict:
-        records = list((Path(directory) / "tls-forensics").glob("*.json"))
-        self.assertEqual(1, len(records), "one certificate failure must write one record")
-        return json.loads(records[0].read_text(encoding="utf-8"))
+    def records_for(self, directory: str) -> list[Path]:
+        return list((Path(directory) / "tls-forensics").glob("*.txt"))
 
-    def test_certificate_failure_records_a_captured_chain_as_complete(self) -> None:
-        chain = "-----BEGIN CERTIFICATE-----\npeer\n-----END CERTIFICATE-----"
+    def test_certificate_failure_writes_raw_sections(self) -> None:
         messages = []
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
@@ -444,72 +449,96 @@ class TlsForensicCaptureTest(unittest.TestCase):
                 "session-a",
                 lambda: (_ for _ in ()).throw(self.ERROR),
                 emit=messages.append,
-                tls_fetcher=lambda host, timeout: {
-                    "presented_certificate_chain_pem": [chain],
-                    "chain_error": None,
-                    "openssl": {"exit_code": 0, "stderr": ""},
-                    "network_route_context": {
-                        "best_effort": True,
-                        "captured": True,
-                        "command": ["route", "-n", "get", host],
-                        "output": "interface: en0",
-                        "error": None,
-                    },
-                },
+                tls_fetcher=lambda _host, _timeout: self.RAW_SECTIONS,
             )
-            record = self.record_for(directory)
+            records = self.records_for(directory)
+            self.assertEqual(1, len(records))
+            record = records[0].read_text(encoding="utf-8")
 
         self.assertFalse(completed)
-        self.assertTrue(record["completeness"]["chain_captured"])
-        self.assertIsNone(record["completeness"]["chain_reason"])
-        self.assertFalse(record["completeness"]["dns_snapshot_captured"])
-        self.assertEqual([chain], record["presented_certificate_chain_pem"])
-        self.assertEqual("api.github.com", record["endpoint"]["host"])
-        self.assertEqual(str(self.ERROR), record["error_text"])
-        self.assertTrue(record["network_route_context"]["best_effort"])
+        self.assertIn("UTC timestamp: ", record)
+        self.assertIn("Watcher: heartbeat", record)
+        self.assertIn(f"Error: {self.ERROR}", record)
+        self.assertIn("Endpoint host: api.github.com", record)
+        for section in (
+            "OPENSSL S_CLIENT",
+            "SYSTEM DNS (A AND AAAA)",
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)",
+            "PROXY ENVIRONMENT",
+        ):
+            self.assertIn(f"=== {section} ===", record)
         self.assertEqual([mock.call("project-a")], state_dir.call_args_list)
         marker.assert_not_called()
         self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
 
-    def test_certificate_failure_records_fetch_timeout_as_incomplete(self) -> None:
+    def test_fetch_timeout_writes_every_section_as_failed(self) -> None:
         def timed_out(_host, _timeout):
             raise TimeoutError("openssl chain fetch timed out")
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
-            completed = watch.run_once(
-                "pr-artifacts",
-                "project-a",
-                "session-a",
-                lambda: (_ for _ in ()).throw(self.ERROR),
-                emit=lambda _line: None,
-                tls_fetcher=timed_out,
+        ):
+            watch.capture_tls_failure(
+                "pr-artifacts", "project-a", self.ERROR, 1.0, fetcher=timed_out
             )
-            record = self.record_for(directory)
+            records = self.records_for(directory)
+            self.assertEqual(1, len(records))
+            record = records[0].read_text(encoding="utf-8")
 
-        self.assertFalse(completed)
-        self.assertFalse(record["completeness"]["chain_captured"])
-        self.assertEqual(
-            "openssl chain fetch timed out",
-            record["completeness"]["chain_reason"],
-        )
-        self.assertFalse(record["completeness"]["dns_snapshot_captured"])
-        self.assertEqual(
-            "openssl chain fetch timed out",
-            record["completeness"]["dns_snapshot_reason"],
-        )
-        self.assertEqual([], record["presented_certificate_chain_pem"])
-        self.assertFalse(record["network_route_context"]["captured"])
-        marker.assert_not_called()
+        for section in (
+            "OPENSSL S_CLIENT",
+            "SYSTEM DNS (A AND AAAA)",
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)",
+        ):
+            self.assertIn(f"=== {section} ===", record)
+        self.assertEqual(3, record.count("FAILED: openssl chain fetch timed out"))
+        self.assertIn("=== PROXY ENVIRONMENT ===", record)
 
-    def test_heartbeat_probe_certificate_failure_reaches_capture_seam(self) -> None:
+    def test_missing_host_writes_visible_absence_without_network(self) -> None:
+        error = watch.ProbeError("TLS handshake failed before endpoint selection")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            watch.capture_tls_failure("pr-artifacts", "project-a", error, 1.0)
+            records = self.records_for(directory)
+            self.assertEqual(1, len(records))
+            record = records[0].read_text(encoding="utf-8")
+
+        self.assertIn("Endpoint host: could not be determined", record)
+        self.assertEqual(3, record.count("FAILED: endpoint host could not be determined"))
+        self.assertIn("=== PROXY ENVIRONMENT ===", record)
+
+    def test_node_style_verification_wording_also_triggers_capture(self) -> None:
+        error = watch.ProbeError(
+            'request to "https://api.github.com/graphql" failed: '
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+        )
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            self.assertFalse(
+                watch.run_once(
+                    "worker-lifecycle",
+                    "project-a",
+                    "session-a",
+                    lambda: (_ for _ in ()).throw(error),
+                    emit=lambda _line: None,
+                    tls_fetcher=lambda _host, _timeout: self.RAW_SECTIONS,
+                )
+            )
+            records = self.records_for(directory)
+            self.assertEqual(1, len(records))
+            record = records[0].read_text(encoding="utf-8")
+
+        self.assertIn(f"Error: {error}", record)
+
+    def test_heartbeat_probe_failure_reaches_seam_and_discloses_first_only(self) -> None:
         messages = []
 
         def call(_executable, argv, _timeout):
             if argv[:2] == ("settings", "version"):
                 raise self.ERROR
-            return {"threads": []}
+            raise watch.ProbeError("second heartbeat endpoint failed")
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
@@ -525,198 +554,66 @@ class TlsForensicCaptureTest(unittest.TestCase):
                     emit=messages.append,
                 ),
                 emit=messages.append,
-                tls_fetcher=lambda _host, _timeout: {
-                    "presented_certificate_chain_pem": [
-                        "-----BEGIN CERTIFICATE-----\nheartbeat\n"
-                        "-----END CERTIFICATE-----"
-                    ],
-                },
+                tls_fetcher=lambda _host, _timeout: self.RAW_SECTIONS,
             )
-            record = self.record_for(directory)
+            records = self.records_for(directory)
+            self.assertEqual(1, len(records))
+            record = records[0].read_text(encoding="utf-8")
 
         self.assertFalse(completed)
-        self.assertTrue(record["completeness"]["chain_captured"])
-        self.assertEqual(str(self.ERROR), record["error_text"])
+        self.assertIn("Cycle failure count: 2", record)
+        self.assertIn("Captured failure: first only", record)
+        self.assertIn(f"Error: {self.ERROR}", record)
         self.assertTrue(messages[0].startswith("BB VERSION CHECK FAILED"))
-        self.assertTrue(messages[1].startswith("HEARTBEAT openPRs="))
+        self.assertTrue(messages[1].startswith("HEARTBEAT WORKER PROBE FAILED"))
+        self.assertTrue(messages[2].startswith("HEARTBEAT openPRs="))
         self.assertFalse(any("HEARTBEAT CHECK FAILED" in line for line in messages))
         marker.assert_not_called()
 
-    def test_record_disclaims_route_equivalence_and_records_no_proxy(self) -> None:
-        proxy_environment = {key: None for key in watch.PROXY_ENV_KEYS}
+    def test_mtime_floor_skips_inside_window_and_allows_after_it(self) -> None:
+        now = [100.0]
+        fetches = []
+
+        def fetch(_host, _timeout):
+            fetches.append(now[0])
+            return self.RAW_SECTIONS
+
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
         ):
-            watch.capture_tls_failure(
+            first = watch.capture_tls_failure(
                 "pr-artifacts",
                 "project-a",
                 self.ERROR,
                 1.0,
-                fetcher=lambda _host, _timeout: {
-                    "route_fidelity": {
-                        "equivalent_to_failing_client": False,
-                        "reason": "independent direct probe",
-                    },
-                    "proxy_configuration": {
-                        "best_effort": True,
-                        "captured": True,
-                        "environment": proxy_environment,
-                        "explicit_environment_proxy_present": False,
-                        "system": {
-                            "command": ["scutil", "--proxy"],
-                            "output": "<dictionary> { }",
-                            "error": None,
-                        },
-                    },
-                },
+                fetcher=fetch,
+                wall_time=lambda: now[0],
             )
-            record = self.record_for(directory)
-
-        self.assertFalse(record["route_fidelity"]["equivalent_to_failing_client"])
-        self.assertFalse(record["completeness"]["capture_complete"])
-        self.assertFalse(record["completeness"]["route_equivalence_established"])
-        self.assertTrue(record["completeness"]["proxy_configuration_captured"])
-        self.assertFalse(
-            record["proxy_configuration"]["explicit_environment_proxy_present"]
-        )
-        self.assertTrue(
-            all(
-                value is None
-                for value in record["proxy_configuration"]["environment"].values()
-            )
-        )
-        self.assertEqual(
-            "<dictionary> { }", record["proxy_configuration"]["system"]["output"]
-        )
-
-    def test_dns_snapshot_records_both_resolvers_and_dns64_signature(self) -> None:
-        system_a = ["192.0.2.33"]
-        system_aaaa = ["64:ff9b::c000:221"]
-        matches = watch.dns64_synthesis_matches(system_a, system_aaaa)
-        dns_snapshot = {
-            "best_effort": True,
-            "captured": True,
-            "system_resolver": {"a": system_a, "aaaa": system_aaaa, "error": None},
-            "public_resolver": {
-                "server": "1.1.1.1",
-                "a": ["140.82.112.5"],
-                "aaaa": [],
-                "error": None,
-            },
-            "dns64_synthesis_signature_present": bool(matches),
-            "dns64_matches": matches,
-            "error": None,
-        }
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ):
-            watch.capture_tls_failure(
+            now[0] += watch.TLS_CAPTURE_MTIME_FLOOR_SECONDS - 1
+            skipped = watch.capture_tls_failure(
                 "pr-artifacts",
                 "project-a",
                 self.ERROR,
                 1.0,
-                fetcher=lambda _host, _timeout: {
-                    "dns_resolution_snapshot": dns_snapshot,
-                },
+                fetcher=fetch,
+                wall_time=lambda: now[0],
             )
-            record = self.record_for(directory)
-
-        self.assertTrue(record["completeness"]["dns_snapshot_captured"])
-        self.assertIsNone(record["completeness"]["dns_snapshot_reason"])
-        self.assertTrue(
-            record["dns_resolution_snapshot"]["dns64_synthesis_signature_present"]
-        )
-        self.assertEqual(
-            [{"aaaa": "64:ff9b::c000:221", "embedded_ipv4": "192.0.2.33"}],
-            record["dns_resolution_snapshot"]["dns64_matches"],
-        )
-
-    def test_tls_record_retention_keeps_only_the_newest_records(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "TLS_RECORD_RETENTION_LIMIT", 2):
-            paths = []
-            for index in range(3):
-                path = watch.capture_tls_failure(
-                    "pr-artifacts",
-                    "project-a",
-                    self.ERROR,
-                    1.0,
-                    fetcher=lambda _host, _timeout: {},
-                    timestamp=lambda index=index: f"2026-08-10T00:00:0{index}+00:00",
-                )
-                paths.append(path)
-                if path.exists():
-                    os.utime(path, ns=(index + 1, index + 1))
-            records = list((Path(directory) / "tls-forensics").glob("*.json"))
-            existence = [path.exists() for path in paths]
-
-        self.assertEqual(2, len(records))
-        self.assertEqual([False, True, True], existence)
-
-    def test_retention_failure_does_not_remove_the_new_record(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "prune_tls_records", side_effect=OSError("state directory busy")
-        ):
-            path = watch.capture_tls_failure(
+            now[0] += 2
+            after = watch.capture_tls_failure(
                 "pr-artifacts",
                 "project-a",
                 self.ERROR,
                 1.0,
-                fetcher=lambda _host, _timeout: {},
+                fetcher=fetch,
+                wall_time=lambda: now[0],
             )
-            exists = path.exists()
+            record_count = len(self.records_for(directory))
 
-        self.assertTrue(exists)
-
-    def test_node_style_verification_wording_also_triggers_capture(self) -> None:
-        error = watch.ProbeError(
-            'request to "https://api.github.com/graphql" failed: '
-            "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
-        )
-        chain = "-----BEGIN CERTIFICATE-----\nnode-peer\n-----END CERTIFICATE-----"
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ):
-            self.assertFalse(
-                watch.run_once(
-                    "worker-lifecycle",
-                    "project-a",
-                    "session-a",
-                    lambda: (_ for _ in ()).throw(error),
-                    emit=lambda _line: None,
-                    tls_fetcher=lambda _host, _timeout: {
-                        "presented_certificate_chain_pem": [chain],
-                        "network_route_context": {
-                            "best_effort": True,
-                            "captured": False,
-                        },
-                    },
-                )
-            )
-            record = self.record_for(directory)
-
-        self.assertTrue(record["completeness"]["chain_captured"])
-        self.assertEqual(str(error), record["error_text"])
-
-    def test_shutdown_during_capture_emits_cycle_failure_then_propagates(self) -> None:
-        messages = []
-
-        def interrupt(_host, _timeout):
-            raise KeyboardInterrupt
-
-        with self.assertRaises(KeyboardInterrupt):
-            watch.run_once(
-                "heartbeat",
-                "project-a",
-                "session-a",
-                lambda: (_ for _ in ()).throw(self.ERROR),
-                emit=messages.append,
-                tls_fetcher=interrupt,
-            )
-        self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
+        self.assertIsNotNone(first)
+        self.assertIsNone(skipped)
+        self.assertIsNotNone(after)
+        self.assertEqual(2, record_count)
+        self.assertEqual([100.0, 131.0], fetches)
 
     def test_capture_timeout_uses_only_the_cycle_time_remaining(self) -> None:
         now = [100.0]
@@ -729,13 +626,9 @@ class TlsForensicCaptureTest(unittest.TestCase):
             now[0] += watch.WATCHER_CYCLE_DEADLINE_SECONDS - 0.25
             raise self.ERROR
 
-        def fetch(_host: str, timeout: float) -> dict:
+        def fetch(_host: str | None, timeout: float) -> str:
             seen_timeouts.append(timeout)
-            return {
-                "presented_certificate_chain_pem": [],
-                "chain_error": "no chain",
-                "network_route_context": {"best_effort": True, "captured": False},
-            }
+            return self.RAW_SECTIONS
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
@@ -751,9 +644,41 @@ class TlsForensicCaptureTest(unittest.TestCase):
                     monotonic=monotonic,
                 )
             )
-            self.record_for(directory)
+            self.assertEqual(1, len(self.records_for(directory)))
 
         self.assertEqual([0.25], seen_timeouts)
+
+    def test_shutdown_during_capture_emits_cycle_failure_then_propagates(self) -> None:
+        messages = []
+
+        def interrupt(_host, _timeout):
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), self.assertRaises(KeyboardInterrupt):
+            watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: (_ for _ in ()).throw(self.ERROR),
+                emit=messages.append,
+                tls_fetcher=interrupt,
+            )
+        self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
+
+    def test_proxy_dump_records_names_only(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "https://user:secret@proxy.example:8443", "NO_PROXY": ""},
+            clear=True,
+        ):
+            section = watch.proxy_environment_section()
+
+        self.assertIn("HTTPS_PROXY: set (value redacted)", section)
+        self.assertIn("NO_PROXY: empty", section)
+        self.assertNotIn("user", section)
+        self.assertNotIn("secret", section)
 
 
 class StatePersistenceTest(unittest.TestCase):
