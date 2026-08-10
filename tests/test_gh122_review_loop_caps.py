@@ -1525,6 +1525,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             REPO_ROOT / "docs/workflows/pi-workers.md",
             REPO_ROOT / "docs/workflows/review-and-handoff.md",
             REPO_ROOT / "docs/workflows/session-autobridge-runbook.md",
+            REPO_ROOT / "docs/workflows/session-autobridge-rfc.md",
             REPO_ROOT / "docs/workflows/session-startup.md",
             REPO_ROOT / "docs/workflows/task-intake-and-delegation.md",
             REPO_ROOT / "tools/axbridge/README.md",

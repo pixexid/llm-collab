@@ -627,13 +627,18 @@ reports a stalled trigger; it never converts time into a pass.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
-to change their branch, it must send a durable mailbox packet. For OpenAI-model
-interaction, focus is BB until the Codex app reaches parity with the Claude app
-and BB. Use BB unless this task needs a Codex-app-only tool that BB cannot
-reach. Only when that condition is true should the sender inspect the
-`deliver.py` result for AX: if `autobridge_ready: true`, no AX doorbell was
-requested; if `ax_doorbell_required: true`, ring the implementer once with AX
-even if busy. See the
+to change their branch, it must return the feedback through the implementer's
+actual surface. Feedback for a BB-backed OpenAI implementer returns through BB.
+If resolving that feedback needs a Codex-app-only tool that BB cannot reach, the
+orchestrator or operator performs that step in the app and returns the result to
+the implementer through BB. Never AX-ring a BB-backed implementer: no AX path
+targets its session.
+
+For a separately registered first-class app participant, send a durable mailbox
+packet. Only when the task itself meets the app-only-tool condition should the
+sender inspect the `deliver.py` result for AX: if `autobridge_ready: true`, no AX
+doorbell was requested; if `ax_doorbell_required: true`, ring that registered
+participant once with AX even if busy. See the
 [`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface).
 Do not prove the composer empty first: composer content and `AXValue`
 readability/opacity are never a hold for Codex, and busy alone is not a hold
