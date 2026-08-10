@@ -11,11 +11,13 @@ from _helpers import get_project
 
 DEFAULT_EXCLUDE_LABELS = (
     "type:epic",
+    "epic",
     "wontfix",
     "duplicate",
     "invalid",
     "question",
     "status:deferred",
+    "state:parked",
 )
 
 

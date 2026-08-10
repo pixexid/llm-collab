@@ -39,6 +39,31 @@ class BacklogTest(unittest.TestCase):
 
         self.assertEqual([issue.number for issue in eligible], [10])
 
+    def test_default_exclusions_filter_state_and_legacy_labels_for_amiga_and_non_amiga(self) -> None:
+        issues = [
+            self.issue(10, "Parked", ["state:parked"]),
+            self.issue(11, "Epic", ["epic"]),
+            self.issue(12, "Active", ["state:active"]),
+            self.issue(13, "Unlabeled", []),
+            self.issue(14, "Legacy epic", ["type:epic"]),
+            self.issue(15, "Legacy deferred", ["status:deferred"]),
+        ]
+
+        for project_id, repo in (
+            ("amiga", "pixexid/amiga"),
+            ("nuvyr", "pixexid/nuvyr"),
+        ):
+            with self.subTest(project_id=project_id):
+                project = {
+                    "id": project_id,
+                    "github": {"enabled": True, "repo": repo},
+                }
+                with patch.object(_backlog, "get_project", return_value=project):
+                    with patch.object(_backlog, "load_open_github_issues", return_value=issues):
+                        eligible = _backlog.eligible_open_issues(project_id)
+
+                self.assertEqual([issue.number for issue in eligible], [12, 13])
+
     def test_eligible_open_issues_includes_non_parity_titles_by_default(self) -> None:
         project = {
             "id": "amiga",
