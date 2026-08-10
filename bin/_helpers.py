@@ -28,6 +28,8 @@ from _bounded_io import (
     active_read_budget,
     read_regular_file_bounded,
 )
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from llm_collab.ledger.paths import validate_project_id
 
 # ---------------------------------------------------------------------------
