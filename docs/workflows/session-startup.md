@@ -245,12 +245,13 @@ participants.
 ## Claude Desktop Rule
 
 BB workers do not enter this path unless the task satisfies the operator-sourced
-2026-08-10 condition in
-[`AGENTS.md`](../../AGENTS.md#one-writer-per-lane); use `bb-workers.md` for
+standing routing rule in [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane).
+Focus is BB until the Codex app reaches parity with the Claude app and BB; use
+the Codex app only for app-exclusive tooling. Use `bb-workers.md` for
 OpenAI-model interaction when the task does not need a Codex-app-only tool that
 BB cannot reach. The mechanics below are the legitimate conditional procedure
-only when it does. They do not independently authorize provisioning or waking a
-Codex-app worker.
+only when it does. They do not independently authorize provisioning or waking
+a Codex-app worker.
 
 Claude has one wake path in every registration and project shape: the durable
 `Chats/` packet, picked up by the Claude app's own background inbox watcher.

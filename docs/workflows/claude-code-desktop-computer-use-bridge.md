@@ -1,13 +1,14 @@
 # Desktop Computer-Use Doorbell (Agent-to-Agent Comms)
 
 > **AX status: legitimate under one condition, not the OpenAI-model interaction
-> surface.** Under the operator-sourced 2026-08-10 ruling in
+> surface.** Under the operator-sourced standing routing rule in
 > [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane), BB threads on OpenAI models
 > and Codex-app sessions are the same sessions; the difference is the harness,
 > not the model. BB is the live harness, while the app is a lagging render that
 > needs an app restart to display those sessions and app-server does not refresh
-> its UI either. BB is therefore the surface for OpenAI-model interaction until
-> the app reaches parity. AX is not a BB transport and is not used to reach BB
+> its UI either. Focus is BB until the Codex app reaches parity with the Claude
+> app and BB; use the Codex app only for app-exclusive tooling. AX is not a BB
+> transport and is not used to reach BB
 > workers, whose threads are not `llm-collab` participants, session bindings, or
 > receipt-bearing endpoints. Use [`bb-workers.md`](bb-workers.md) for current BB
 > operations. None of this document's AX lane applies to BB. Its durable-packet

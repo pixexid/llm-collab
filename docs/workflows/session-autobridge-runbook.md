@@ -1,9 +1,10 @@
 # Session Autobridge Runbook
 
 > **AX status: conditional, not the OpenAI-model interaction surface.** Under
-> the operator-sourced 2026-08-10 ruling in
-> [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane), BB is the surface unless a
-> task needs a Codex-app-only tool that BB cannot reach. Session autobridge
+> the operator-sourced standing routing rule in
+> [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane), focus is BB until the Codex
+> app reaches parity with the Claude app and BB; use the Codex app only for
+> app-exclusive tooling. Session autobridge
 > dispatch and its AX fallback are not BB transports and
 > are not used to reach BB workers, whose threads are not `llm-collab`
 > participants, session bindings, watcher recipients, or receipt-bearing

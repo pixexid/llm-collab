@@ -357,13 +357,15 @@ supplies another agent as `deliver.py --from`; that records the agent as the
 author, not a relay. First-class relay provenance remains prospective in
 [GH-604](https://github.com/pixexid/llm-collab/issues/604).
 
-**Operator-sourced ruling (2026-08-10, relayed through the supervisor
-session):** BB threads on OpenAI models and Codex-app sessions are the same
-sessions. The app is a lagging render that needs an app restart to display
-them, app-server does not refresh its UI either, and AX reaches that harness
-rather than the model. The difference is the harness, not the model. Therefore
-BB is the live harness for all OpenAI-model interaction until the app reaches
-parity, with live updates and live interaction.
+**Operator-sourced standing routing rule:** Focus is BB until the Codex app
+reaches parity with the Claude app and BB; use the Codex app only for
+app-exclusive tooling.
+
+BB threads on OpenAI models and Codex-app sessions are the same sessions. The
+app is a lagging render that needs an app restart to display them, app-server
+does not refresh its UI either, and AX reaches that harness rather than the
+model. The difference is the harness, not the model; BB supplies the live
+updates and live interaction.
 
 Apply one condition: **does this task need a tool that exists only in the Codex
 app and cannot be reached from BB?** If no, use BB and never AX. If yes, AX may

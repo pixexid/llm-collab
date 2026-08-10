@@ -1376,6 +1376,11 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         text = AGENTS_DOC.read_text(encoding="utf-8")
         self.assertIn("<!-- CONTRACT_VERSION: 21 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
+        self.assertIn(
+            "Focus is BB until the Codex app reaches parity with the Claude "
+            "app and BB; use the Codex app only for app-exclusive tooling",
+            normalized(text),
+        )
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
         # A v12 block was added while the marker still read 11, the suite stayed
