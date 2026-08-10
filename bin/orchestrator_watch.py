@@ -27,7 +27,9 @@ from llm_collab.bb_client import (  # noqa: E402
     MAX_RESPONSE_CHARS,
     PINNED_BB_VERSION,
     BbExecutableRefused,
+    BbProjectIdRefused,
     bb_executable_from_project,
+    bb_project_id_from_project,
     subprocess_transport,
 )
 
@@ -96,9 +98,15 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
         executable = bb_executable_from_project(project)
     except BbExecutableRefused as error:
         raise ProbeError(str(error)) from error
-    bb_project_id = bb.get("project_id", project_id)
-    if not isinstance(bb_project_id, str) or not bb_project_id:
-        raise ProbeError("bb.project_id must be non-empty text")
+    try:
+        bb_project_id = bb_project_id_from_project(project, project_id)
+    except BbProjectIdRefused as error:
+        if not error.raw_nonempty:
+            raise ProbeError("bb.project_id must be non-empty text") from error
+        raise ProbeError(
+            f"bb.project_id {error.value!r} has surrounding whitespace; "
+            "refusing (match raw, reject padded)"
+        ) from error
     github = project.get("github")
     repo = github.get("repo") if isinstance(github, Mapping) else None
     if mode != "worker-lifecycle" and (not isinstance(repo, str) or not repo):

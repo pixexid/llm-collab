@@ -42,11 +42,13 @@ from llm_collab.bb_client import (
     BbTransportResult,
     BbTransportTimeout,
     BbExecutableRefused,
+    BbProjectIdRefused,
     BbResponseDecodeError,
     BbResponseTooLarge,
     _read_bounded,
     subprocess_transport,
     bb_executable_from_project,
+    bb_project_id_from_project,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bb"
@@ -1308,3 +1310,26 @@ class BbExecutableFromProjectTest(unittest.TestCase):
     def test_refusal_is_a_value_error_for_existing_caller_contracts(self):
         with self.assertRaises(ValueError):
             bb_executable_from_project({"bb": {"executable": []}})
+
+
+class BbProjectIdFromProjectTest(unittest.TestCase):
+    """GH-731: one seam owns raw-match-rejects-padded semantics."""
+
+    def test_raw_value_and_fallback_are_returned_without_normalizing(self):
+        self.assertEqual(
+            "native-project",
+            bb_project_id_from_project(
+                {"bb": {"project_id": "native-project"}}, "collab-project"
+            ),
+        )
+        self.assertEqual(
+            "collab-project",
+            bb_project_id_from_project({"bb": {}}, "collab-project"),
+        )
+
+    def test_padded_value_is_rejected_not_normalized(self):
+        with self.assertRaises(BbProjectIdRefused) as raised:
+            bb_project_id_from_project(
+                {"bb": {"project_id": " native-project "}}, "collab-project"
+            )
+        self.assertEqual(" native-project ", raised.exception.value)

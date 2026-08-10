@@ -94,7 +94,8 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-sys.path[:0] = [str(SCRIPT_DIR)]
+ROOT = SCRIPT_DIR.parent
+sys.path[:0] = [str(SCRIPT_DIR), str(ROOT)]
 from _python_runtime import require_python  # noqa: E402
 
 require_python()
@@ -110,6 +111,10 @@ from _bounded_io import (  # noqa: E402
     UnreadableFile,
     active_read_budget,
     read_regular_file_bounded,
+)
+from llm_collab.bb_client import (  # noqa: E402
+    BbProjectIdRefused,
+    bb_project_id_from_project,
 )
 
 # A runaway record log is an accident (a writer loop, a corrupt append), not real
@@ -206,24 +211,21 @@ def _reject_nul(label: str, value: str) -> str:
 def _resolve_native_bb_project(entry: object) -> str:
     """The bb project this llm-collab project spawns under (the scope for --thread-project).
 
-    Mirrors spawn_gate's ``bb.get("project_id", project_id)`` so the recorder and
-    the spawner enforce the SAME scope. Matched RAW — a padded ``bb.project_id`` is
-    REJECTED, never stripped: the recorder and spawn_gate must agree, and repairing
-    a padded registry value in one authority but not the other is how they diverged
-    (GH-695 P2-D). ``.strip()`` is used ONLY to test for empty/padded, never to
-    transform the returned value."""
+    The shared bb-client seam matches RAW and rejects padding; this caller keeps
+    the recorder's existing ``SystemExit`` refusal messages (GH-695 P2-D)."""
     if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
         raise SystemExit("registered project has no valid id; refusing to record")
-    bb = entry.get("bb")
-    native = bb.get("project_id", entry["id"]) if isinstance(bb, dict) else entry["id"]
-    if not isinstance(native, str) or not native.strip():
-        raise SystemExit(f"project {entry['id']!r} has no valid bb.project_id; refusing to record")
-    if native != native.strip():
+    try:
+        return bb_project_id_from_project(entry, entry["id"])
+    except BbProjectIdRefused as error:
+        if not error.trimmed_nonempty:
+            raise SystemExit(
+                f"project {entry['id']!r} has no valid bb.project_id; refusing to record"
+            ) from error
         raise SystemExit(
-            f"project {entry['id']!r} bb.project_id {native!r} has surrounding whitespace; "
+            f"project {entry['id']!r} bb.project_id {error.value!r} has surrounding whitespace; "
             "refusing to record (match raw, reject padded — GH-695 P2-D)"
-        )
-    return native
+        ) from error
 
 
 def _resolve_thread_project(thread_project: str) -> str | None:
