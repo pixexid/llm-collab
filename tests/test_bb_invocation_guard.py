@@ -48,11 +48,13 @@ pattern, so the guard stayed green with a bare invocation present):
   are named literals below: config-key reads (``get``) and prose constructors
   whose inspected argument is a message, not a command. Python supplies an
   argument positionally, by keyword, or through ``**kwargs``; every directly
-  written positional slot, every slot exposed by a literal ``*`` list/tuple,
-  and every keyword value (including the ``**kwargs`` expression) is inspected,
-  so all three supply channels take this one name-agnostic rule. A dynamic
-  positional expansion such as ``*some_variable`` cannot be resolved statically
-  and stays out of scope with the variable indirection documented below.
+  written positional slot, every slot exposed at any nesting depth by literal
+  ``*`` list/tuple structure, and every keyword value (including the
+  ``**kwargs`` expression) is inspected, so all three supply channels take this
+  one name-agnostic rule. Recursive descent stops at a non-literal expansion
+  such as ``*some_variable``, ``*make_args()``, or a comprehension; those cannot
+  be resolved statically and stay out of scope with the variable indirection
+  documented below.
   AST matching needs no subscript lookbehind (``entry["bb"]`` is a Subscript,
   never a List) and cannot be fooled by comments, docstrings, or formatting.
   An unparseable production file fails the guard rather than being skipped.
@@ -69,7 +71,8 @@ pattern, so the guard stayed green with a bare invocation present):
 What this guard does NOT catch, deliberately: a bb literal reaching a spawn
 through a variable or other indirection (``cmd = "bb"; subprocess.run([cmd,
 ...])`` or ``subprocess.run(*some_variable)``), where the relevant AST node is
-a Name rather than a statically visible literal. The class
+a Name or other dynamic expression rather than statically visible literal
+structure. The class
 this guard exists to prevent is the accidentally written literal — six
 instances in one day, every one a literal — and nobody assigns ``"bb"`` to a
 variable by accident, so dataflow analysis would be disproportionate to a
@@ -213,20 +216,29 @@ def _supplied_args(node: ast.Call) -> list[tuple[ast.AST, str | None]]:
     Keywords are ALL inspected, not enumerated: listing spawn keywords
     fails open on the one nobody listed (see module docstring). The
     keyword name is carried alongside so the callee-scoped prose pairs
-    (``PROSE_KEYWORD_PAIRS``) can be exempted. A literal list/tuple under ``*``
-    is expanded here so each visible element takes the same rule. A dynamic
-    ``*`` expression stays an ``ast.Starred`` and is the documented indirection
-    limit. A ``**kwargs`` entry (``arg is None``) yields its dict expression,
-    which is a Name/Dict, never a str constant — the same limit.
+    (``PROSE_KEYWORD_PAIRS``) can be exempted. Literal list/tuple structure under
+    ``*`` is expanded recursively so every visible element at any depth takes
+    the same rule. A dynamic ``*`` expression stays an ``ast.Starred`` and is
+    the documented indirection limit. A ``**kwargs`` entry (``arg is None``)
+    yields its dict expression, which is a Name/Dict, never a str constant — the
+    same limit.
     """
-    supplied: list[tuple[ast.AST, str | None]] = []
-    for argument in node.args:
+    def literal_slots(argument: ast.AST) -> list[ast.AST]:
         if isinstance(argument, ast.Starred) and isinstance(
             argument.value, (ast.List, ast.Tuple)
         ):
-            supplied.extend((element, None) for element in argument.value.elts)
-        else:
-            supplied.append((argument, None))
+            return [
+                slot
+                for element in argument.value.elts
+                for slot in literal_slots(element)
+            ]
+        return [argument]
+
+    supplied = [
+        (slot, None)
+        for argument in node.args
+        for slot in literal_slots(argument)
+    ]
     supplied.extend((kw.value, kw.arg) for kw in node.keywords)
     return supplied
 
