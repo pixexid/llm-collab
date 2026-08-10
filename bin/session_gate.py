@@ -127,15 +127,18 @@ def bb_version_check(project_id: str) -> tuple[str, str]:
 
 def tooling_check() -> tuple[str, str]:
     """Deployed runtime vs origin/main — reused from session_bootstrap, not duplicated."""
-    currency = session_bootstrap.tooling_currency()
+    currency = session_bootstrap.tooling_currency(fetch=False)
     state = currency["state"]
     if state == session_bootstrap.TOOLING_CURRENT:
-        fetched = "" if currency.get("fetched") else " (origin unreachable; last fetched ref)"
-        return PASS, f"checkout {currency.get('head', '?')} has origin/main{fetched}"
+        return PASS, (
+            f"checkout {currency.get('head', '?')} has origin/main "
+            "(current as of the last fetch)"
+        )
     if state == session_bootstrap.TOOLING_STALE:
         return FAIL, (
             f"checkout {currency.get('head', '?')} is missing merged work "
-            f"(origin/main {currency.get('origin_main', '?')})"
+            f"(origin/main {currency.get('origin_main', '?')}; "
+            "comparison is as of the last fetch)"
         )
     return UNKNOWN, f"currency unverifiable: {currency.get('reason', '?')}"
 

@@ -99,7 +99,7 @@ def _git(*args: str, timeout: int = 15) -> subprocess.CompletedProcess | None:
         return None
 
 
-def tooling_currency() -> dict:
+def tooling_currency(*, fetch: bool = True) -> dict:
     """Is this checkout missing work that is already on origin/main?
 
     Staleness is not a style question. A checkout pinned to a branch that predates
@@ -110,12 +110,16 @@ def tooling_currency() -> dict:
 
     The test is ancestry, not equality — a lane branch ahead of main is current;
     one that cannot reach origin/main is missing merged work.
+    `fetch=False` reuses the local remote-tracking ref for callers that must not
+    pay a network cost; those callers qualify the weaker claim in their output.
     """
     if not (ROOT / ".git").exists():
         return {"state": TOOLING_UNKNOWN, "reason": "not a git checkout"}
 
-    fetched = _git("fetch", "origin", "main", "--quiet", timeout=20)
-    fetch_ok = bool(fetched and fetched.returncode == 0)
+    fetch_ok = False
+    if fetch:
+        fetched = _git("fetch", "origin", "main", "--quiet", timeout=20)
+        fetch_ok = bool(fetched and fetched.returncode == 0)
 
     base = _git("rev-parse", "origin/main")
     if base is None or base.returncode != 0:

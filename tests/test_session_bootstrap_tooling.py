@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import session_bootstrap
+import session_gate
 import _session_autobridge as session_autobridge_lib
 
 
@@ -107,6 +108,51 @@ class ToolingCurrencyTest(unittest.TestCase):
             result = session_bootstrap.tooling_currency()
         self.assertEqual(session_bootstrap.TOOLING_CURRENT, result["state"])
 
+    def test_default_mode_still_fetches_origin_main(self) -> None:
+        calls = []
+        response = git_responses(is_ancestor=0)
+
+        def recording_git(*args, timeout=15):
+            calls.append(args)
+            return response(*args, timeout=timeout)
+
+        with patch.object(session_bootstrap, "_git", side_effect=recording_git):
+            result = session_bootstrap.tooling_currency()
+
+        self.assertEqual(session_bootstrap.TOOLING_CURRENT, result["state"])
+        self.assertIn(("fetch", "origin", "main", "--quiet"), calls)
+
+    def test_hook_uses_local_ref_without_attempting_a_network_fetch(self) -> None:
+        calls = []
+        response = git_responses(is_ancestor=0)
+
+        def recording_git(*args, timeout=15):
+            calls.append(args)
+            return response(*args, timeout=timeout)
+
+        with patch.object(session_bootstrap, "_git", side_effect=recording_git):
+            status, detail = session_gate.tooling_check()
+
+        self.assertEqual(session_gate.PASS, status)
+        self.assertEqual(
+            "checkout 76f3670 has origin/main (current as of the last fetch)",
+            detail,
+        )
+        self.assertFalse(
+            any(args and args[0] == "fetch" for args in calls),
+            "SessionStart hook must not attempt a network fetch",
+        )
+
+    def test_fetch_mode_only_changes_claim_source_not_current_verdict(self) -> None:
+        with patch.object(session_bootstrap, "_git", side_effect=git_responses(is_ancestor=0)):
+            fetched = session_bootstrap.tooling_currency()
+            cached = session_bootstrap.tooling_currency(fetch=False)
+
+        for field in ("state", "head", "branch", "origin_main"):
+            self.assertEqual(fetched[field], cached[field], field)
+        self.assertTrue(fetched["fetched"])
+        self.assertFalse(cached["fetched"])
+
     def test_a_checkout_that_cannot_reach_origin_main_is_stale(self) -> None:
         """The real 2026-07-28 shape: a lane branch 24 commits behind main."""
         with patch.object(
@@ -129,6 +175,14 @@ class ToolingCurrencyTest(unittest.TestCase):
             session_bootstrap, "_git", side_effect=git_responses(is_ancestor=0, have_origin=False)
         ):
             result = session_bootstrap.tooling_currency()
+        self.assertEqual(session_bootstrap.TOOLING_UNKNOWN, result["state"])
+        self.assertNotEqual(session_bootstrap.TOOLING_CURRENT, result["state"])
+
+    def test_no_fetch_mode_missing_origin_ref_is_unknown_never_a_pass(self) -> None:
+        with patch.object(
+            session_bootstrap, "_git", side_effect=git_responses(is_ancestor=0, have_origin=False)
+        ):
+            result = session_bootstrap.tooling_currency(fetch=False)
         self.assertEqual(session_bootstrap.TOOLING_UNKNOWN, result["state"])
         self.assertNotEqual(session_bootstrap.TOOLING_CURRENT, result["state"])
 
@@ -257,6 +311,18 @@ class StaleAnnouncementTest(unittest.TestCase):
         self.assertIn("last fetched", offline_text)
         self.assertIn("may have moved", offline_text)
         self.assertNotIn("may have moved", online_text)
+
+    def test_a_fetched_pass_keeps_its_unqualified_wording(self) -> None:
+        online = {
+            "state": "current",
+            "head": "e421f90",
+            "origin_main": "e421f90",
+            "fetched": True,
+        }
+        self.assertEqual(
+            "[tooling] checkout e421f90 has origin/main — current",
+            self.announce(online, allowed=False),
+        )
 
     def test_the_override_banner_says_results_are_bound_to_old_tooling(self) -> None:
         text = self.announce(StaleBootstrapRefusesTest.STALE, allowed=True)
