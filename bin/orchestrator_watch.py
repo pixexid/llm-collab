@@ -37,6 +37,7 @@ from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
     BbExecutableRefused,
     BbProjectIdRefused,
+    BbResponseTooLarge,
     bb_executable_from_project,
     bb_project_id_from_project,
     subprocess_transport,
@@ -538,6 +539,7 @@ def proxy_environment_section() -> str:
 def fetch_tls_evidence(endpoint: tuple[str, int] | None, timeout_seconds: float) -> str:
     """Capture raw command output within one shared hard deadline."""
     deadline = time.monotonic() + timeout_seconds
+    remaining_chars = TLS_CAPTURE_MAX_RESPONSE_CHARS
 
     def remaining() -> float:
         value = deadline - time.monotonic()
@@ -546,12 +548,22 @@ def fetch_tls_evidence(endpoint: tuple[str, int] | None, timeout_seconds: float)
         return value
 
     def run(executable: Sequence[str], argv: Sequence[str]):
-        # Despite its bb-named parameter, subprocess_transport is the shared
-        # bounded-process primitive. This coupling gives every forensic probe
-        # one launch deadline, bounded reads, and the existing child cleanup.
-        return subprocess_transport(
-            executable, max_response_chars=TLS_CAPTURE_MAX_RESPONSE_CHARS
-        )(argv, remaining())
+        nonlocal remaining_chars
+        if remaining_chars <= 0:
+            raise RuntimeError("TLS forensic output budget exhausted")
+        # The transport bounds each stream independently, so split the shared
+        # remainder between stdout and stderr before either stream is read.
+        try:
+            result = subprocess_transport(
+                executable, max_response_chars=remaining_chars // 2
+            )(argv, remaining())
+        except BbResponseTooLarge as error:
+            raise RuntimeError("TLS forensic output budget exhausted") from error
+        used = len(result.stdout) + len(result.stderr)
+        if used > remaining_chars:
+            raise RuntimeError("TLS forensic output budget exhausted")
+        remaining_chars -= used
+        return result
 
     def command_section(
         label: str,

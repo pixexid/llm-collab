@@ -504,7 +504,7 @@ class TlsForensicCaptureTest(unittest.TestCase):
             stderr = ""
 
         def transport(_executable, *, max_response_chars):
-            self.assertEqual(watch.TLS_CAPTURE_MAX_RESPONSE_CHARS, max_response_chars)
+            self.assertGreater(max_response_chars, 0)
             return lambda _argv, _timeout: Result()
 
         cases = (
@@ -524,6 +524,39 @@ class TlsForensicCaptureTest(unittest.TestCase):
                         output,
                     )
                     self.assertIn("-servername bb.example", output)
+
+    def test_shared_output_budget_fails_each_remaining_section_visibly(self) -> None:
+        class Result:
+            exit_code = 0
+            stdout = "ab"
+            stderr = "cd"
+
+        limits = []
+
+        def transport(_executable, *, max_response_chars):
+            limits.append(max_response_chars)
+            return lambda _argv, _timeout: Result()
+
+        with mock.patch.object(
+            watch, "TLS_CAPTURE_MAX_RESPONSE_CHARS", 4
+        ), mock.patch.object(
+            watch.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"
+        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
+            output = watch.fetch_tls_evidence(("bb.example", 443), 1.0)
+
+        self.assertEqual([2], limits)
+        self.assertIn("=== OPENSSL S_CLIENT ===", output)
+        for section in (
+            "SYSTEM DNS (A AND AAAA)",
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)",
+        ):
+            self.assertIn(
+                f"=== {section} ===", output
+            )
+        self.assertEqual(
+            2,
+            output.count("FAILED: TLS forensic output budget exhausted"),
+        )
 
     def test_fetch_timeout_writes_every_section_as_failed(self) -> None:
         def timed_out(_host, _timeout):
