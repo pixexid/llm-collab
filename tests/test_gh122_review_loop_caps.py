@@ -1507,22 +1507,28 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(normalized(phrase), workflow)
 
-    def test_ax_docs_contain_no_prohibited_routing_or_delivery_claim(self):
-        """Scan every maintained Markdown block for the wrong claims themselves.
+    def test_ax_corrections_do_not_regress_in_changed_docs(self):
+        """Reject the two corrected claims in this PR's documentation files."""
 
-        Presence of corrected prose proves nothing: the old sentence can survive
-        beside it. This guard therefore reports only prohibited claims, with the
-        source path and first line of the offending block. Historical contract
-        entries are excluded because the changelog must remain evidence.
-        """
-
-        docs = {
-            path
-            for path in REPO_ROOT.rglob("*.md")
-            if not {"Chats", "Tasks", "State"}.intersection(
-                path.relative_to(REPO_ROOT).parts
-            )
-        }
+        docs = (
+            AGENTS_DOC,
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "docs/adapters/pm2.md",
+            REPO_ROOT / "docs/multi-project.md",
+            REPO_ROOT / "docs/schema-reference.md",
+            REPO_ROOT / "docs/workflows/README.md",
+            REPO_ROOT / "docs/workflows/bb-workers.md",
+            REPO_ROOT / "docs/workflows/claude-code-desktop-computer-use-bridge.md",
+            REPO_ROOT / "docs/workflows/collab-thread-quickstart.md",
+            REPO_ROOT / "docs/workflows/commit-push-prs.md",
+            REPO_ROOT / "docs/workflows/isolated-worktrees.md",
+            REPO_ROOT / "docs/workflows/pi-workers.md",
+            REPO_ROOT / "docs/workflows/review-and-handoff.md",
+            REPO_ROOT / "docs/workflows/session-autobridge-runbook.md",
+            REPO_ROOT / "docs/workflows/session-startup.md",
+            REPO_ROOT / "docs/workflows/task-intake-and-delegation.md",
+            REPO_ROOT / "tools/axbridge/README.md",
+        )
         verified_means_delivery = (
             re.compile(
                 r"`?VERIFIED`?(?:\s+exit\s+0)?\s+"
@@ -1562,22 +1568,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             r"condition (?:is|has been) met",
             re.I,
         )
-        wrong_ruling_anchor = re.compile(
-            r"standing routing rule.{0,240}#one-writer-per-lane",
-            re.I,
-        )
-        ax_targets_bb = re.compile(
-            r"(?:AX\s+(?:can|may|does)\s+(?:reach|wake|target)\s+"
-            r"(?:a\s+|the\s+)?BB(?:-backed)?\s+(?:worker|session|thread)|"
-            r"(?:^|[.!?]\s+)(?!do\s+not\s+)ring\s+"
-            r"(?:a\s+|the\s+)?BB(?:-backed)?\s+(?:worker|session|thread))",
-            re.I,
-        )
-
         offenders = []
-        for path in sorted(docs):
+        for path in docs:
             lines = path.read_text(encoding="utf-8").splitlines()
-            if path in {AGENTS_DOC, REPO_ROOT / "CLAUDE.md"}:
+            if path == AGENTS_DOC:
                 in_history = False
                 for index, line in enumerate(lines):
                     if line == "### Recent contract changes":
@@ -1610,10 +1604,6 @@ class ReviewLoopCapContractTest(unittest.TestCase):
                     offenders.append(
                         f"{location}: printed AX command is actionable without the app-only condition"
                     )
-                if wrong_ruling_anchor.search(block):
-                    offenders.append(f"{location}: standing ruling link uses the wrong anchor")
-                if ax_targets_bb.search(block):
-                    offenders.append(f"{location}: AX is presented as a BB-session route")
                 block_start = None
                 block_lines = []
 

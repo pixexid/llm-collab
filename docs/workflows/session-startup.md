@@ -244,14 +244,16 @@ participants.
 
 ## Claude Desktop Rule
 
-BB workers do not enter this path unless the task satisfies the operator-sourced
-standing routing rule in [`AGENTS.md`](../../AGENTS.md#bb-worker-surface).
-Focus is BB until the Codex app reaches parity with the Claude app and BB; use
-the Codex app only for app-exclusive tooling. Use `bb-workers.md` for
-OpenAI-model interaction when the task does not need a Codex-app-only tool that
-BB cannot reach. The mechanics below are the legitimate conditional procedure
-only when it does. They do not independently authorize provisioning or waking
-a Codex-app worker.
+BB workers do not enter this path. The app-exclusive-tool condition selects the
+surface on which the orchestrator performs the work; it does not authorize
+delegating that work to a BB worker. A BB worker has no `llm-collab` identity or
+AX-addressable session. Focus is BB until the Codex app reaches parity with the
+Claude app and BB; use the Codex app only for app-exclusive tooling. The
+operator-sourced standing routing rule is in
+[`AGENTS.md`](../../AGENTS.md#bb-worker-surface). The mechanics below are the
+legitimate conditional procedure only for orchestrator work on that app
+surface. They do not independently authorize provisioning or waking a
+Codex-app worker.
 
 Claude has one wake path in every registration and project shape: the durable
 `Chats/` packet, picked up by the Claude app's own background inbox watcher.
