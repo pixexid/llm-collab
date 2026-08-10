@@ -15,10 +15,12 @@ from llm_collab.bb_client import (
     BbProfile,
     BbRefusal,
     BbResponseReadError,
+    BbProjectIdRefused,
     BbThread,
     BbTransport,
     BbTransportResult,
     BbTransportTimeout,
+    bb_project_id_from_project,
     subprocess_transport,
 )
 
@@ -162,19 +164,14 @@ def plan_spawn(
     bb = registry_entry.get("bb")
     if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
         return GateRefusal("bb_disabled", "bb adapter is not enabled for this project")
-    native_project_id = bb.get("project_id", project_id)
-    if not isinstance(native_project_id, str) or not native_project_id:
-        return GateRefusal("registry_bb_project_invalid", "bb.project_id is invalid")
-    # GH-695 P2-D: match RAW and REJECT a padded bb.project_id rather than
-    # normalizing it. The recorder (bin/record_executed_triples.py) does the same,
-    # so the spawn gate and the recorder enforce the same scope: a padded registry
-    # value used to flow raw here while the recorder stripped it, so a thread could
-    # spawn under one id and be recorded (or ignored) under another. `.strip()` is
-    # used ONLY to detect padding, never to transform the value that flows downstream.
-    if native_project_id != native_project_id.strip():
+    try:
+        native_project_id = bb_project_id_from_project(registry_entry, project_id)
+    except BbProjectIdRefused as error:
+        if not error.raw_nonempty:
+            return GateRefusal("registry_bb_project_invalid", "bb.project_id is invalid")
         return GateRefusal(
             "registry_bb_project_invalid",
-            f"bb.project_id {native_project_id!r} has surrounding whitespace; "
+            f"bb.project_id {error.value!r} has surrounding whitespace; "
             "refusing (match raw, reject padded)",
         )
 

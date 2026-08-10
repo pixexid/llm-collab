@@ -92,6 +92,32 @@ class BbExecutableRefused(ValueError):
     """
 
 
+class BbProjectIdRefused(ValueError):
+    """The raw ``bb.project_id`` is empty, non-text, or padded."""
+
+    def __init__(self, value: object) -> None:
+        super().__init__("bb.project_id must be non-empty unpadded text")
+        self.value = value
+        self.raw_nonempty = isinstance(value, str) and bool(value)
+        self.trimmed_nonempty = isinstance(value, str) and bool(value.strip())
+
+
+def bb_project_id_from_project(
+    project: Mapping[str, Any] | None,
+    fallback_project_id: str,
+) -> str:
+    """Return raw ``bb.project_id``, rejecting padding without normalizing it."""
+    bb = project.get("bb") if isinstance(project, Mapping) else None
+    value = (
+        bb.get("project_id", fallback_project_id)
+        if isinstance(bb, Mapping)
+        else fallback_project_id
+    )
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise BbProjectIdRefused(value)
+    return value
+
+
 def bb_executable_from_project(project: Mapping[str, Any] | None) -> list[str]:
     """The one resolver for the BB invocation command (GH-728).
 

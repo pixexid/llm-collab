@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import select
@@ -892,6 +894,46 @@ class MarkerRefreshTest(unittest.TestCase):
 
 
 class ProjectConfigTest(unittest.TestCase):
+    def test_padded_bb_project_id_refuses_without_refreshing_liveness_marker(
+        self,
+    ) -> None:
+        project = {
+            "bb": {
+                "project_id": " native-project ",
+                "executable": ["configured-bb"],
+                "timeout_seconds": 5,
+            },
+            "github": {"repo": "owner/repo"},
+        }
+        stderr = io.StringIO()
+        with mock.patch.object(watch, "get_project", return_value=project), mock.patch.object(
+            watch._watcher_liveness, "write_marker"
+        ) as writer, mock.patch.object(
+            sys,
+            "argv",
+            [
+                "orchestrator_watch.py",
+                "worker-lifecycle",
+                "--project",
+                "project-a",
+                "--session",
+                "session-a",
+                "--state-dir",
+                "/unused",
+            ],
+        ), contextlib.redirect_stderr(stderr):
+            self.assertEqual(
+                1,
+                watch.main(),
+                "a padded bb.project_id must fail the watcher cycle",
+            )
+        writer.assert_not_called()
+        self.assertEqual(
+            "REFUSED: bb.project_id ' native-project ' has surrounding whitespace; "
+            "refusing (match raw, reject padded)",
+            stderr.getvalue().strip(),
+        )
+
     def test_property_c_missing_bb_executable_refuses_without_path_fallback(
         self,
     ) -> None:

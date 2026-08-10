@@ -192,7 +192,11 @@ class PreflightRefusalTest(unittest.TestCase):
                 outcome = planned(registry_entry=registry, transport=transport)
                 self.assertIsInstance(outcome, GateRefusal, f"{project_id}: padded bb.project_id must refuse")
                 self.assertEqual("registry_bb_project_invalid", outcome.reason)
-                self.assertIn("surrounding whitespace", outcome.detail)
+                self.assertEqual(
+                    "bb.project_id ' proj_bb ' has surrounding whitespace; "
+                    "refusing (match raw, reject padded)",
+                    outcome.detail,
+                )
                 self.assertEqual([], transport.calls,
                                  "the padded-scope refusal happens before any git call")
 

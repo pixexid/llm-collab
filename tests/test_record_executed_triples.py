@@ -419,7 +419,11 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         r = self._resolved("amiga", "thr_A", thread_project=" proj_amiga ")
         self.assertNotEqual(0, r.returncode, "a padded bb.project_id must be refused, not normalized")
-        self.assertIn("surrounding whitespace", r.stderr)
+        self.assertEqual(
+            "project 'amiga' bb.project_id ' proj_amiga ' has surrounding whitespace; "
+            "refusing to record (match raw, reject padded — GH-695 P2-D)",
+            r.stderr.strip(),
+        )
         self.assertFalse(path.exists(), "no record file is written for a refused scope")
 
     def test_padded_bb_project_id_rejected_not_normalized_non_amiga(self) -> None:
@@ -429,7 +433,11 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         ])
         r = self._resolved("nuvyr_app", "thr_N", thread_project="\tproj_nuvyr")
         self.assertNotEqual(0, r.returncode, "non-Amiga path must also refuse a padded bb.project_id")
-        self.assertIn("surrounding whitespace", r.stderr)
+        self.assertEqual(
+            "project 'nuvyr_app' bb.project_id '\\tproj_nuvyr' has surrounding whitespace; "
+            "refusing to record (match raw, reject padded — GH-695 P2-D)",
+            r.stderr.strip(),
+        )
 
     # -- F2: state root -----------------------------------------------------
 
