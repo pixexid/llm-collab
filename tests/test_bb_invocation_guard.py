@@ -7,6 +7,23 @@ bare BB invocation, so the seventh instance of the bare-``bb`` class arrives
 as a red test in the authoring worker's own suite, seconds after it is
 written, instead of as a review finding hours later.
 
+Detection approach — deliberately independent of where a line break falls
+(PR #735 review, P2: a line-by-line scan never presents both tokens of the
+ordinary multiline ``subprocess.run([\\n    "bb", ...])`` form to any
+pattern, so the guard stayed green with a bare invocation present):
+
+- Python files are parsed with ``ast`` and walked. Two node shapes flag: a
+  list/tuple literal whose first element is the constant string ``bb`` (an
+  argv being constructed, whether assigned or passed inline, on one line or
+  many), and a call whose first positional argument is the constant string
+  ``bb`` (``spawn("bb", ...)``, ``which("bb")`` — the PATH-fallback probe).
+  AST matching needs no subscript lookbehind (``entry["bb"]`` is a Subscript,
+  never a List) and cannot be fooled by comments, docstrings, or formatting.
+  An unparseable production file fails the guard rather than being skipped.
+- TS/JS files have no parser here, so they are scanned as WHOLE-FILE text
+  with regexes whose ``\\s`` spans newlines; a multiline array literal is as
+  ordinary there as in Python. The subscript lookbehind is retained for them.
+
 Scope and exemptions — deliberately narrow:
 
 - Scanned: ``bin/``, ``llm_collab/``, ``scripts/`` (Python) and ``bb-plugins/``,
@@ -18,15 +35,11 @@ Scope and exemptions — deliberately narrow:
   by review, not by this guard. No production file is exempt: after GH-728 the
   resolver itself holds no bb argv literal, so a clean tree needs zero
   exemptions and any hit is a real violation.
-
-The patterns name bb as the *command*: an argv list literal whose first
-element is the bb binary (with a lookbehind excluding subscripts such as
-``entry["bb"]``), a bb literal passed straight to a process-spawning call, or
-a ``which("bb")`` PATH lookup, which is how a PATH fallback gets built.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -36,10 +49,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PY_DIRS = ("bin", "llm_collab", "scripts")
 TS_DIRS = ("bb-plugins", "pi-extensions")
 
-PATTERNS = (
-    # argv list literal starting with the bb binary: ["bb"], [ "bb", ...].
-    # The lookbehind excludes subscripts (entry["bb"]) and indexing after
-    # a call or string, which are config reads, not invocations.
+TS_PATTERNS = (
+    # argv array literal starting with the bb binary, across line breaks.
+    # The lookbehind excludes subscripts (entry["bb"]), which are config
+    # reads, not invocations.
     re.compile(r"(?<![\w\)\]\"'`])\[\s*[\"']bb[\"'\s,\]]"),
     # bb literal as the command argument of a process-spawning call.
     re.compile(
@@ -50,18 +63,65 @@ PATTERNS = (
 )
 
 
+# Function names whose first argument is a command: process spawns and PATH
+# lookups. ``get``/subscript-style config reads (``project.get("bb")``) are
+# deliberately NOT in this set — they read the registry, they do not invoke.
+SPAWN_NAMES = frozenset({
+    "Popen", "run", "exec", "execv", "execve", "execl", "execlp", "execvp",
+    "spawn", "spawnl", "spawnlp", "system", "popen", "check_output",
+    "check_call", "call", "which",
+})
+
+
+def _is_bb_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "bb"
+
+
+def _is_bb_command_text(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (node.value == "bb" or node.value.startswith(("bb ", "bb\t")))
+    )
+
+
+def _python_hits(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts and _is_bb_constant(node.elts[0]):
+            hits.append(f"{node.lineno}: argv literal starting with the bb binary")
+        elif isinstance(node, ast.Call) and node.args and _is_bb_command_text(node.args[0]):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else (
+                func.id if isinstance(func, ast.Name) else None
+            )
+            if name in SPAWN_NAMES:
+                hits.append(f"{node.lineno}: bb literal as the command argument of a call")
+    return hits
+
+
+def _ts_hits(path: Path) -> list[str]:
+    text = path.read_text()
+    hits: list[str] = []
+    for pattern in TS_PATTERNS:
+        for match in pattern.finditer(text):
+            lineno = text.count("\n", 0, match.start()) + 1
+            hits.append(f"{lineno}: {match.group(0)!r}")
+    return hits
+
+
 def bare_bb_invocations() -> list[str]:
     hits: list[str] = []
-    files: list[Path] = []
     for directory in PY_DIRS:
-        files.extend(sorted((ROOT / directory).rglob("*.py")))
+        for path in sorted((ROOT / directory).rglob("*.py")):
+            for hit in _python_hits(path):
+                hits.append(f"{path.relative_to(ROOT)}:{hit}")
     for directory in TS_DIRS:
         for suffix in ("*.ts", "*.js"):
-            files.extend(sorted((ROOT / directory).rglob(suffix)))
-    for path in files:
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            if any(pattern.search(line) for pattern in PATTERNS):
-                hits.append(f"{path.relative_to(ROOT)}:{lineno}: {line.strip()}")
+            for path in sorted((ROOT / directory).rglob(suffix)):
+                for hit in _ts_hits(path):
+                    hits.append(f"{path.relative_to(ROOT)}:{hit}")
     return hits
 
 

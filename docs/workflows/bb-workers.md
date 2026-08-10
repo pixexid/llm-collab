@@ -82,14 +82,17 @@ the value may be absolute, relative to `projects_root`, or `..`-relative, and
 Use the exact project's configured `bb.executable` for the entire native
 lifecycle. `bin/bb_spawn.py` obtains the same setting through
 `client_from_project()`; using bare `bb` here could provision on one server and
-ask the assignment gate to attach on another. Preserve every configured argv
-token in a Bash array:
+ask the assignment gate to attach on another. An absent `bb.executable`
+**refuses** — there is no PATH fallback, matching
+`bb_executable_from_project()` (GH-728), which refuses the same project at
+spawn, continuation, watcher startup, and the SessionStart hook. Preserve every
+configured argv token in a Bash array:
 
 ```bash
 repo_root=$(python3.11 -c "import sys; sys.path.insert(0, 'bin'); from _helpers import resolve_project_repo_path; print(resolve_project_repo_path('<project-id>', '<repo-id>'))")
 base_branch=$(jq -r '.projects[] | select(.id=="<project-id>") | .default_branch_base' projects.json)
 bb_cmd=()
-while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<project-id>") | (.bb.executable // ["bb"])[] | ., "\u0000"' projects.json)
+while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(jq -j '.projects[] | select(.id=="<project-id>") | .bb.executable | if type == "array" then .[] | ., "\u0000" else empty end' projects.json)
 [ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
 git -C "$repo_root" fetch origin "$base_branch"
 base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
