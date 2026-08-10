@@ -419,6 +419,123 @@ class EventDeliveryTest(unittest.TestCase):
         )
 
 
+class TlsForensicCaptureTest(unittest.TestCase):
+    ERROR = watch.ProbeError(
+        'Get "https://api.github.com/repos": tls: failed to verify certificate: '
+        "x509: certificate signed by unknown authority"
+    )
+
+    def record_for(self, directory: str) -> dict:
+        records = list((Path(directory) / "tls-forensics").glob("*.json"))
+        self.assertEqual(1, len(records), "one certificate failure must write one record")
+        return json.loads(records[0].read_text(encoding="utf-8"))
+
+    def test_certificate_failure_records_a_captured_chain_as_complete(self) -> None:
+        chain = "-----BEGIN CERTIFICATE-----\npeer\n-----END CERTIFICATE-----"
+        messages = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ) as state_dir, mock.patch.object(
+            watch._watcher_liveness, "write_marker"
+        ) as marker:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: (_ for _ in ()).throw(self.ERROR),
+                emit=messages.append,
+                tls_fetcher=lambda host, timeout: {
+                    "presented_certificate_chain_pem": [chain],
+                    "chain_error": None,
+                    "openssl": {"exit_code": 0, "stderr": ""},
+                    "network_route_context": {
+                        "best_effort": True,
+                        "captured": True,
+                        "command": ["route", "-n", "get", host],
+                        "output": "interface: en0",
+                        "error": None,
+                    },
+                },
+            )
+            record = self.record_for(directory)
+
+        self.assertFalse(completed)
+        self.assertEqual({"chain_captured": True, "reason": None}, record["completeness"])
+        self.assertEqual([chain], record["presented_certificate_chain_pem"])
+        self.assertEqual("api.github.com", record["endpoint"]["host"])
+        self.assertEqual(str(self.ERROR), record["error_text"])
+        self.assertTrue(record["network_route_context"]["best_effort"])
+        self.assertEqual([mock.call("project-a")], state_dir.call_args_list)
+        marker.assert_not_called()
+        self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
+
+    def test_certificate_failure_records_fetch_timeout_as_incomplete(self) -> None:
+        def timed_out(_host, _timeout):
+            raise TimeoutError("openssl chain fetch timed out")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: (_ for _ in ()).throw(self.ERROR),
+                emit=lambda _line: None,
+                tls_fetcher=timed_out,
+            )
+            record = self.record_for(directory)
+
+        self.assertFalse(completed)
+        self.assertEqual(
+            {
+                "chain_captured": False,
+                "reason": "openssl chain fetch timed out",
+            },
+            record["completeness"],
+        )
+        self.assertEqual([], record["presented_certificate_chain_pem"])
+        self.assertFalse(record["network_route_context"]["captured"])
+        marker.assert_not_called()
+
+    def test_capture_timeout_uses_only_the_cycle_time_remaining(self) -> None:
+        now = [100.0]
+        seen_timeouts = []
+
+        def monotonic() -> float:
+            return now[0]
+
+        def fail_near_deadline() -> bool:
+            now[0] += watch.WATCHER_CYCLE_DEADLINE_SECONDS - 0.25
+            raise self.ERROR
+
+        def fetch(_host: str, timeout: float) -> dict:
+            seen_timeouts.append(timeout)
+            return {
+                "presented_certificate_chain_pem": [],
+                "chain_error": "no chain",
+                "network_route_context": {"best_effort": True, "captured": False},
+            }
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            self.assertFalse(
+                watch.run_once(
+                    "worker-lifecycle",
+                    "project-a",
+                    "session-a",
+                    fail_near_deadline,
+                    emit=lambda _line: None,
+                    tls_fetcher=fetch,
+                    monotonic=monotonic,
+                )
+            )
+            self.record_for(directory)
+
+        self.assertEqual([0.25], seen_timeouts)
+
+
 class StatePersistenceTest(unittest.TestCase):
     def test_state_within_bound_round_trips_through_save_and_load(self) -> None:
         state = {"statuses": {"thread-a": "idle", "thread-b": "active"}}

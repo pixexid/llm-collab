@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 import time
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
@@ -19,7 +22,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(ROOT))
 
 from _bounded_io import read_regular_file_bounded  # noqa: E402
-from _helpers import get_project, write_file_durably  # noqa: E402
+from _helpers import (  # noqa: E402
+    get_project,
+    project_state_dir,
+    utc_iso,
+    write_file_durably,
+)
 from _python_runtime import require_python  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import pr_watch  # noqa: E402
@@ -54,6 +62,17 @@ WATCHER_CYCLE_DEADLINE_SECONDS = 300.0
 SUPPORTED_PR_STATES = frozenset({"open", "closed"})
 PR_HEAD_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 THREAD_ENUM_MAX_RESPONSE_CHARS = MAX_RESPONSE_CHARS
+TLS_CAPTURE_TIMEOUT_SECONDS = 5.0
+TLS_CAPTURE_MAX_RESPONSE_CHARS = 1 << 20
+TLS_CERTIFICATE_PATTERN = re.compile(
+    r"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL
+)
+TLS_HOST_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.-])"
+    r"((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63})"
+    r"(?::\d{1,5})?"
+)
 
 
 class ProbeError(RuntimeError):
@@ -459,6 +478,212 @@ def heartbeat_cycle(
     return complete
 
 
+def is_certificate_verification_failure(error: BaseException) -> bool:
+    text = str(error).lower()
+    return "certificate" in text and any(
+        phrase in text
+        for phrase in (
+            "failed to verify",
+            "verify failed",
+            "verification failed",
+            "unknown authority",
+            "self-signed",
+            "not trusted",
+        )
+    )
+
+
+def endpoint_host_from_error(error: BaseException) -> str | None:
+    text = str(error)
+    url = re.search(r"https?://[^\s\"']+", text, re.IGNORECASE)
+    if url:
+        return urlsplit(url.group(0)).hostname
+    host = TLS_HOST_PATTERN.search(text)
+    return host.group(1) if host else None
+
+
+def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
+    """Fetch the presented chain and route context within one hard deadline."""
+    deadline = time.monotonic() + timeout_seconds
+
+    def remaining() -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError("TLS forensic capture timed out")
+        return value
+
+    chain: list[str] = []
+    chain_error: str | None = None
+    target = f"[{host}]:443" if ":" in host else f"{host}:443"
+    openssl_command = [
+        "openssl",
+        "s_client",
+        "-connect",
+        target,
+        "-servername",
+        host,
+        "-showcerts",
+    ]
+    openssl_result = {
+        "command": openssl_command,
+        "exit_code": None,
+        "stderr": "",
+    }
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        chain_error = "openssl executable not found"
+    else:
+        command = (
+            "/bin/sh",
+            "-c",
+            'exec "$1" s_client -connect "$2" -servername "$3" '
+            "-showcerts </dev/null",
+            "tls-capture",
+            openssl,
+            target,
+            host,
+        )
+        try:
+            result = subprocess_transport(
+                command, max_response_chars=TLS_CAPTURE_MAX_RESPONSE_CHARS
+            )((), remaining())
+            openssl_result = {
+                "command": openssl_command,
+                "exit_code": result.exit_code,
+                "stderr": result.stderr,
+            }
+            chain = TLS_CERTIFICATE_PATTERN.findall(result.stdout)
+            if not chain:
+                chain_error = (
+                    result.stderr.strip()
+                    or f"openssl exited {result.exit_code} without a presented certificate"
+                )
+        except BaseException as error:
+            detail = str(error) or type(error).__name__
+            chain_error = f"openssl s_client failed: {detail}"
+
+    route_context = {
+        "best_effort": True,
+        "captured": False,
+        "command": None,
+        "output": "",
+        "error": None,
+    }
+    route = shutil.which("route")
+    ip = shutil.which("ip") if route is None else None
+    if route is not None:
+        route_command = (route, "-n", "get", host)
+    elif ip is not None:
+        route_command = (ip, "route", "get", host)
+    else:
+        route_command = ()
+        route_context["error"] = "no route or ip executable found"
+    if route_command:
+        route_context["command"] = list(route_command)
+        try:
+            result = subprocess_transport(
+                (route_command[0],), max_response_chars=TLS_CAPTURE_MAX_RESPONSE_CHARS
+            )(route_command[1:], min(1.0, remaining()))
+            output = result.stdout.strip() or result.stderr.strip()
+            route_context.update(
+                captured=bool(output),
+                output=output,
+                error=None if result.exit_code == 0 else f"exit {result.exit_code}",
+            )
+        except BaseException as error:
+            route_context["error"] = str(error) or type(error).__name__
+
+    return {
+        "presented_certificate_chain_pem": chain,
+        "chain_error": chain_error,
+        "openssl": openssl_result,
+        "network_route_context": route_context,
+    }
+
+
+def capture_tls_failure(
+    name: str,
+    project_id: str,
+    error: BaseException,
+    timeout_seconds: float,
+    *,
+    fetcher: Callable[[str, float], Mapping] = fetch_tls_evidence,
+    timestamp: Callable[[], str] = utc_iso,
+) -> Path:
+    captured_at = timestamp()
+    host = endpoint_host_from_error(error)
+    evidence: Mapping = {}
+    fetch_error: str | None = None
+    if host is None:
+        fetch_error = "endpoint host could not be determined from the watcher error"
+    elif timeout_seconds <= 0:
+        fetch_error = "watcher cycle deadline exhausted before chain capture"
+    else:
+        try:
+            evidence = fetcher(host, timeout_seconds)
+            if not isinstance(evidence, Mapping):
+                raise TypeError("TLS evidence fetcher returned a non-object")
+        except BaseException as capture_error:
+            fetch_error = str(capture_error) or type(capture_error).__name__
+            evidence = {}
+
+    chain = evidence.get("presented_certificate_chain_pem", [])
+    chain_captured = (
+        isinstance(chain, list)
+        and bool(chain)
+        and all(isinstance(certificate, str) and certificate for certificate in chain)
+    )
+    if not chain_captured:
+        chain = []
+    completeness_reason = None if chain_captured else (
+        fetch_error
+        or evidence.get("chain_error")
+        or "no presented certificate chain was captured"
+    )
+    route_context = evidence.get("network_route_context")
+    if not isinstance(route_context, Mapping):
+        route_context = {
+            "best_effort": True,
+            "captured": False,
+            "command": None,
+            "output": "",
+            "error": fetch_error or "route context was not returned",
+        }
+
+    route_context = dict(route_context)
+    route_context["best_effort"] = True
+    record = {
+        "captured_at_utc": captured_at,
+        "watcher_name": name,
+        "error_text": str(error),
+        "endpoint": {
+            "host": host,
+            "note": (
+                "determined from watcher error text"
+                if host is not None
+                else "could not be determined from watcher error text"
+            ),
+        },
+        "capture_timeout_seconds": timeout_seconds,
+        "presented_certificate_chain_pem": chain,
+        "openssl": evidence.get("openssl"),
+        "network_route_context": route_context,
+        "completeness": {
+            "chain_captured": chain_captured,
+            "reason": completeness_reason,
+        },
+    }
+    stamp = re.sub(r"[^0-9A-Za-z]+", "-", captured_at).strip("-")
+    safe_name = re.sub(r"[^0-9A-Za-z-]+", "-", name).strip("-")
+    path = (
+        project_state_dir(project_id)
+        / "tls-forensics"
+        / f"{stamp}-{safe_name}-{uuid.uuid4().hex[:8]}.json"
+    )
+    write_file_durably(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    return path
+
+
 def refresh_marker(
     name: str,
     project_id: str,
@@ -481,10 +706,27 @@ def run_once(
     check: Callable[[], bool],
     *,
     emit: Callable[[str], None] = emit_event,
+    tls_fetcher: Callable[[str, float], Mapping] = fetch_tls_evidence,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
+    deadline = cycle_deadline(None, monotonic)
     try:
         complete = check()
     except Exception as error:
+        if is_certificate_verification_failure(error):
+            try:
+                capture_tls_failure(
+                    name,
+                    project_id,
+                    error,
+                    min(
+                        TLS_CAPTURE_TIMEOUT_SECONDS,
+                        max(0.0, deadline - monotonic()),
+                    ),
+                    fetcher=tls_fetcher,
+                )
+            except BaseException:
+                pass
         emit(f"{name.upper()} CHECK FAILED — {error}")
         return False
     if not complete:
