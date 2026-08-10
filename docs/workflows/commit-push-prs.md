@@ -900,7 +900,9 @@ failure, it must classify that diff before starting the next lane:
 
 - own PR
 - explicitly bundled into the current task PR
-- intentionally abandoned or kept local with operator approval
+- intentionally abandoned or kept local with supervisor approval, subject to the
+  canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup)
 
 Run `git status --short --branch --untracked-files=all` in each touched repo,
 commit/push/open the PR for changes that should persist, and record any

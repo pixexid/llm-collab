@@ -345,12 +345,13 @@ generations and decides on the operator's behalf wherever doing so keeps the
 process unblocked; each per-project orchestrator owns that project's technical
 execution and verification.
 
-- Route decisions beyond the per-project orchestrator's stated authority to the
-  supervisor. The supervisor decides unless the canonical operator-only boundary
-  in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies; do not
-  carry a `pending operator decision` state for anything else. Keep technical
-  scope, implementation choices, bounded recovery, and the normal review/release
-  flow with the orchestrator.
+- **CONVENTION — supervisor decision routing.** Route decisions beyond the
+  per-project orchestrator's stated authority to the supervisor. The supervisor
+  decides unless the canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies. **Check:** a
+  `pending operator decision` state persisting on anything outside that boundary
+  is a violation. Keep technical scope, implementation choices, bounded recovery,
+  and the normal review/release flow with the orchestrator.
 - Spend expensive-model tokens on orchestration, independent review, and
   judgment. Delegate bounded work that a cheaper eligible worker can perform;
   evaluation candidates use their own execution tokens.
