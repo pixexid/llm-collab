@@ -16,13 +16,14 @@ pattern, so the guard stayed green with a bare invocation present):
   list/tuple literal whose first element is the constant string ``bb`` (an
   argv being constructed, whether assigned or passed inline, on one line or
   many), and ANY call supplied a bb literal — bare ``"bb"`` or a
-  shell-string command starting with ``"bb "`` — as its first positional
-  argument OR under ANY keyword name, regardless of the callee's name.
+  shell-string command starting with ``"bb "`` — under ANY positional slot
+  OR ANY keyword name, regardless of the callee's name.
   Positional and keyword supply are the same argument in two forms
   (``subprocess.run(args="bb ...", shell=True)`` spawns identically to
-  the positional form), so one rule with one exemption pair covers both;
-  a second parallel matching path would only duplicate the rule. The
-  keyword side is fail-CLOSED too — every keyword is inspected, with an
+  the positional form), so one rule with the existing callee-scoped exemption
+  concept covers both; a second parallel matching path would only duplicate
+  the rule. The keyword side is fail-CLOSED too — every keyword is inspected,
+  with an
   enumerated set of (callee, keyword) prose pairs exempted — for the same
   reason the callee side is: an enumerated set of spawn keywords fails
   open on the one nobody listed (the first version of this fix listed six
@@ -45,7 +46,15 @@ pattern, so the guard stayed green with a bare invocation present):
   caught by default, and a genuinely benign new shape fails loud until
   someone exempts it deliberately, in a diff, with a comment. The exemptions
   are named literals below: config-key reads (``get``) and prose constructors
-  whose first argument is a message, not a command.
+  whose inspected argument is a message, not a command. Python supplies an
+  argument positionally, by keyword, or through ``**kwargs``; every directly
+  written positional slot, every slot exposed at any nesting depth by literal
+  ``*`` list/tuple structure, and every keyword value (including the
+  ``**kwargs`` expression) is inspected, so all three supply channels take this
+  one name-agnostic rule. Recursive descent stops at a non-literal expansion
+  such as ``*some_variable``, ``*make_args()``, or a comprehension; those cannot
+  be resolved statically and stay out of scope with the variable indirection
+  documented below.
   AST matching needs no subscript lookbehind (``entry["bb"]`` is a Subscript,
   never a List) and cannot be fooled by comments, docstrings, or formatting.
   An unparseable production file fails the guard rather than being skipped.
@@ -61,7 +70,9 @@ pattern, so the guard stayed green with a bare invocation present):
 
 What this guard does NOT catch, deliberately: a bb literal reaching a spawn
 through a variable or other indirection (``cmd = "bb"; subprocess.run([cmd,
-...])``), where the first element is a Name rather than a constant. The class
+...])`` or ``subprocess.run(*some_variable)``), where the relevant AST node is
+a Name or other dynamic expression rather than statically visible literal
+structure. The class
 this guard exists to prevent is the accidentally written literal — six
 instances in one day, every one a literal — and nobody assigns ``"bb"`` to a
 variable by accident, so dataflow analysis would be disproportionate to a
@@ -122,20 +133,20 @@ SHELL_PATTERNS = TS_PATTERNS + (
 
 
 # Exemptions to the name-agnostic call check — each a named literal with its
-# reason. Anything taking a bb literal as its first argument under any other
-# name is flagged.
+# reason. Anything taking a bb literal as an argument under any other name is
+# flagged.
 
 # ``get`` reads a registry KEY named "bb" (``project.get("bb")``); it never
 # invokes a command. (8 such reads across bin/, llm_collab/, scripts/ when
 # this inversion landed.)
 BENIGN_KEY_READ_NAMES = frozenset({"get"})
 
-# Message/label constructors whose first argument is PROSE that happens to
+# Message/label constructors whose positional argument is PROSE that happens to
 # start with "bb " ("bb session is not active", "bb thread row ...", the
 # hook's "bb version" label) — not a shell-string command. The string-command
 # form (``os.system("bb thread list")``) stays caught under every other name,
-# known or not. (27 such call sites when this inversion landed; every one
-# verified prose.)
+# known or not. The original 27 first-slot sites and the four second-slot sites
+# below were each verified as prose.
 PROSE_FIRST_ARG_NAMES = frozenset({
     "ValueError",
     "RuntimeError",
@@ -144,6 +155,18 @@ PROSE_FIRST_ARG_NAMES = frozenset({
     "CanonicalIntegrityError",
     "SessionLifecycleError",
     "_line",
+    # BootstrapRefusal(reason, detail) in llm_collab/bb_bootstrap.py:238 —
+    # refusal detail rendered to the operator, never spawned.
+    "BootstrapRefusal",
+    # BbRefusal(reason, detail) in llm_collab/bb_client.py:297 — typed refusal
+    # detail returned to the caller, never spawned.
+    "BbRefusal",
+    # BbContinuationResult(state, detail) in
+    # llm_collab/bb_continuation.py:644 — result detail, never spawned.
+    "BbContinuationResult",
+    # GateRefusal(reason, detail) in llm_collab/spawn_gate.py:164 — pre-spawn
+    # refusal detail, never spawned.
+    "GateRefusal",
 })
 
 
@@ -187,17 +210,35 @@ PROSE_KEYWORD_PAIRS = frozenset({
 def _supplied_args(node: ast.Call) -> list[tuple[ast.AST, str | None]]:
     """(argument node, keyword name) pairs a command literal could ride in.
 
-    The first positional argument and every keyword value are the same
-    argument in different supply forms — ``run("bb x")`` and
+    Every positional argument and every keyword value are the same argument in
+    different supply forms — ``run("bb x")`` and
     ``run(args="bb x")`` spawn identically — so one rule inspects both.
     Keywords are ALL inspected, not enumerated: listing spawn keywords
     fails open on the one nobody listed (see module docstring). The
     keyword name is carried alongside so the callee-scoped prose pairs
-    (``PROSE_KEYWORD_PAIRS``) can be exempted. A ``**kwargs`` entry (``arg is None``) yields its dict expression,
-    which is a Name/Dict, never a str constant — the documented
-    indirection limit.
+    (``PROSE_KEYWORD_PAIRS``) can be exempted. Literal list/tuple structure under
+    ``*`` is expanded recursively so every visible element at any depth takes
+    the same rule. A dynamic ``*`` expression stays an ``ast.Starred`` and is
+    the documented indirection limit. A ``**kwargs`` entry (``arg is None``)
+    yields its dict expression, which is a Name/Dict, never a str constant — the
+    same limit.
     """
-    supplied = [(node.args[0], None)] if node.args else []
+    def literal_slots(argument: ast.AST) -> list[ast.AST]:
+        if isinstance(argument, ast.Starred) and isinstance(
+            argument.value, (ast.List, ast.Tuple)
+        ):
+            return [
+                slot
+                for element in argument.value.elts
+                for slot in literal_slots(element)
+            ]
+        return [argument]
+
+    supplied = [
+        (slot, None)
+        for argument in node.args
+        for slot in literal_slots(argument)
+    ]
     supplied.extend((kw.value, kw.arg) for kw in node.keywords)
     return supplied
 
@@ -210,20 +251,23 @@ def _python_hits(path: Path) -> list[str]:
             hits.append(f"{node.lineno}: argv literal starting with the bb binary")
         elif isinstance(node, ast.Call):
             name = _call_name(node)
-            for first, kw_name in _supplied_args(node):
+            for argument, kw_name in _supplied_args(node):
                 if (name, kw_name) in PROSE_KEYWORD_PAIRS:
                     # A verified prose site (callee, keyword) — message
                     # text, never a command; see the set's comment.
                     continue
-                if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                if not (
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                ):
                     # A List/Tuple argument is flagged at the List node
                     # itself; anything else (a Name, a call) is the documented
                     # indirection limit, not a literal.
                     continue
-                if first.value == "bb":
+                if argument.value == "bb":
                     if name not in BENIGN_KEY_READ_NAMES:
                         hits.append(f"{node.lineno}: bb literal supplied to a call")
-                elif first.value.startswith(("bb ", "bb\t")):
+                elif argument.value.startswith(("bb ", "bb\t")):
                     if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
                         hits.append(f"{node.lineno}: bb command string supplied to a call")
     return hits
