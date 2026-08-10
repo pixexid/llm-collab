@@ -244,10 +244,13 @@ participants.
 
 ## Claude Desktop Rule
 
-BB workers do not enter this path. The former use of the Codex app as a worker
-surface is dormant; use `bb-workers.md` for worker assignments. The mechanics
-below remain live for explicitly registered first-class mailbox participants
-and attended recovery, and do not authorize provisioning a Codex-app worker.
+BB workers do not enter this path unless the task satisfies the operator-sourced
+2026-08-10 condition in
+[`AGENTS.md`](../../AGENTS.md#one-writer-per-lane); use `bb-workers.md` for
+OpenAI-model interaction when the task does not need a Codex-app-only tool that
+BB cannot reach. The mechanics below are the legitimate conditional procedure
+only when it does. They do not independently authorize provisioning or waking a
+Codex-app worker.
 
 Claude has one wake path in every registration and project shape: the durable
 `Chats/` packet, picked up by the Claude app's own background inbox watcher.
@@ -272,13 +275,12 @@ Operational rule:
   new Claude desktop app thread
 - do not synthesize desktop-visible Claude threads by writing local app cache/index files
 - use `Chats/` messages as the transport of record (the durable mailbox)
-- routine exact-session dispatch is the wake for every watcher-backed worker,
-  Codex included. Only when no matching dispatchable session autobridge exists
-  and `deliver.py` reports `ax_doorbell_required: true` does Codex fall back to
-  the **bidirectional AX doorbell** (see
-  `claude-code-desktop-computer-use-bridge.md`); terminal-only sessions require a
-  dispatchable runtime binding
-- every worker other than a Codex on that fallback path is woken by the durable
+- for OpenAI models, ask whether the task needs a Codex-app-only tool that BB
+  cannot reach. If no, use BB and never AX. If yes, use the conditional
+  procedure in `claude-code-desktop-computer-use-bridge.md`. A reported
+  `ax_doorbell_required: true` does not itself satisfy that condition; GH-748
+  tracks the separate code-output change
+- every worker other than a Codex on that condition-qualified AX path is woken by the durable
   packet and its own watcher alone, never by AX. Preserve the packet and let the
   watcher own pickup. See
   `session-autobridge-runbook.md` for the full rule
@@ -305,14 +307,13 @@ standing capability. `autobridge_ready: true` proves send-time routability, not
 delivery, so require the receipt or recipient evidence named by
 `session-autobridge-runbook.md`.
 
-Safest task-grade workflow for desktop-app agents:
+Conditional workflow for a task that needs a Codex-app-only tool BB cannot reach:
 
 1. `llm-collab` delivers the task into `Chats/` with `deliver.py`
    - `autobridge_ready: true` takes precedence and means no AX doorbell was
      requested for this packet
-   - for Codex, `ax_doorbell_required` means the sender runs exactly the command
-     printed by `deliver.py`; it is
-     not a manual operator relay request
+   - for Codex, `ax_doorbell_required` is compatibility output, not an
+     instruction to run the printed command for routine delivery
    - `watcher_pickup_ready` is retained for compatibility but is false for new
      admitted deliveries; watcher-backed recipients require an exact binding
    - `desktop_bridge_required` is always false: the Claude Computer Use fallback
@@ -322,16 +323,18 @@ Safest task-grade workflow for desktop-app agents:
      and send again
    - `routing_mode: broadcast` is the explicit signal for the only admitted
      unbound case: the operator or a watcher-disabled human/human relay
-2. when `ax_doorbell_required` is true, the sender rings once with the printed AX
-   command. Do not prove the composer empty first: for Codex, composer content
+2. When the task satisfies that condition, invoke the AX procedure. `VERIFIED`
+   means a turn rendered in the lagging
+   app UI; it does not establish a reply path. Do not prove the composer empty
+   first: for Codex, composer content
    and `AXValue` readability/opacity are never a hold, and a busy recipient is
    not a hold either — the ring clears and overrides whatever is in the
    composer and sends, and queues behind the recipient's active turn. Only a
    genuine targeting/operation failure (no or ambiguous native composer target,
    a non-Codex or unrecognized profile, an AX-trust failure, a
    clear/type/submit failure, or post-submit identity loss) means hold and
-   recovery. `VERIFIED` exit 0 confirms
-   delivery. `QUEUED (UNCONFIRMED)` exit 0 does
+   recovery. `VERIFIED` exit 0 confirms only that app rendering.
+   `QUEUED (UNCONFIRMED)` exit 0 does
    not prove the pointer entered the intended thread: preserve the mailbox
    packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not
    claim exact-thread delivery without a later `axsend confirm` or explicit
@@ -339,7 +342,7 @@ Safest task-grade workflow for desktop-app agents:
    consumption proves durable packet delivery only, not AX-thread delivery. A
    running/processing state alone does not block the ring after composer-safety
    proof
-3. the sender sends exactly one short sender-tagged wake prompt that points the
+3. The procedure uses exactly one short sender-tagged wake prompt that points the
    recipient to the exact `llm-collab` inbox/chat/message path. Do not paste full
    task context, acceptance criteria, or multi-paragraph briefs into the app; the
    durable `Chats/` packet is the source of truth. The prompt must be one line,
@@ -348,7 +351,7 @@ Safest task-grade workflow for desktop-app agents:
 4. if AX resolves an embedded preview/web field or cannot deliver/confirm, stop
    sending but preserve the packet. In an attended Codex turn, use Computer Use
    plus `bin/axsend-ensure tree --app <app> --editable-only` to remove/blank the
-   competing field, select the correct window, and clear probes. Resume routine
+   competing field, select the correct window, and clear probes. Resume conditional
    AX only after verifying the native composer **target** identity is resolved
    and unambiguous — composer content/`AXValue` readability is never the gate.
    An opaque or unresolvable target remains on attended recovery; use one

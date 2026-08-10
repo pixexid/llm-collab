@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 20 -->
+<!-- CONTRACT_VERSION: 21 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,23 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v21 (2026-08-10) demotes AX to one condition under an operator-sourced
+ruling relayed through the supervisor session. BB threads on OpenAI models and
+Codex-app sessions are the same sessions; the difference is the harness, not
+the model. The app is a lagging render that needs an app restart to display
+those sessions, and app-server does not refresh its UI either, so BB is the
+surface for all OpenAI-model interaction until the app reaches parity and the
+live harness for updates and interaction. AX reaches the app harness rather
+than the model. Use AX if and only if the task needs a Codex-app-only tool that
+BB cannot reach; otherwise use BB. A packet reported `VERIFIED` by AX is not a
+reply path, and
+app-side silence is not evidence about a collaborator because an unattended
+app, a stale UI, and a genuine non-answer are indistinguishable there. This
+changes what a worker may execute: a cached v20 worker would still run the
+printed AX fallback without applying the task condition, so the version signal
+makes the new obligation visible. The code-side output change is separate.
+Related GH-560, GH-748.
 
 Contract v20 (2026-08-09) scopes fixture provenance by role: fixtures that stand
 in for real system output must be recorded from the live system, reviewed and
@@ -340,12 +357,25 @@ supplies another agent as `deliver.py --from`; that records the agent as the
 author, not a relay. First-class relay provenance remains prospective in
 [GH-604](https://github.com/pixexid/llm-collab/issues/604).
 
-The current worker fleet runs through BB; AX is not a routine lane or a BB
-transport. Contract v12's unchanged fallback predicate remains the authority
-for whether `deliver.py` offers a doorbell. Whether an offered doorbell can land
-is a dynamic runtime property, never a standing inference from process state.
-Use the live capability checks in
-[`bb-workers.md`](docs/workflows/bb-workers.md#communicate-in-both-directions).
+**Operator-sourced ruling (2026-08-10, relayed through the supervisor
+session):** BB threads on OpenAI models and Codex-app sessions are the same
+sessions. The app is a lagging render that needs an app restart to display
+them, app-server does not refresh its UI either, and AX reaches that harness
+rather than the model. The difference is the harness, not the model. Therefore
+BB is the live harness for all OpenAI-model interaction until the app reaches
+parity, with live updates and live interaction.
+
+Apply one condition: **does this task need a tool that exists only in the Codex
+app and cannot be reached from BB?** If no, use BB and never AX. If yes, AX may
+reach that app-only tool through the retained procedure in
+[`claude-code-desktop-computer-use-bridge.md`](docs/workflows/claude-code-desktop-computer-use-bridge.md).
+`deliver.py` may still print an AX command until GH-748 changes the code; the
+printed command does not itself satisfy the task condition.
+
+An AX result reported `VERIFIED` means a turn rendered in the lagging app UI; it
+does not establish a reply path. App-side silence is not evidence about a
+collaborator and must not accumulate into a fleet-standing inference: it
+confounds an unattended app, a stale unrefreshed UI, and a genuine non-answer.
 
 ## Adding A Project
 
@@ -408,13 +438,12 @@ on **every poll for roughly twenty hours** — a deleted-packet pointer made
 sidecar token was absent so no external WS endpoint existed at all. The sender
 saw success throughout. Two independent faults, zero sender-visible signal.
 
-AX is the **fallback**, not the routine path, and it is still Codex-only: no
-other worker is ever an AX ring target, and it is only ever the exact command
-`deliver.py` prints — never an invented `axsend`, and never a way around a
-recipient's watcher. Ring only when `deliver.py` asks for it — which is whenever
-no dispatchable target resolved and the refusal was not terminal, not a fixed
-list of causes you can recite. The two terminal ones, an unreadable binding and a
-scope refusal, suppress the doorbell and are repairs rather than rings.
+The still-live `deliver.py` fallback predicate and printed AX command are a
+separate GH-748 code follow-up, not evidence that the task needs an app-only
+tool. Evaluate the condition above first. When it is false, use BB; when it is
+true, the AX mechanics remain documented in
+[`claude-code-desktop-computer-use-bridge.md`](docs/workflows/claude-code-desktop-computer-use-bridge.md)
+as the legitimate conditional procedure.
 
 Treat a missing doorbell as information, not permission. An unbound recipient
 with no AX or explicit broadcast route now returns a typed pre-write refusal;

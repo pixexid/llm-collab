@@ -1374,7 +1374,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 20 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 21 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
@@ -1399,6 +1399,19 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v21",
+            "operator-sourced ruling",
+            "demotes AX to one condition",
+            "BB threads on OpenAI models and Codex-app sessions are the same "
+            "sessions",
+            "the difference is the harness, not the model",
+            "BB is the surface for all OpenAI-model interaction",
+            "if and only if the task needs a Codex-app-only tool that BB "
+            "cannot reach",
+            "reported `VERIFIED` by AX is not a reply path",
+            "app-side silence is not evidence about a collaborator",
+            "a cached v20 worker would still run the printed AX fallback "
+            "without applying the task condition",
             "Contract v20",
             "fixtures that stand in for real system output",
             "reviewed and sanitized before commit",
