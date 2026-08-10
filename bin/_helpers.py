@@ -374,10 +374,11 @@ def ensure_agent_enabled(agent_id: str, *, context: str) -> dict:
 # ---------------------------------------------------------------------------
 
 _projects_cache: list | None = None
+_projects_registry_missing: bool | None = None
 
 
 def load_projects() -> list[dict]:
-    global _projects_cache
+    global _projects_cache, _projects_registry_missing
     if _projects_cache is None:
         # No pre-read .exists() stat (see load_agents): an absent projects.json is
         # not an error — it yields []. The bounded read covers open() under the
@@ -385,10 +386,17 @@ def load_projects() -> list[dict]:
         try:
             payload = _read_registry_json_bounded(PROJECTS_FILE)
         except FileNotFoundError:
+            _projects_registry_missing = True
             _projects_cache = []
             return _projects_cache
+        _projects_registry_missing = False
         _projects_cache = payload.get("projects", [])
     return _projects_cache
+
+
+def projects_registry_missing() -> bool:
+    """Return the last bounded read's absence result without touching the path."""
+    return _projects_registry_missing is True
 
 
 def get_project(project_id: str) -> dict | None:

@@ -7,10 +7,13 @@ into the hook. Check results and doc pointers only.
 
 It exists separately from session_bootstrap.py rather than extending it:
 bootstrap is an agent-identity command (requires a registered --agent, starts
-watchers, exits 1 on stale tooling), while a SessionStart hook must be
-identity-free and must never fail the session. What the hook needs from
+watchers, exits 1 on stale tooling), while a SessionStart hook has no agent
+identity and must never fail the session. What the hook needs from
 bootstrap — the origin/main currency probe and the contract-version read — it
 imports and reuses rather than duplicating.
+
+The invoking checkout pointer supplies the project identity explicitly; an
+absent or unregistered identity skips the checks rather than guessing.
 
 Never fails the session: main() always returns 0, and a probe that itself
 breaks reports UNKNOWN — visibly distinct from PASS, never rendered as one.
@@ -26,7 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _helpers import get_project  # noqa: E402
+from _helpers import PROJECTS_FILE, get_project, projects_registry_missing  # noqa: E402
 from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
@@ -35,7 +38,6 @@ from llm_collab.bb_client import (  # noqa: E402
 )
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
-HOOK_PROJECT_ID = "llm-collab"  # this hook is llm-collab's own repo hook
 
 BB_PROBE_TIMEOUT_SECONDS = 10.0
 # The version envelope is ~100 bytes; 64 KiB is generous. The bound lives at the
@@ -57,7 +59,35 @@ def _line(check: str, status: str, detail: str) -> None:
     print(f"[session-gate] {_MARK[status]} {check}: {status} — {detail}")
 
 
-def bb_version_check() -> tuple[str, str]:
+def resolve_project_id(argv: list[str] | None = None) -> tuple[str | None, str | None]:
+    """Return the explicit registered project, or the reason to skip checks."""
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 2 or args[0] != "--project" or not args[1]:
+        return None, "absent"
+    project_id = args[1]
+    try:
+        registered = get_project(project_id)
+    # The bounded registry reader fails closed with SystemExit. Preserve that
+    # refusal as UNKNOWN; ordinary unexpected resolution errors are the same
+    # incomplete state, while KeyboardInterrupt is intentionally not caught.
+    except FileNotFoundError:
+        return project_id, "registry_not_found"
+    except SystemExit:
+        return project_id, "registry_unresolvable"
+    except Exception:
+        return project_id, "registry_unresolvable"
+    if registered is None:
+        try:
+            registry_missing = projects_registry_missing()
+        except Exception:
+            return project_id, "registry_unresolvable"
+        if registry_missing:
+            return project_id, "registry_not_found"
+        return project_id, "unregistered"
+    return project_id, None
+
+
+def bb_version_check(project_id: str) -> tuple[str, str]:
     """Installed bb vs PINNED_BB_VERSION. A broken probe is UNKNOWN, not a pass.
 
     Reads through the shared bounded transport (llm_collab.bb_client) rather
@@ -70,7 +100,7 @@ def bb_version_check() -> tuple[str, str]:
         # resolver seam — never a bare PATH bb, which can be a different
         # installation than the one spawns use. An unconfigured project is
         # UNKNOWN (a setup fact), never a pass and never a session failure.
-        executable = bb_executable_from_project(get_project(HOOK_PROJECT_ID))
+        executable = bb_executable_from_project(get_project(project_id))
         transport = subprocess_transport(
             executable, max_response_chars=BB_PROBE_MAX_RESPONSE_CHARS
         )
@@ -131,7 +161,7 @@ def current_session_id(stdin) -> str | None:
     return session_id if isinstance(session_id, str) and session_id else None
 
 
-def watcher_checks(own_session_id: str | None) -> list[tuple[str, str, str]]:
+def watcher_checks(project_id: str, own_session_id: str | None) -> list[tuple[str, str, str]]:
     """Render the shared coverage verdict (evaluate_coverage); never re-derive it.
 
     A FRESH marker owned by a DIFFERENT session is the predecessor-watchers
@@ -139,9 +169,9 @@ def watcher_checks(own_session_id: str | None) -> list[tuple[str, str, str]]:
     double-notifying this one. Loud, and it names the foreign session id.
     """
     results = []
-    verdicts = evaluate_coverage(check_markers(HOOK_PROJECT_ID), own_session_id)
+    verdicts = evaluate_coverage(check_markers(project_id), own_session_id)
     for verdict in verdicts:
-        check = f"watcher {verdict['name']} [{HOOK_PROJECT_ID}]"
+        check = f"watcher {verdict['name']} [{project_id}]"
         reason = verdict["reason"]
         if reason == "covered":
             results.append((
@@ -172,11 +202,11 @@ def watcher_checks(own_session_id: str | None) -> list[tuple[str, str, str]]:
     return results
 
 
-def run_checks(own_session_id: str | None = None) -> bool:
+def run_checks(project_id: str, own_session_id: str | None = None) -> bool:
     """Print every check line. Returns True when nothing failed or is unknown."""
     clean = True
 
-    status, detail = bb_version_check()
+    status, detail = bb_version_check(project_id)
     _line("bb version", status, detail)
     clean = clean and status == PASS
 
@@ -191,7 +221,7 @@ def run_checks(own_session_id: str | None = None) -> bool:
     else:
         _line("contract", PASS, f"AGENTS.md version {version}")
 
-    for check, status, detail in watcher_checks(own_session_id):
+    for check, status, detail in watcher_checks(project_id, own_session_id):
         _line(check, status, detail)
         clean = clean and status == PASS
     if own_session_id is None:
@@ -206,7 +236,7 @@ def run_checks(own_session_id: str | None = None) -> bool:
     return clean
 
 
-def handoff_line() -> str:
+def handoff_line(project_id: str) -> str:
     """The handoff pointer — the project-scoped runtime path, and whether it exists.
 
     An absent handoff at session start is worth knowing immediately and is not
@@ -215,7 +245,7 @@ def handoff_line() -> str:
     instead of printing nothing.
     """
     try:
-        path = handoff_file(HOOK_PROJECT_ID)
+        path = handoff_file(project_id)
         exists = path.exists()
     except (Exception, SystemExit) as error:
         return f"handoff:  <path unresolvable: {type(error).__name__}: {error}>"
@@ -224,14 +254,43 @@ def handoff_line() -> str:
     return f"handoff:  {path} (ABSENT — no handoff written yet)"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    project_id, skip_reason = resolve_project_id(argv)
+    if skip_reason == "absent":
+        print(
+            "[session-gate] checks skipped: project identity absent "
+            "(invoke with --project <project_id>)"
+        )
+        return 0
+    if skip_reason == "unregistered":
+        print(
+            "[session-gate] checks skipped: project identity unregistered "
+            f"({project_id!r} is not registered in projects.json)"
+        )
+        return 0
+    if skip_reason == "registry_not_found":
+        print(
+            "[session-gate] checks skipped: project registry not found "
+            f"(no projects.json at {PROJECTS_FILE}; "
+            "resolved from this hook's checkout root)"
+        )
+        return 0
+    if skip_reason == "registry_unresolvable":
+        print(
+            "[session-gate] project registry: UNKNOWN — registry present but "
+            "unresolvable; project identity could not be determined"
+        )
+        print("━" * 60)
+        print("⚠️  SESSION SETUP INCOMPLETE — see the ✗/? lines above and the pointers")
+        print("━" * 60)
+        return 0
     print("[session-gate] session-setup checks (results and pointers only):")
     # I5: coverage must be observable. A reader in ANY checkout must be able to
     # tell which project's markers this hook checked without reading the source.
-    print(f"[session-gate] project: {HOOK_PROJECT_ID} — watcher markers checked for this project")
+    print(f"[session-gate] project: {project_id} — watcher markers checked for this project")
     own_session_id = current_session_id(sys.stdin)
     try:
-        clean = run_checks(own_session_id)
+        clean = run_checks(project_id, own_session_id)
     except BaseException as error:  # a broken gate must be loud, never a pass
         # BaseException on purpose: this hook must never fail the session, and a
         # SystemExit leaking out of a probe is still a broken probe.
@@ -239,7 +298,7 @@ def main() -> int:
         _line("session-gate itself", UNKNOWN, f"probe broke: {type(error).__name__}: {error}")
         print("[session-gate] the checks above are INCOMPLETE — no setup claim was verified")
     print(f"[session-gate] protocol: {ORCHESTRATOR_DOC}")
-    print(f"[session-gate] {handoff_line()}")
+    print(f"[session-gate] {handoff_line(project_id)}")
     if not clean:
         print("━" * 60)
         print("⚠️  SESSION SETUP INCOMPLETE — see the ✗/? lines above and the pointers")

@@ -21,7 +21,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 
+LLM_COLLAB_PROJECT = "llm-collab"
+SECOND_PROJECT = "nuvyr"
+UNREGISTERED_PROJECT = "not-registered"
+
 import _bounded_io  # noqa: E402
+import _helpers  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import session_bootstrap  # noqa: E402
 import session_gate  # noqa: E402
@@ -451,13 +456,55 @@ class HookCommandTest(unittest.TestCase):
         command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         self.assertIn("bin/llm-collab", command)
         self.assertIn("session_gate", command)
+        self.assertIn("--project llm-collab", command)
         self.assertNotIn("python3.11", command)
 
 
 class SessionGateTest(unittest.TestCase):
     """The hook prints check results and pointers, and never fails the session."""
 
-    def _run(self, own_session_id: str | None = "sess-own", **patches) -> tuple[int, str]:
+    class _NoSecondTouchPath:
+        """Path-like registry fixture that rejects every post-read probe."""
+
+        def __init__(self, path: Path) -> None:
+            self.path = path
+            self.fspath_calls = 0
+            self.post_read_operations: list[str] = []
+
+        def __fspath__(self) -> str:
+            self.fspath_calls += 1
+            return os.fspath(self.path)
+
+        def __str__(self) -> str:
+            return str(self.path)
+
+        def resolve(self):
+            return self._reject("resolve")
+
+        def _reject(self, operation: str):
+            self.post_read_operations.append(operation)
+            raise AssertionError(
+                f"no post-read filesystem access on registry path: {operation}"
+            )
+
+        def is_file(self):
+            return self._reject("is_file")
+
+        def exists(self):
+            return self._reject("exists")
+
+        def stat(self, *args, **kwargs):
+            return self._reject("stat")
+
+        def open(self, *args, **kwargs):
+            return self._reject("open")
+
+    def _run(
+        self,
+        own_session_id: str | None = "sess-own",
+        project_id: str = LLM_COLLAB_PROJECT,
+        **patches,
+    ) -> tuple[int, str]:
         tooling = patches.pop(
             "tooling_currency",
             {"state": "current", "head": "abcdef0", "fetched": True},
@@ -478,18 +525,247 @@ class SessionGateTest(unittest.TestCase):
             session_gate.session_bootstrap, "tooling_currency", return_value=tooling
         ), mock.patch.object(session_gate, "check_markers", return_value=markers), mock.patch.object(
             session_gate, "current_session_id", return_value=own_session_id
+        ), mock.patch.object(
+            session_gate, "get_project", return_value={"id": project_id}
+        ), mock.patch.object(
+            session_gate, "handoff_line", return_value="handoff: synthetic"
         ):
             for target, replacement in patches.items():
                 mock.patch.object(session_gate, target, replacement).start()
             self.addCleanup(mock.patch.stopall)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = session_gate.main()
+                code = session_gate.main(["--project", project_id])
         return code, output.getvalue()
+
+    def test_absent_project_identity_skips_without_reading_markers(self) -> None:
+        with mock.patch.object(session_gate, "get_project") as get_project, mock.patch.object(
+            session_gate, "check_markers"
+        ) as markers:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = session_gate.main([])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "[session-gate] checks skipped: project identity absent "
+            "(invoke with --project <project_id>)\n",
+            output.getvalue(),
+        )
+        get_project.assert_not_called()
+        markers.assert_not_called()
+
+    def test_unregistered_project_identity_skips_without_reading_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "registry.json"
+            registry.write_text(
+                '{"projects": [{"id": "some-other-project"}]}\n', encoding="utf-8"
+            )
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", UNREGISTERED_PROJECT])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "[session-gate] checks skipped: project identity unregistered "
+            f"({UNREGISTERED_PROJECT!r} is not registered in projects.json)\n",
+            output.getvalue(),
+        )
+        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        markers.assert_not_called()
+
+    def test_absent_project_registry_skips_without_reading_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "registry.json"
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "[session-gate] checks skipped: project registry not found "
+            f"(no projects.json at {registry}; "
+            "resolved from this hook's checkout root)\n",
+            output.getvalue(),
+            "registry absence must not be reported as an unregistered project",
+        )
+        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        markers.assert_not_called()
+
+    def test_registry_resolution_never_touches_path_after_bounded_read_for_all_states(
+        self,
+    ) -> None:
+        """Every resolver outcome uses one bounded registry-path access.
+
+        The path guard permits only the path protocol needed by the bounded
+        reader (``__fspath__``). Any later ``Path`` probe raises with the
+        invariant in its message, so both a new ``resolve`` and an old
+        ``is_file`` regression fail this structural test.
+        """
+        cases = (
+            ("identity absent", None, [], "project identity absent", 0),
+            (
+                "registry absent",
+                None,
+                ["--project", LLM_COLLAB_PROJECT],
+                "project registry not found",
+                1,
+            ),
+            (
+                "unregistered",
+                '{"projects": [{"id": "some-other-project"}]}\n',
+                ["--project", UNREGISTERED_PROJECT],
+                "project identity unregistered",
+                1,
+            ),
+            (
+                "unresolvable",
+                "{\n",
+                ["--project", LLM_COLLAB_PROJECT],
+                "project registry: UNKNOWN",
+                1,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for state, content, argv, expected, bounded_reads in cases:
+                with self.subTest(state=state):
+                    registry_path = Path(temporary) / f"{state.replace(' ', '-')}.json"
+                    if content is not None:
+                        registry_path.write_text(content, encoding="utf-8")
+                    registry = self._NoSecondTouchPath(registry_path)
+                    with mock.patch.object(
+                        session_gate, "PROJECTS_FILE", registry
+                    ), mock.patch.object(
+                        _helpers, "PROJECTS_FILE", registry
+                    ), mock.patch.object(
+                        _helpers, "_projects_cache", None
+                    ), mock.patch.object(
+                        _helpers, "_projects_registry_missing", None
+                    ), mock.patch.object(session_gate, "check_markers") as markers:
+                        output = io.StringIO()
+                        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(
+                            output
+                        ):
+                            code = session_gate.main(argv)
+                    self.assertEqual(0, code)
+                    self.assertEqual(
+                        bounded_reads,
+                        registry.fspath_calls,
+                        "registry path access must remain inside the one bounded read",
+                    )
+                    self.assertEqual(
+                        [],
+                        registry.post_read_operations,
+                        "no filesystem operations on the registry path after the "
+                        "bounded read deadline ends",
+                    )
+                    self.assertIn(expected, output.getvalue())
+                    markers.assert_not_called()
+
+    def test_unresolvable_project_registry_is_unknown_and_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "malformed-registry.json"
+            # Authored malformed fixture: a healthy registry cannot record this
+            # parse-refusal state, but the bounded reader must fail closed here.
+            registry.write_text("{\n", encoding="utf-8")
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
+        self.assertEqual(0, code)
+        self.assertIn(
+            "[session-gate] project registry: UNKNOWN — registry present but "
+            "unresolvable; project identity could not be determined",
+            output.getvalue(),
+            "an unresolvable registry must report incomplete rather than skipped",
+        )
+        self.assertIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        self.assertNotIn(
+            "checks skipped",
+            output.getvalue(),
+            "an unresolvable registry must not be reported as a skip",
+        )
+        markers.assert_not_called()
+
+    def test_supplied_project_identity_routes_only_its_markers(self) -> None:
+        """The resolved project owns every marker read and output label."""
+        for project_id, other_project in (
+            (LLM_COLLAB_PROJECT, SECOND_PROJECT),
+            (SECOND_PROJECT, LLM_COLLAB_PROJECT),
+        ):
+            with self.subTest(project=project_id):
+                marker_projects = []
+
+                def check_markers(requested_project: str) -> list[dict]:
+                    marker_projects.append(requested_project)
+                    return [
+                        {
+                            "name": name,
+                            "status": "fresh",
+                            "age_seconds": 5.0,
+                            "session_id": "sess-own",
+                        }
+                        for name in WATCHER_NAMES
+                    ]
+
+                with mock.patch.object(
+                    session_gate, "get_project", return_value={"id": project_id}
+                ), mock.patch.object(
+                    session_gate, "check_markers", side_effect=check_markers
+                ), mock.patch.object(
+                    session_gate, "bb_version_check", return_value=(
+                        session_gate.PASS,
+                        f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
+                    )
+                ), mock.patch.object(
+                    session_gate.session_bootstrap,
+                    "tooling_currency",
+                    return_value={"state": "current", "head": "abcdef0", "fetched": True},
+                ), mock.patch.object(
+                    session_gate, "current_session_id", return_value="sess-own"
+                ), mock.patch.object(
+                    session_gate, "handoff_line", return_value="handoff: synthetic"
+                ):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = session_gate.main(["--project", project_id])
+
+                self.assertEqual(0, code)
+                self.assertEqual(
+                    [project_id],
+                    marker_projects,
+                    "marker checks must use supplied project identity",
+                )
+                self.assertNotIn(
+                    other_project,
+                    marker_projects,
+                    "marker checks must not consult another project's markers",
+                )
+                self.assertIn(f"project: {project_id}", output.getvalue())
+                self.assertIn(
+                    f"watcher worker-lifecycle [{project_id}]: PASS", output.getvalue()
+                )
 
     def test_broken_bb_probe_is_unknown_not_a_pass(self) -> None:
         code, out = self._run(
-            bb_version_check=lambda: (session_gate.UNKNOWN, "probe could not run")
+            bb_version_check=lambda _project_id: (session_gate.UNKNOWN, "probe could not run")
         )
         self.assertEqual(0, code)
         self.assertIn("bb version: UNKNOWN", out)
@@ -498,7 +774,7 @@ class SessionGateTest(unittest.TestCase):
 
     def test_bb_version_mismatch_is_a_visible_fail(self) -> None:
         code, out = self._run(
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.FAIL,
                 f"bb 0.0.1 != pinned {PINNED_BB_VERSION}",
             )
@@ -515,7 +791,7 @@ class SessionGateTest(unittest.TestCase):
             ]
         )
         self.assertEqual(0, code)
-        self.assertIn("watcher worker-lifecycle [llm-collab]: FAIL", out)
+        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: FAIL", out)
         self.assertIn("SESSION SETUP INCOMPLETE", out)
 
     def test_output_names_the_project_it_checked(self) -> None:
@@ -523,25 +799,25 @@ class SessionGateTest(unittest.TestCase):
         this check?' without reading the source (GH-726 S3's stated property;
         per-checkout dispatch itself is S3's own lane)."""
         code, out = self._run(
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.PASS,
                 f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
             )
         )
         self.assertEqual(0, code)
-        self.assertIn(f"project: {session_gate.HOOK_PROJECT_ID}", out)
-        self.assertIn(f"[{session_gate.HOOK_PROJECT_ID}]", out)
+        self.assertIn(f"project: {LLM_COLLAB_PROJECT}", out)
+        self.assertIn(f"[{LLM_COLLAB_PROJECT}]", out)
 
     def test_fresh_marker_owned_by_the_same_session_passes_silently(self) -> None:
         code, out = self._run(
             own_session_id="sess-own",
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.PASS,
                 f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
             ),
         )
         self.assertEqual(0, code)
-        self.assertIn("watcher worker-lifecycle [llm-collab]: PASS", out)
+        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: PASS", out)
         self.assertIn("owned by this session", out)
         self.assertNotIn("FOREIGN", out)
         self.assertNotIn("SESSION SETUP INCOMPLETE", out)
@@ -558,13 +834,13 @@ class SessionGateTest(unittest.TestCase):
                 }
                 for name in WATCHER_NAMES
             ],
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.PASS,
                 f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
             ),
         )
         self.assertEqual(0, code)
-        self.assertIn("watcher worker-lifecycle [llm-collab]: FAIL", out)
+        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: FAIL", out)
         self.assertIn("FOREIGN session sess-predecessor", out)
         self.assertIn("TaskStop", out)
         self.assertIn("SESSION SETUP INCOMPLETE", out)
@@ -572,7 +848,7 @@ class SessionGateTest(unittest.TestCase):
     def test_unknown_current_identity_is_loud_not_a_pass(self) -> None:
         code, out = self._run(
             own_session_id=None,
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.PASS,
                 f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
             ),
@@ -584,7 +860,7 @@ class SessionGateTest(unittest.TestCase):
 
     def test_all_checks_passing_is_clean_and_points_at_the_docs(self) -> None:
         code, out = self._run(
-            bb_version_check=lambda: (
+            bb_version_check=lambda _project_id: (
                 session_gate.PASS,
                 f"bb {PINNED_BB_VERSION} == pinned {PINNED_BB_VERSION}",
             )
@@ -606,10 +882,10 @@ class SessionGateTest(unittest.TestCase):
                 "project_state_dir",
                 side_effect=lambda project_id: root / project_id,
             ):
-                absent_line = session_gate.handoff_line()
+                absent_line = session_gate.handoff_line(LLM_COLLAB_PROJECT)
                 expected.parent.mkdir(parents=True)
                 expected.write_text("# handoff\n", encoding="utf-8")
-                present_line = session_gate.handoff_line()
+                present_line = session_gate.handoff_line(LLM_COLLAB_PROJECT)
         self.assertIn(str(expected), absent_line)
         self.assertIn("ABSENT", absent_line)
         self.assertIn(str(expected), present_line)
@@ -618,10 +894,12 @@ class SessionGateTest(unittest.TestCase):
     def test_a_broken_gate_probe_is_loud_and_never_fails_the_session(self) -> None:
         with mock.patch.object(
             session_gate, "current_session_id", return_value="sess-own"
+        ), mock.patch.object(
+            session_gate, "get_project", return_value={"id": LLM_COLLAB_PROJECT}
         ), mock.patch.object(session_gate, "run_checks", side_effect=RuntimeError("boom")):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = session_gate.main()
+                code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
         out = output.getvalue()
         self.assertEqual(0, code)
         self.assertIn("session-gate itself: UNKNOWN", out)
@@ -657,7 +935,7 @@ class SessionGateTest(unittest.TestCase):
         configured = {"bb": {"enabled": True, "executable": ["configured-bb"]}}
         with mock.patch.object(session_gate, "get_project", return_value=configured):
             with mock.patch.object(session_gate, "subprocess_transport", return_value=bounded):
-                status, detail = session_gate.bb_version_check()
+                status, detail = session_gate.bb_version_check(LLM_COLLAB_PROJECT)
         self.assertEqual(session_gate.UNKNOWN, status)
         self.assertIn("exceeded", detail)
 
@@ -665,7 +943,7 @@ class SessionGateTest(unittest.TestCase):
         """GH-728: no configured bb.executable is UNKNOWN, never a bare PATH probe."""
         with mock.patch.object(session_gate, "get_project", return_value=None):
             with mock.patch.object(session_gate, "subprocess_transport") as transport_factory:
-                status, detail = session_gate.bb_version_check()
+                status, detail = session_gate.bb_version_check(LLM_COLLAB_PROJECT)
         self.assertEqual(session_gate.UNKNOWN, status)
         transport_factory.assert_not_called()
 
@@ -677,7 +955,7 @@ class SessionGateTest(unittest.TestCase):
             with mock.patch.object(
                 session_gate, "subprocess_transport", return_value=mock.Mock(return_value=envelope)
             ) as transport_factory:
-                status, _detail = session_gate.bb_version_check()
+                status, _detail = session_gate.bb_version_check(LLM_COLLAB_PROJECT)
         self.assertEqual(session_gate.PASS, status)
         # The transport is built from the configured argv, not a bare PATH bb.
         self.assertEqual(["configured-bb"], transport_factory.call_args.args[0])
@@ -688,7 +966,7 @@ class SessionGateTest(unittest.TestCase):
                 "subprocess_transport",
                 return_value=mock.Mock(side_effect=OSError("no bb")),
             ):
-                status, _detail = session_gate.bb_version_check()
+                status, _detail = session_gate.bb_version_check(LLM_COLLAB_PROJECT)
         self.assertEqual(session_gate.UNKNOWN, status)
 
 
