@@ -1792,10 +1792,12 @@ Notes:
   `routing_mode: refused`, and a typed `routing_refusal_reason`.
 - `human_relay` recipients also receive the onboarding in the printed handoff
   prompt; later deliveries omit it once awareness is tracked locally
-- Only a Codex/ChatGPT `activation.ax_app` profile supports a routine AX
-  doorbell. For those sends, `deliver.py` reports
+- Only when a task needs a Codex-app-only tool that BB cannot reach may a
+  Codex/ChatGPT `activation.ax_app` profile take the routine AX procedure. For
+  those condition-qualified sends, `deliver.py` reports
   `routing_mode: ax_doorbell` plus `ax_doorbell_required` and prints the exact
-  command the sender should run.
+  command the sender should run; the printed command does not itself satisfy the
+  task condition.
   An `ax_attended_only: true` target (opaque composer, e.g. ZCode) instead
   reports `routing_mode: ax_attended_recovery` plus
   `ax_attended_recovery_required` with the Codex-attended recovery instruction

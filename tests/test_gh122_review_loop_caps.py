@@ -1413,6 +1413,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "BB is the surface for all OpenAI-model interaction",
             "if and only if the task needs a Codex-app-only tool that BB "
             "cannot reach",
+            "condition selects the surface for the app-exclusive work, not a "
+            "wake route for a BB worker",
+            "no AX path targets a BB-backed session",
             "reported `VERIFIED` by AX does not establish delivery to a "
             "working harness or a reply path",
             "app-side silence is not evidence about a collaborator",
@@ -1504,68 +1507,97 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(normalized(phrase), workflow)
 
-    def test_ax_routing_entry_points_apply_the_app_only_condition(self):
-        entry_points = (
-            AGENTS_DOC,
-            REPO_ROOT / "README.md",
-            REPO_ROOT / "docs" / "multi-project.md",
-            REPO_ROOT / "docs" / "adapters" / "pm2.md",
-            REPO_ROOT / "docs" / "workflows" / "README.md",
-            REPO_ROOT / "docs" / "workflows" / "bb-workers.md",
-            REPO_ROOT
-            / "docs"
-            / "workflows"
-            / "claude-code-desktop-computer-use-bridge.md",
-            QUICKSTART_DOC,
-            WORKFLOW_DOC,
-            REPO_ROOT / "docs" / "workflows" / "isolated-worktrees.md",
-            REPO_ROOT / "docs" / "workflows" / "pi-workers.md",
-            HANDOFF_DOC,
-            REPO_ROOT / "docs" / "workflows" / "session-autobridge-runbook.md",
-            REPO_ROOT / "docs" / "workflows" / "session-startup.md",
-            REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md",
-            REPO_ROOT / "tools" / "axbridge" / "README.md",
-        )
-        for path in entry_points:
-            with self.subTest(path=path.relative_to(REPO_ROOT)):
-                self.assertIn(
-                    "Codex-app-only tool",
-                    normalized(path.read_text(encoding="utf-8")),
-                )
+    def test_ax_docs_contain_no_prohibited_routing_or_delivery_claim(self):
+        """Scan every maintained Markdown block for the wrong claims themselves.
 
-        verified_meaning = (
-            "`VERIFIED` exit 0 confirms only that a turn rendered in the lagging "
-            "app UI; it does not establish delivery to a working harness or a reply path."
-        )
-        for path in (
-            WORKFLOW_DOC,
-            REPO_ROOT / "docs" / "adapters" / "pm2.md",
-            REPO_ROOT
-            / "docs"
-            / "workflows"
-            / "claude-code-desktop-computer-use-bridge.md",
-            REPO_ROOT / "tools" / "axbridge" / "README.md",
-        ):
-            with self.subTest(verified_path=path.relative_to(REPO_ROOT)):
-                self.assertIn(
-                    verified_meaning,
-                    normalized(path.read_text(encoding="utf-8")),
-                )
+        Presence of corrected prose proves nothing: the old sentence can survive
+        beside it. This guard therefore reports only prohibited claims, with the
+        source path and first line of the offending block. Historical contract
+        entries are excluded because the changelog must remain evidence.
+        """
 
-        for path in (
-            REPO_ROOT / "docs" / "workflows" / "bb-workers.md",
-            REPO_ROOT
-            / "docs"
-            / "workflows"
-            / "claude-code-desktop-computer-use-bridge.md",
-            REPO_ROOT / "docs" / "workflows" / "session-autobridge-runbook.md",
-            REPO_ROOT / "docs" / "workflows" / "session-startup.md",
-        ):
-            with self.subTest(ruling_link=path.relative_to(REPO_ROOT)):
-                self.assertIn(
-                    "../../AGENTS.md#bb-worker-surface",
-                    path.read_text(encoding="utf-8"),
-                )
+        docs = {
+            path
+            for path in REPO_ROOT.rglob("*.md")
+            if not {"Chats", "Tasks", "State"}.intersection(
+                path.relative_to(REPO_ROOT).parts
+            )
+        }
+        verified_means_delivery = (
+            re.compile(r"`?VERIFIED`?(?:\s+exit\s+0)?\s+confirms?\s+delivery\b", re.I),
+            re.compile(r"\brecord\s+`?VERIFIED`?(?:\s+exit\s+0)?\s+as\s+confirmed\s+delivery\b", re.I),
+            re.compile(r"`?VERIFIED`?.{0,60}\b(?:means|is)\s+(?:confirmed\s+)?delivered\b", re.I),
+        )
+        printed_ax_signal = re.compile(
+            r"(?:deliver\.py.{0,240}prints?.{0,100}command|"
+            r"command.{0,100}(?:prints?|printed).{0,240}deliver\.py)",
+            re.I,
+        )
+        ax_action = re.compile(r"\b(?:run|ring|invoke|execute|use|take|taken)\b", re.I)
+        ax_subject = re.compile(r"\b(?:AX|doorbell|ax_doorbell_required|command)\b", re.I)
+        app_only_condition = re.compile(
+            r"Codex-app-only tool|app-only-tool condition|"
+            r"tool that exists only in the Codex app|"
+            r"task (?:satisfies|needs).{0,100}(?:condition|Codex app|app-only)|"
+            r"condition (?:is|has been) met",
+            re.I,
+        )
+        wrong_ruling_anchor = re.compile(
+            r"standing routing rule.{0,240}#one-writer-per-lane",
+            re.I,
+        )
+        ax_targets_bb = re.compile(
+            r"(?:AX\s+(?:can|may|does)\s+(?:reach|wake|target)\s+"
+            r"(?:a\s+|the\s+)?BB(?:-backed)?\s+(?:worker|session|thread)|"
+            r"(?:^|[.!?]\s+)(?!do\s+not\s+)ring\s+"
+            r"(?:a\s+|the\s+)?BB(?:-backed)?\s+(?:worker|session|thread))",
+            re.I,
+        )
+
+        offenders = []
+        for path in sorted(docs):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if path in {AGENTS_DOC, REPO_ROOT / "CLAUDE.md"}:
+                in_history = False
+                for index, line in enumerate(lines):
+                    if line == "### Recent contract changes":
+                        in_history = True
+                    elif line == "## Required Reading":
+                        in_history = False
+                    if in_history:
+                        lines[index] = ""
+
+            block_start = None
+            block_lines = []
+            for line_number, line in enumerate((*lines, ""), start=1):
+                if line.strip():
+                    if block_start is None:
+                        block_start = line_number
+                    block_lines.append(line)
+                    continue
+                if block_start is None:
+                    continue
+                block = normalized(" ".join(block_lines))
+                location = f"{path.relative_to(REPO_ROOT)}:{block_start}"
+                if any(pattern.search(block) for pattern in verified_means_delivery):
+                    offenders.append(f"{location}: VERIFIED claims delivery")
+                if (
+                    printed_ax_signal.search(block)
+                    and ax_action.search(block)
+                    and ax_subject.search(block)
+                    and not app_only_condition.search(block)
+                ):
+                    offenders.append(
+                        f"{location}: printed AX command is actionable without the app-only condition"
+                    )
+                if wrong_ruling_anchor.search(block):
+                    offenders.append(f"{location}: standing ruling link uses the wrong anchor")
+                if ax_targets_bb.search(block):
+                    offenders.append(f"{location}: AX is presented as a BB-session route")
+                block_start = None
+                block_lines = []
+
+        self.assertEqual([], offenders, "prohibited AX claims remain:\n" + "\n".join(offenders))
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.

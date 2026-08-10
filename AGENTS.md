@@ -53,8 +53,11 @@ those sessions, and app-server does not refresh its UI either, so BB is the
 surface for all OpenAI-model interaction until the app reaches parity and the
 live harness for updates and interaction. AX reaches the app harness rather
 than the model. Use AX if and only if the task needs a Codex-app-only tool that
-BB cannot reach; otherwise use BB. A packet reported `VERIFIED` by AX does not
-establish delivery to a working harness or a reply path, and
+BB cannot reach; otherwise use BB. This condition selects the surface for the
+app-exclusive work, not a wake route for a BB worker: do not delegate that work
+to a BB worker, and no AX path targets a BB-backed session. A packet reported
+`VERIFIED` by AX does not establish delivery to a working harness or a reply
+path, and
 app-side silence is not evidence about a collaborator because an unattended
 app, a stale UI, and a genuine non-answer are indistinguishable there. This
 changes what a worker may execute: a cached v20 worker would still run the
@@ -373,6 +376,12 @@ reach that app-only tool through the retained procedure in
 [`claude-code-desktop-computer-use-bridge.md`](docs/workflows/claude-code-desktop-computer-use-bridge.md).
 `deliver.py` may still print an AX command until GH-748 changes the code; the
 printed command does not itself satisfy the task condition.
+
+The condition selects the surface that performs the app-exclusive work; it does
+not create a way to ring a BB worker. Do not delegate that work to a BB worker.
+The orchestrator or operator performs it in the app. No AX path targets a
+BB-backed session by design. A BB session binding, where one exists, continues
+through BB and does not make that thread an AX target.
 
 An AX result reported `VERIFIED` means a turn rendered in the lagging app UI; it
 does not establish delivery to a working harness or a reply path. App-side

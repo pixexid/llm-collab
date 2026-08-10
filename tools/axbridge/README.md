@@ -132,8 +132,9 @@ TARGET-resolution rule, not an empty-composer rule (GH-470): composer content an
 `AXValue` readability are never a hold for a *resolvable* Codex composer — a
 routine ring clears and overrides whatever is there and sends, and busy is not a
 hold. `axsend confirm` checks the conversation after a ring. `VERIFIED` exit 0
-confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 remains unresolved and must not
-be re-rung.
+confirms only that a turn rendered in the lagging app UI; it does not establish
+delivery to a working harness or a reply path. `QUEUED (UNCONFIRMED)` exit 0
+remains unresolved and must not be re-rung.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window. It is OPTIONAL: when ABSENT the resolver is in AUTO
@@ -280,8 +281,9 @@ its durable packet and background inbox watcher remain the only target-side path
 
 ## Computer Use supervision
 
-AX is the **fallback** doorbell between distinct external collaborator apps,
-including an external worker ringing root Codex — taken only when `deliver.py`
+Only after the task satisfies the app-only-tool condition, AX is the
+**fallback** doorbell between distinct external collaborator apps, including an
+external worker ringing root Codex. Even then it is taken only when `deliver.py`
 prints the command, because routine exact-session dispatch is the wake whenever
 the recipient's binding dispatches (contract v12). Where it is printed it should
 not be disabled or bypassed merely because an external desktop app needs

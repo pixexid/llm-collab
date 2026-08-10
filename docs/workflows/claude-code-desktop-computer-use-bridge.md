@@ -15,6 +15,12 @@
 > and receipt reasoning still applies when the orchestrator itself authors a
 > collab packet after verifying a BB result, not to the BB worker.
 >
+> The condition selects the surface for the app-exclusive work, not a wake for
+> a BB worker. Do not delegate that work to a BB worker; the orchestrator or
+> operator performs it in the app. No AX path targets a BB-backed session by
+> design: an AX command selects an app and composer, not a BB thread, while a
+> BB session binding, where one exists, continues through BB.
+>
 > This guide stays in `docs/workflows/` because
 > [GH-560](https://github.com/pixexid/llm-collab/issues/560) tracks the retained
 > mechanics for this conditional surface. Keeping the targeting,
