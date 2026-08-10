@@ -521,11 +521,15 @@ class SessionGateTest(unittest.TestCase):
     def test_unregistered_project_identity_skips_without_reading_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             registry = Path(temporary) / "registry.json"
-            registry.touch()
+            registry.write_text(
+                '{"projects": [{"id": "some-other-project"}]}\n', encoding="utf-8"
+            )
             with mock.patch.object(
                 session_gate, "PROJECTS_FILE", registry
             ), mock.patch.object(
-                session_gate, "get_project", return_value=None
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
             ), mock.patch.object(session_gate, "check_markers") as markers:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
@@ -545,7 +549,9 @@ class SessionGateTest(unittest.TestCase):
             with mock.patch.object(
                 session_gate, "PROJECTS_FILE", registry
             ), mock.patch.object(
-                session_gate, "get_project", return_value=None
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
             ), mock.patch.object(session_gate, "check_markers") as markers:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):

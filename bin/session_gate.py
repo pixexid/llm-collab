@@ -29,7 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _helpers import PROJECTS_FILE, get_project  # noqa: E402
+from _helpers import PROJECTS_FILE, get_project, projects_registry_missing  # noqa: E402
 from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
@@ -78,13 +78,11 @@ def resolve_project_id(argv: list[str] | None = None) -> tuple[str | None, str |
         return project_id, "registry_unresolvable"
     if registered is None:
         try:
-            PROJECTS_FILE.stat()
-        except FileNotFoundError:
-            return project_id, "registry_not_found"
-        except OSError:
-            return project_id, "registry_unresolvable"
+            registry_missing = projects_registry_missing()
         except Exception:
             return project_id, "registry_unresolvable"
+        if registry_missing:
+            return project_id, "registry_not_found"
         return project_id, "unregistered"
     return project_id, None
 
