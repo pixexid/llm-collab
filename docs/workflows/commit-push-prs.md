@@ -191,9 +191,10 @@ Hard cycle cap, independent of family counting:
   bounded risk with a follow-up issue and merge that exact head; or descope,
   split, use `backend-first`, or close the lane. `merge-with-followups` remains the default for
   findings classified deferrable before the cap; it is never a silent default
-  for a contract violation. A durable operator escalation packet remains the escape
-  only when the lane owner and release-gate worker cannot resolve the trade-off
-  without operator-only input. Under per-finding defer-first
+  for a contract violation. A durable escalation packet to the supervisor remains
+  the escape only when the lane owner and release-gate worker cannot resolve the
+  trade-off. The supervisor decides unless the canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies. Under per-finding defer-first
   most findings never reach the cap: only contract-violating findings are
   still open here, so a cap disposition is the rare case where the lane
   contract itself could not be satisfied — which usually means the authority
@@ -216,9 +217,10 @@ Hard cycle cap, independent of family counting:
   lane owner and release-gate worker to decide, for the exact current SHA,
   merge-with-followups or close.** Any later push invalidates that decision.
   This budget ends review-fix loops; it is not a connector terminal signal and
-  waives none of the exact-head merge gates. Escalate to the operator only when
-  the workers cannot reach or execute either safe outcome without operator-only
-  input.
+  waives none of the exact-head merge gates. Escalate to the supervisor only when
+  the workers cannot reach or execute either safe outcome. The supervisor decides
+  unless the canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use

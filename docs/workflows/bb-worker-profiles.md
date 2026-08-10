@@ -5,16 +5,24 @@ executable profile registry.
 
 ## Contract
 
-Durable artifacts — code, comments, commit messages, task notes, handoffs,
-documentation — are English-only. This binds the **artifact**, not any
-particular worker. Bind a constraint to the artifact it protects, not to the
-actor most likely to violate it: an actor-scoped rule silently exempts everyone
-else from what is really a property of the artifact.
+Worker-authored control prose and identifiers — code comments and identifiers,
+commit messages, task notes, handoffs, and documentation prose — are
+English-only. This binds the worker's **voice**, not every byte in an artifact
+or any particular worker. Bind the constraint to the control language it
+protects, not to the whole artifact or the actor most likely to drift: an
+artifact-wide rule turns subject matter into a violation, while an actor-scoped
+rule silently exempts everyone else.
+
+Load-bearing project content is protected, not merely tolerated. Product and
+localized strings, test data, and fixtures that exercise non-ASCII behavior
+remain in their required languages and scripts; never translate, delete, or
+weaken them to satisfy this rule.
 
 That scope has its own provenance: on the day the GLM trait migrated, a non-GLM
-model emitted a stray CJK character into a durable artifact in this workspace.
-One typo is not a trend and adds no other model to the exclusion list; it is the
-existence proof that the constraint belongs to the artifact.
+model emitted a stray CJK character into worker-authored control prose in this
+workspace. One typo is not a trend and adds no other model to the exclusion
+list; it is the existence proof that the constraint belongs to the worker's
+voice rather than one model profile.
 
 Each execution assignment gets one BB thread and one frozen
 `(provider, model, reasoning_level)` triple. The field and CLI flag use BB's
