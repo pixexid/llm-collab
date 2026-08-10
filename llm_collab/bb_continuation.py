@@ -19,8 +19,10 @@ from llm_collab.bb_client import (
     BbClient,
     BbEvent,
     BbEventPage,
+    BbExecutableRefused,
     BbQueued,
     BbRefusal,
+    bb_executable_from_project,
 )
 from llm_collab.canonical.control import (
     append_acknowledgment_receipt,
@@ -86,13 +88,10 @@ def client_from_project(project: Mapping[str, object]) -> BbClient:
     bb = project.get("bb")
     if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
         raise BbContinuationRefused("bb adapter is not enabled for this project")
-    executable = bb.get("executable", ["bb"])
-    if (
-        not isinstance(executable, list)
-        or not executable
-        or any(not isinstance(token, str) or not token for token in executable)
-    ):
-        raise BbContinuationRefused("bb.executable is invalid")
+    try:
+        executable = bb_executable_from_project(project)
+    except BbExecutableRefused as exc:
+        raise BbContinuationRefused(str(exc)) from exc
     timeout = bb.get("timeout_seconds", 30.0)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise BbContinuationRefused("bb.timeout_seconds is invalid")

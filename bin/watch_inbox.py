@@ -84,7 +84,11 @@ from llm_collab.bb_bootstrap import (
     plan_bootstrap,
     resolve_bootstrap_repo_id,
 )
-from llm_collab.bb_client import BbEventPage, BbTransportTimeout
+from llm_collab.bb_client import (
+    BbEventPage,
+    BbTransportTimeout,
+    bb_executable_from_project,
+)
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
 
@@ -631,13 +635,10 @@ def _bb_start_inputs(
     cwd = Path(str(bb.get("cwd") or repo_root)).expanduser().resolve()
     if not cwd.is_dir():
         raise ValueError("bb.cwd must be a directory")
-    executable = bb.get("executable", ["bb"])
-    if (
-        not isinstance(executable, list)
-        or not executable
-        or any(not isinstance(token, str) or not token for token in executable)
-    ):
-        raise ValueError("bb.executable must be a non-empty list of strings")
+    # GH-728: the executable comes from the one resolver seam; an absent or
+    # malformed bb.executable refuses (BbExecutableRefused is a ValueError)
+    # rather than silently defaulting to PATH bb.
+    executable = bb_executable_from_project(project)
     timeout_seconds = bb.get("timeout_seconds", 30.0)
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise ValueError("bb.timeout_seconds must be positive")

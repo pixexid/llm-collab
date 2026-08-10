@@ -41,10 +41,12 @@ from llm_collab.bb_client import (
     BbThread,
     BbTransportResult,
     BbTransportTimeout,
+    BbExecutableRefused,
     BbResponseDecodeError,
     BbResponseTooLarge,
     _read_bounded,
     subprocess_transport,
+    bb_executable_from_project,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bb"
@@ -1282,3 +1284,27 @@ class ProductionTransportTest(unittest.TestCase):
         transport = subprocess_transport(self._python(script))
         with self.assertRaises(BbResponseDecodeError):
             transport([], 30.0)
+
+
+class BbExecutableFromProjectTest(unittest.TestCase):
+    """GH-728: the one resolver seam owns the executable rule — configured
+    argv or refusal, never a silent PATH default."""
+
+    def test_configured_executable_is_returned_as_a_copy(self):
+        project = {"bb": {"enabled": True, "executable": ["/opt/bb", "--wrapper"]}}
+        resolved = bb_executable_from_project(project)
+        self.assertEqual(["/opt/bb", "--wrapper"], resolved)
+        self.assertIsNot(resolved, project["bb"]["executable"])
+
+    def test_absent_executable_refuses_without_path_fallback(self):
+        with self.assertRaisesRegex(BbExecutableRefused, "non-empty list"):
+            bb_executable_from_project({"bb": {"enabled": True}})
+
+    def test_missing_or_malformed_bb_block_refuses(self):
+        for project in (None, {}, {"bb": "yes"}, {"bb": {"executable": "bb"}}):
+            with self.assertRaises(BbExecutableRefused, msg=repr(project)):
+                bb_executable_from_project(project)
+
+    def test_refusal_is_a_value_error_for_existing_caller_contracts(self):
+        with self.assertRaises(ValueError):
+            bb_executable_from_project({"bb": {"executable": []}})

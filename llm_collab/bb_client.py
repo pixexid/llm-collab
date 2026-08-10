@@ -84,6 +84,42 @@ REFUSAL_IDENTITY_MISMATCH = "bb_identity_mismatch"
 REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 
+class BbExecutableRefused(ValueError):
+    """The project has no explicitly configured bb.executable; refused.
+
+    Subclasses ValueError so existing call sites that surface a ValueError on
+    malformed bb configuration keep their contract.
+    """
+
+
+def bb_executable_from_project(project: Mapping[str, Any] | None) -> list[str]:
+    """The one resolver for the BB invocation command (GH-728).
+
+    Every call site that invokes BB obtains its argv here; nothing else
+    constructs a BB invocation. An absent or malformed ``bb.executable``
+    refuses: there is deliberately no PATH default, because silently resolving
+    to whatever PATH happens to name is how a deployment invokes a different
+    installation than the one its registry configures — and the caller cannot
+    tell that happened. A project omitting the field gets this refusal, which
+    names the missing configuration, instead of a probe against the wrong
+    binary.
+    """
+    bb = project.get("bb") if isinstance(project, Mapping) else None
+    if not isinstance(bb, Mapping):
+        raise BbExecutableRefused("project has no bb configuration")
+    executable = bb.get("executable")
+    if (
+        not isinstance(executable, list)
+        or not executable
+        or any(not isinstance(token, str) or not token for token in executable)
+    ):
+        raise BbExecutableRefused(
+            "bb.executable must be a non-empty list of strings "
+            "(explicit project configuration; no PATH default)"
+        )
+    return list(executable)
+
+
 class BbTransportTimeout(Exception):
     """Raised by a transport when a call exceeds its deadline."""
 
