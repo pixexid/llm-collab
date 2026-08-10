@@ -23,8 +23,10 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
-# These bounds convert a subprocess hang into a failure; they do not assert latency.
-RUNTIME_GATE_HANG_TIMEOUT_SECONDS = 30
+# This bound exists to convert a hang into a failure, not to assert latency.
+# The guarded operations are sub-second; 120 seconds is deliberate headroom against
+# host contention, not an estimate of how long the work should take.
+RUNTIME_GATE_HANG_TIMEOUT_SECONDS = 120
 
 import current_runtime
 
