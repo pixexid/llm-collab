@@ -27,12 +27,17 @@ limits, or PR gates. Use
 
 ## Writing operational clauses
 
-Every operational clause states whether it is **ENFORCED** or a
-**CONVENTION**. An enforced clause names its enforcement seam. A convention is
-legitimate, but a convention that reads as a control is a defect because a
-reader relies on protection that does not exist. Every convention clause
-carries its check — the command that detects a violation — instead of implying
-a gate.
+**ENFORCED — authoring rule.** The mandatory independent full-diff review
+checks every operational clause written or revised from this point forward:
+each states whether it is **ENFORCED** or a **CONVENTION**. An enforced clause
+names its enforcement seam. A convention is legitimate, but a convention that
+reads as a control is a defect because a reader relies on protection that does
+not exist. Every convention clause carries its check — the command that detects
+a violation — instead of implying a gate.
+
+This document's existing clauses are not yet classified. An unmarked clause
+carries no implication either way; do not infer its status from the missing
+label or treat the marked subset as a complete sweep.
 
 Four review rounds found that same defect on successive clauses of one
 queue-eligibility paragraph. The contract-versioned prose was mistaken for
@@ -183,18 +188,22 @@ re-derive it.
   undecidability and its maintenance trigger produced an honest deferral;
   pretending the sweep had a completion criterion produced an open-ended lane.
   Related GH-751.
-- **Never gate a connector verdict on `commit_id` alone.** A verdict at the
-  exact head requires a review with a non-empty body, a 👍 reaction, or new
-  inline threads. The connector posts an empty-bodied review when a pass starts
-  and can post the body-bearing review up to six minutes later. On one head, a
-  review at the exact head, zero new threads, a green full suite, and written
-  dispositions for every prior finding appeared to satisfy every merge
-  condition; the real review arrived six minutes later carrying a P1. Two
-  sibling fields are equally unsafe as finding records: a thread's `commit_id`
-  re-anchors to the newest head and says where the thread points now, not which
-  head raised it, while its `line` can become `null` when a fix restructures
-  the code beneath it. **The written disposition must carry the finding, never
-  lean on where the thread sits.**
+- **Never gate a connector verdict on `commit_id` alone.** At the exact head,
+  evidence that the pass produced a result can be a review with a non-empty
+  body, a top-level connector comment naming that head, a 👍 reaction, or new
+  inline threads. The
+  [`PR Review Wait Gate`](commit-push-prs.md#pr-review-wait-gate) is canonical
+  for which signals are terminal and under what conditions; this list only
+  prevents `commit_id`-only gating. An empty-bodied review means the pass is
+  starting, not that a verdict has arrived; the connector can post the
+  body-bearing review up to six minutes later. On one head, a review at the exact head, zero new threads, a green full
+  suite, and written dispositions for every prior finding appeared to satisfy
+  every merge condition; the real review arrived six minutes later carrying a
+  P1. Two sibling fields are equally unsafe as finding records: a thread's
+  `commit_id` re-anchors to the newest head and says where the thread points
+  now, not which head raised it, while its `line` can become `null` when a fix
+  restructures the code beneath it. **The written disposition must carry the
+  finding, never lean on where the thread sits.**
 - **Audit all four connector artifact classes:** review threads, review bodies,
   issue/PR comments, and reactions. A finding can live only in a review body,
   where thread enumeration cannot see it; a clean pass can be reaction-only,
