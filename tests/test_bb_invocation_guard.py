@@ -15,9 +15,30 @@ pattern, so the guard stayed green with a bare invocation present):
 - Python files are parsed with ``ast`` and walked. Two node shapes flag: a
   list/tuple literal whose first element is the constant string ``bb`` (an
   argv being constructed, whether assigned or passed inline, on one line or
-  many), and ANY call whose first argument is a bb literal — bare ``"bb"``
-  or a shell-string command starting with ``"bb "`` — regardless of the
-  callee's name. The call check is name-agnostic by design (PR #735 review):
+  many), and ANY call supplied a bb literal — bare ``"bb"`` or a
+  shell-string command starting with ``"bb "`` — as its first positional
+  argument OR under ANY keyword name, regardless of the callee's name.
+  Positional and keyword supply are the same argument in two forms
+  (``subprocess.run(args="bb ...", shell=True)`` spawns identically to
+  the positional form), so one rule with one exemption pair covers both;
+  a second parallel matching path would only duplicate the rule. The
+  keyword side is fail-CLOSED too — every keyword is inspected, with an
+  enumerated set of (callee, keyword) prose pairs exempted — for the same
+  reason the callee side is: an enumerated set of spawn keywords fails
+  open on the one nobody listed (the first version of this fix listed six
+  verified stdlib spawn keywords and still missed ``executable=``, which
+  ``subprocess.Popen`` uses as the binary to launch). The keyword
+  exemption is scoped BY CALLEE, not by keyword name alone, for the same
+  reason the positional exemption (``PROSE_FIRST_ARG_NAMES``) is: a bare
+  keyword set waves through any callee that happens to name a parameter
+  ``help`` or ``detail`` — including a spawn wrapper forwarding it to
+  ``subprocess.run`` (``launch(detail="bb thread list")``) — so do not
+  "simplify" this back to a bare keyword set. The asymmetry is the
+  argument: missing a spawn keyword is a silent false negative that
+  leaves the class open, while missing a prose pair is a loud false
+  positive that someone fixes deliberately, in a diff, with a comment.
+  The guard enumerates the side where being wrong is safe. The call check
+  itself is name-agnostic by design (PR #735 review):
   an enumerated list of spawn APIs fails open on every API nobody listed —
   ``asyncio.create_subprocess_exec`` passed under exactly such a list — so
   unknown names fail CLOSED instead: a spawn helper nobody anticipated is
@@ -139,26 +160,72 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
+# (callee, keyword) pairs whose keyword VALUE is prose, not a command —
+# the keyword-axis counterpart of PROSE_FIRST_ARG_NAMES, and the
+# fail-closed inversion of the former SPAWN_COMMAND_KEYWORDS admission
+# list. Scoped by CALLEE, like the positional set: exempting on the
+# keyword name alone would wave through any spawn wrapper whose parameter
+# happens to share the name (``launch(detail="bb thread list")`` slipped
+# under exactly that shape). An all-keyword rule flags exactly these two
+# pairs in the scanned trees (measured); both callees verified in source.
+# A genuinely benign new prose site fails loud until someone exempts its
+# pair here deliberately, in a diff, with a comment.
+PROSE_KEYWORD_PAIRS = frozenset({
+    # result.add_argument("--thread-project", ..., help="bb projectId
+    # from the thread.created event DTO ...") in
+    # bin/record_executed_triples.py:383 — argparse CLI help text
+    # rendered to the user, never spawned.
+    ("add_argument", "help"),
+    # _ambiguous_without_retry(detail="bb send returned an unrecognized
+    # result after the send boundary", ...) in
+    # llm_collab/bb_continuation.py:599-601 — an error-message field
+    # carried in a typed result, never spawned.
+    ("_ambiguous_without_retry", "detail"),
+})
+
+
+def _supplied_args(node: ast.Call) -> list[tuple[ast.AST, str | None]]:
+    """(argument node, keyword name) pairs a command literal could ride in.
+
+    The first positional argument and every keyword value are the same
+    argument in different supply forms — ``run("bb x")`` and
+    ``run(args="bb x")`` spawn identically — so one rule inspects both.
+    Keywords are ALL inspected, not enumerated: listing spawn keywords
+    fails open on the one nobody listed (see module docstring). The
+    keyword name is carried alongside so the callee-scoped prose pairs
+    (``PROSE_KEYWORD_PAIRS``) can be exempted. A ``**kwargs`` entry (``arg is None``) yields its dict expression,
+    which is a Name/Dict, never a str constant — the documented
+    indirection limit.
+    """
+    supplied = [(node.args[0], None)] if node.args else []
+    supplied.extend((kw.value, kw.arg) for kw in node.keywords)
+    return supplied
+
+
 def _python_hits(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     hits: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.List, ast.Tuple)) and node.elts and _is_bb_constant(node.elts[0]):
             hits.append(f"{node.lineno}: argv literal starting with the bb binary")
-        elif isinstance(node, ast.Call) and node.args:
-            first = node.args[0]
-            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                # A List/Tuple first argument is flagged at the List node
-                # itself; anything else (a Name, a call) is the documented
-                # indirection limit, not a literal.
-                continue
+        elif isinstance(node, ast.Call):
             name = _call_name(node)
-            if first.value == "bb":
-                if name not in BENIGN_KEY_READ_NAMES:
-                    hits.append(f"{node.lineno}: bb literal as the first argument of a call")
-            elif first.value.startswith(("bb ", "bb\t")):
-                if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
-                    hits.append(f"{node.lineno}: bb command string as the first argument of a call")
+            for first, kw_name in _supplied_args(node):
+                if (name, kw_name) in PROSE_KEYWORD_PAIRS:
+                    # A verified prose site (callee, keyword) — message
+                    # text, never a command; see the set's comment.
+                    continue
+                if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                    # A List/Tuple argument is flagged at the List node
+                    # itself; anything else (a Name, a call) is the documented
+                    # indirection limit, not a literal.
+                    continue
+                if first.value == "bb":
+                    if name not in BENIGN_KEY_READ_NAMES:
+                        hits.append(f"{node.lineno}: bb literal supplied to a call")
+                elif first.value.startswith(("bb ", "bb\t")):
+                    if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
+                        hits.append(f"{node.lineno}: bb command string supplied to a call")
     return hits
 
 
