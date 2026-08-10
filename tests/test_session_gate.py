@@ -463,6 +463,38 @@ class HookCommandTest(unittest.TestCase):
 class SessionGateTest(unittest.TestCase):
     """The hook prints check results and pointers, and never fails the session."""
 
+    class _NoSecondTouchPath:
+        """Path-like registry fixture that rejects every post-read probe."""
+
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def __fspath__(self) -> str:
+            return os.fspath(self.path)
+
+        def __str__(self) -> str:
+            return str(self.path)
+
+        def resolve(self) -> Path:
+            return self.path.resolve()
+
+        def _reject(self, operation: str):
+            raise AssertionError(
+                f"no post-read filesystem access on registry path: {operation}"
+            )
+
+        def is_file(self):
+            return self._reject("is_file")
+
+        def exists(self):
+            return self._reject("exists")
+
+        def stat(self, *args, **kwargs):
+            return self._reject("stat")
+
+        def open(self, *args, **kwargs):
+            return self._reject("open")
+
     def _run(
         self,
         own_session_id: str | None = "sess-own",
@@ -563,6 +595,29 @@ class SessionGateTest(unittest.TestCase):
             "resolved from this hook's checkout root)\n",
             output.getvalue(),
             "registry absence must not be reported as an unregistered project",
+        )
+        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        markers.assert_not_called()
+
+    def test_absent_registry_does_not_touch_path_after_bounded_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = self._NoSecondTouchPath(Path(temporary) / "registry.json")
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
+            ), mock.patch.object(
+                _helpers, "_projects_registry_missing", None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
+        self.assertEqual(0, code)
+        self.assertIn(
+            "checks skipped: project registry not found",
+            output.getvalue(),
         )
         self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
         markers.assert_not_called()
