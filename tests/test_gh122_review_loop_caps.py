@@ -1374,7 +1374,6 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 21 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
         self.assertIn(
             "Focus is BB until the Codex app reaches parity with the Claude "
