@@ -186,9 +186,11 @@ adapters, but it cannot perform Codex Computer Use recovery.
 
 Current safe ordering:
 
-AX applies only to the Codex recipient, and only as a fallback. Every
-watcher-backed worker — Codex included — uses its durable packet and background
-watcher as the routine wake.
+For OpenAI-model interaction, focus is BB until the Codex app reaches parity
+with the Claude app and BB. Use the Codex app only when the task needs a
+Codex-app-only tool that BB cannot reach; `deliver.py` selecting a fallback does
+not satisfy that condition. See the
+[`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface).
 
 - never deactivate a dispatchable session autobridge in order to obtain an AX
   wake; `deliver.py` gives `autobridge_ready` precedence and suppresses
@@ -197,15 +199,18 @@ watcher as the routine wake.
 - write the durable `llm-collab` packet and inspect the delivery result; when it
   reports `autobridge_ready: true`, the current Phase 1 route is session
   autobridge, not AX
-- only when it reports `ax_doorbell_required: true`, run exactly the command
-  `deliver.py` prints once, even when the recipient is busy. Do not prove the
+- only when the task satisfies the app-only-tool condition and the result reports
+  `ax_doorbell_required: true`, run exactly the command `deliver.py` prints once,
+  even when the recipient is busy. Do not prove the
   composer empty first: for Codex, composer content and `AXValue`
   readability/opacity are never a hold, and busy alone is not a hold either —
   the ring clears and overrides whatever is in the composer and sends. Only a
   genuine targeting/operation failure (no or ambiguous native composer target,
   a non-Codex or unrecognized profile, an AX-trust failure, a
   clear/type/submit failure, or post-submit identity loss) means hold and
-  enter attended recovery. `VERIFIED` exit 0 confirms delivery;
+  enter attended recovery. `VERIFIED` exit 0 confirms only that a turn rendered
+  in the lagging app UI; it does not establish delivery to a working harness or
+  a reply path.
   `QUEUED (UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but does
   not prove exact-thread delivery and must not be re-rung
 - use attended Computer Use only as fallback/recovery when AX cannot safely
@@ -225,19 +230,22 @@ Why:
 Watcher policy for desktop-app agents:
 
 PM2/heartbeat is only the bounded, provisional safety-fuse described in
-`session-autobridge-runbook.md`. AX may target only Codex, and only as the
-fallback `deliver.py` selects; every watcher-backed worker, Codex included, owns
-its own pickup through routine exact-session dispatch.
+`session-autobridge-runbook.md`. For OpenAI-model interaction use BB unless the
+task needs a Codex-app-only tool that BB cannot reach. AX may target only Codex,
+and only after that condition is satisfied; `deliver.py` selecting the fallback
+does not satisfy the condition.
 
-- fallback for a Codex recipient only, and only when `deliver.py` prints it: run
-  the exact command it prints
+- conditional Codex-app procedure, only when the task needs a Codex-app-only
+  tool that BB cannot reach and `deliver.py` prints it: run the exact command it prints
   once, even while it is busy, with one short pointer to
   the durable packet. Do not prove the composer empty first: composer content
   and `AXValue` readability/opacity are never a hold, and busy alone is not a
   hold either — the ring overrides and sends. Only a genuine targeting/operation
   failure (no or ambiguous target, a non-Codex or unrecognized profile, an
   AX-trust failure, a clear/type/submit failure, or post-submit identity loss)
-  means hold and attended recovery. `VERIFIED` exit 0 confirms delivery;
+  means hold and attended recovery. `VERIFIED` exit 0 confirms only that a turn
+  rendered in the lagging app UI; it does not establish delivery to a working
+  harness or a reply path.
   `QUEUED (UNCONFIRMED)` remains unresolved, preserves the mailbox/follow-up,
   must not be re-rung, and cannot be reported as exact-thread delivery
 - recovery: if AX targets an embedded preview/web field or cannot verify the
@@ -256,7 +264,8 @@ its own pickup through routine exact-session dispatch.
 - unsafe: ask the operator to wake an agent or paste the bridge prompt before
   AX plus attended Computer Use/app-control recovery has been exhausted
 
-If desktop visibility is needed, the recommended flow is:
+If the task needs a Codex-app-only tool that BB cannot reach, the conditional
+flow is:
 
 1. write the task/message to `Chats/` with `deliver.py`
 2. ring the recipient's registered app via AX once, even if it is busy, with one
@@ -264,11 +273,13 @@ If desktop visibility is needed, the recommended flow is:
    empty first: for Codex, composer content and `AXValue` readability/opacity
    are never a hold, and busy alone is not a hold either — the ring overrides
    and sends. Only a genuine targeting/operation failure means hold and
-   attended recovery. Record `VERIFIED` exit
-   0 as confirmed delivery. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
+   attended recovery. `VERIFIED` exit 0 confirms only that a turn rendered in
+   the lagging app UI; it does not establish delivery to a working harness or a
+   reply path. Record `QUEUED (UNCONFIRMED)` exit 0 as unresolved,
    preserve the mailbox/blocker follow-up, never re-ring it, and do not claim
    exact-thread delivery
-3. the recipient drains its unread inbox and acts; it rings back on handoff
+3. the recipient drains its unread inbox and acts; any reply or handoff returns
+   through the live harness, not through the AX result
 4. if AX targets the wrong editable surface or cannot verify delivery or
    identity, run the attended Computer Use recovery above. Resume AX only
    after the real composer's **target** identity is resolved and unambiguous;

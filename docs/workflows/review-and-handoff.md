@@ -1,9 +1,12 @@
 # Review And Handoff
 
-BB workers are not llm-collab participants. The collab/doorbell and AX references
-below are dormant for BB work; they apply only when the orchestrator separately
-routes to a registered participant and `deliver.py` selects that fallback. Use
-[`bb-workers.md`](bb-workers.md) for BB operations.
+BB workers are not llm-collab participants. For OpenAI-model interaction, focus
+is BB until the Codex app reaches parity with the Claude app and BB. Use the
+Codex app only when the task needs a Codex-app-only tool that BB cannot reach;
+`deliver.py` selecting an AX fallback does not satisfy that condition. Use
+[`bb-workers.md`](bb-workers.md) for BB operations and the
+[`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface) for the
+conditional app path.
 
 ## Worker completion contract
 
@@ -76,8 +79,9 @@ from implementation (see role model in `task-intake-and-delegation.md`).
   queue-owner default (Codex) still records status transitions and the
   acceptance read, but "reviewer" is a role either agent fills depending on who
   implemented the lane.
-- Codex normally reviews Claude-authored implementation lanes through the
-  collab/doorbell loop and opens the PR after a clean result. Claude, Gemini, or
+- Codex normally reviews Claude-authored implementation lanes through BB and
+  opens the PR after a clean result. Only a task needing a Codex-app-only tool
+  that BB cannot reach may use the conditional AX path. Claude, Gemini, or
   another independent reviewer reviews Codex-authored lanes. Codex may still
   run the PR opener for a Codex-authored lane, but the recorded pre-PR review
   result and notes must come from the independent reviewer.
@@ -299,7 +303,10 @@ proves the repair. Do not substitute a resolved thread with no written
 disposition for that evidence. Delete the heartbeat before post-merge cleanup.
 
 When the PR comment needs implementer action, route it through the mailbox and
-doorbell immediately instead of leaving the PR-wait heartbeat to poll in silence.
+the recipient's permitted surface immediately instead of leaving the PR-wait
+heartbeat to poll in silence. For OpenAI-model interaction use BB unless the
+task needs a Codex-app-only tool that BB cannot reach; only then may the
+conditional AX procedure apply.
 The packet must name the PR, review thread/comment, current head SHA, exact
 finding, head status, and required fix scope. If the packet is a writer
 activation, send it with `deliver.py --activation` and tell the worker to use
@@ -307,8 +314,9 @@ the embedded `inbox.py --packet` claim command. The worker must not start from a
 generic inbox read, because activation authority is granted only after the exact
 packet lease claim succeeds and the returned fence is carried to later
 mutation-time assertions. If the wait cannot progress because the
-implementer has not acknowledged, the next heartbeat escalates by doorbell with
-the blocker rather than waiting for operator discovery.
+implementer has not acknowledged, the next heartbeat escalates through that
+same permitted route with the blocker rather than waiting for operator
+discovery.
 
 When a persistent queue-runner heartbeat is active, each task-specific wait must
 update `autonomous-loop.json` before it waits and again before it resumes. This
@@ -321,9 +329,10 @@ After a production-affecting merge, release closure requires the exact-merge-SHA
 deploy gate in `commit-push-prs.md` ("Release closure does not end at merge"):
 run `bin/deploy_release_watch.py --project <project-id> --merge-sha <sha>`;
 only terminal deploy+smoke success for that exact SHA closes a production
-release, and failure/cancelled/missing each get one durable packet + one
-doorbell with the configured release-gate agent holding the terminal
-disposition.
+release, and failure/cancelled/missing each get one durable packet plus the
+configured release-gate agent's permitted route. For an OpenAI model use BB
+unless the task needs a Codex-app-only tool that BB cannot reach; only then may
+the conditional AX procedure apply.
 
 The final task transition is mechanically restricted to `review -> done` and
 requires `--released-by` equal to the enabled project `release_gate_agent` plus

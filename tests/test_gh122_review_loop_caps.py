@@ -1413,7 +1413,8 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             "BB is the surface for all OpenAI-model interaction",
             "if and only if the task needs a Codex-app-only tool that BB "
             "cannot reach",
-            "reported `VERIFIED` by AX is not a reply path",
+            "reported `VERIFIED` by AX does not establish delivery to a "
+            "working harness or a reply path",
             "app-side silence is not evidence about a collaborator",
             "a cached v20 worker would still run the printed AX fallback "
             "without applying the task condition",
@@ -1502,6 +1503,69 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(normalized(phrase), workflow)
+
+    def test_ax_routing_entry_points_apply_the_app_only_condition(self):
+        entry_points = (
+            AGENTS_DOC,
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "docs" / "multi-project.md",
+            REPO_ROOT / "docs" / "adapters" / "pm2.md",
+            REPO_ROOT / "docs" / "workflows" / "README.md",
+            REPO_ROOT / "docs" / "workflows" / "bb-workers.md",
+            REPO_ROOT
+            / "docs"
+            / "workflows"
+            / "claude-code-desktop-computer-use-bridge.md",
+            QUICKSTART_DOC,
+            WORKFLOW_DOC,
+            REPO_ROOT / "docs" / "workflows" / "isolated-worktrees.md",
+            REPO_ROOT / "docs" / "workflows" / "pi-workers.md",
+            HANDOFF_DOC,
+            REPO_ROOT / "docs" / "workflows" / "session-autobridge-runbook.md",
+            REPO_ROOT / "docs" / "workflows" / "session-startup.md",
+            REPO_ROOT / "docs" / "workflows" / "task-intake-and-delegation.md",
+            REPO_ROOT / "tools" / "axbridge" / "README.md",
+        )
+        for path in entry_points:
+            with self.subTest(path=path.relative_to(REPO_ROOT)):
+                self.assertIn(
+                    "Codex-app-only tool",
+                    normalized(path.read_text(encoding="utf-8")),
+                )
+
+        verified_meaning = (
+            "`VERIFIED` exit 0 confirms only that a turn rendered in the lagging "
+            "app UI; it does not establish delivery to a working harness or a reply path."
+        )
+        for path in (
+            WORKFLOW_DOC,
+            REPO_ROOT / "docs" / "adapters" / "pm2.md",
+            REPO_ROOT
+            / "docs"
+            / "workflows"
+            / "claude-code-desktop-computer-use-bridge.md",
+            REPO_ROOT / "tools" / "axbridge" / "README.md",
+        ):
+            with self.subTest(verified_path=path.relative_to(REPO_ROOT)):
+                self.assertIn(
+                    verified_meaning,
+                    normalized(path.read_text(encoding="utf-8")),
+                )
+
+        for path in (
+            REPO_ROOT / "docs" / "workflows" / "bb-workers.md",
+            REPO_ROOT
+            / "docs"
+            / "workflows"
+            / "claude-code-desktop-computer-use-bridge.md",
+            REPO_ROOT / "docs" / "workflows" / "session-autobridge-runbook.md",
+            REPO_ROOT / "docs" / "workflows" / "session-startup.md",
+        ):
+            with self.subTest(ruling_link=path.relative_to(REPO_ROOT)):
+                self.assertIn(
+                    "../../AGENTS.md#bb-worker-surface",
+                    path.read_text(encoding="utf-8"),
+                )
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.

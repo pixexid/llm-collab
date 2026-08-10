@@ -53,8 +53,8 @@ those sessions, and app-server does not refresh its UI either, so BB is the
 surface for all OpenAI-model interaction until the app reaches parity and the
 live harness for updates and interaction. AX reaches the app harness rather
 than the model. Use AX if and only if the task needs a Codex-app-only tool that
-BB cannot reach; otherwise use BB. A packet reported `VERIFIED` by AX is not a
-reply path, and
+BB cannot reach; otherwise use BB. A packet reported `VERIFIED` by AX does not
+establish delivery to a working harness or a reply path, and
 app-side silence is not evidence about a collaborator because an unattended
 app, a stale UI, and a genuine non-answer are indistinguishable there. This
 changes what a worker may execute: a cached v20 worker would still run the
@@ -375,8 +375,9 @@ reach that app-only tool through the retained procedure in
 printed command does not itself satisfy the task condition.
 
 An AX result reported `VERIFIED` means a turn rendered in the lagging app UI; it
-does not establish a reply path. App-side silence is not evidence about a
-collaborator and must not accumulate into a fleet-standing inference: it
+does not establish delivery to a working harness or a reply path. App-side
+silence is not evidence about a collaborator and must not accumulate into a
+fleet-standing inference: it
 confounds an unattended app, a stale unrefreshed UI, and a genuine non-answer.
 
 ## Adding A Project
@@ -407,9 +408,10 @@ dispatch or acceptance receipt exists** for that packet. Never read
 it". Where no receipt exists, **preserve the packet and diagnose** — binding,
 watcher, sidecar — and do not reach for AX. A ready binding suppresses the
 doorbell, so in exactly that state `deliver.py` prints no AX command and there is
-nothing legitimate to run. AX becomes available only when a **fresh**
-`deliver.py` result prints it, which happens only after the exact binding is
-absent or nondispatchable.
+nothing legitimate to run. Even after the task satisfies the app-only-tool
+condition, the AX procedure becomes available only when a **fresh** `deliver.py`
+result prints it, which happens only after the exact binding is absent or
+nondispatchable.
 
 The recovery is concrete, so a stranded packet is never a dead end:
 

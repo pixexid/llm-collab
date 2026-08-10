@@ -2,7 +2,7 @@
 
 > **AX status: conditional, not the OpenAI-model interaction surface.** Under
 > the operator-sourced standing routing rule in
-> [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane), focus is BB until the Codex
+> [`AGENTS.md`](../../AGENTS.md#bb-worker-surface), focus is BB until the Codex
 > app reaches parity with the Claude app and BB; use the Codex app only for
 > app-exclusive tooling. Session autobridge
 > dispatch and its AX fallback are not BB transports and
@@ -56,7 +56,8 @@ target identity — some editable field resolved but it cannot be confirmed as t
 right target), an AX-trust failure, a clear/type/submit failure, or post-submit
 identity loss. Distinguish opaque `AXValue` **content** (proceed and override)
 from an unresolved/unknown **target** (fail closed). `VERIFIED` exit 0 confirms
-only that a turn rendered in the lagging app UI, not a reply path. `QUEUED
+only that a turn rendered in the lagging app UI; it does not establish delivery
+to a working harness or a reply path. `QUEUED
 (UNCONFIRMED)` exit 0 does not prove exact-thread delivery:
 preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
 and never re-ring. The idle input gate applies only to attended

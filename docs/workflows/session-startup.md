@@ -245,7 +245,7 @@ participants.
 ## Claude Desktop Rule
 
 BB workers do not enter this path unless the task satisfies the operator-sourced
-standing routing rule in [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane).
+standing routing rule in [`AGENTS.md`](../../AGENTS.md#bb-worker-surface).
 Focus is BB until the Codex app reaches parity with the Claude app and BB; use
 the Codex app only for app-exclusive tooling. Use `bb-workers.md` for
 OpenAI-model interaction when the task does not need a Codex-app-only tool that
@@ -325,16 +325,16 @@ Conditional workflow for a task that needs a Codex-app-only tool BB cannot reach
    - `routing_mode: broadcast` is the explicit signal for the only admitted
      unbound case: the operator or a watcher-disabled human/human relay
 2. When the task satisfies that condition, invoke the AX procedure. `VERIFIED`
-   means a turn rendered in the lagging
-   app UI; it does not establish a reply path. Do not prove the composer empty
-   first: for Codex, composer content
+   exit 0 confirms only that a turn rendered in the lagging app UI; it does not
+   establish delivery to a working harness or a reply path. Do not prove the
+   composer empty first: for Codex, composer content
    and `AXValue` readability/opacity are never a hold, and a busy recipient is
    not a hold either — the ring clears and overrides whatever is in the
    composer and sends, and queues behind the recipient's active turn. Only a
    genuine targeting/operation failure (no or ambiguous native composer target,
    a non-Codex or unrecognized profile, an AX-trust failure, a
    clear/type/submit failure, or post-submit identity loss) means hold and
-   recovery. `VERIFIED` exit 0 confirms only that app rendering.
+   recovery. The same limited `VERIFIED` meaning applies.
    `QUEUED (UNCONFIRMED)` exit 0 does
    not prove the pointer entered the intended thread: preserve the mailbox
    packet, record the unconfirmed blocker/follow-up, never re-ring it, and do not

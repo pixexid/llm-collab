@@ -252,14 +252,15 @@ relay. [GH-604](https://github.com/pixexid/llm-collab/issues/604) tracks a real
 relay-provenance surface; it is prospective, not present.
 
 Under the operator-sourced standing routing rule in
-[`AGENTS.md`](../../AGENTS.md#one-writer-per-lane), focus is BB until the Codex
+[`AGENTS.md`](../../AGENTS.md#bb-worker-surface), focus is BB until the Codex
 app reaches parity with the Claude app and BB; use the Codex app only for
 app-exclusive tooling. Do not switch harnesses merely because `deliver.py`
 prints an AX command; GH-748 tracks that separate output change. Ask one
 question: does this task need a Codex-app-only tool that BB cannot reach? If no,
 use BB and never AX. If yes, use the conditional AX procedure. Even then,
-`VERIFIED` proves only that a turn rendered in the lagging app UI, not a reply
-path, and app-side silence is not evidence about a collaborator. BB provides no
+`VERIFIED` proves only that a turn rendered in the lagging app UI; it does not
+establish delivery to a working harness or a reply path, and app-side silence is
+not evidence about a collaborator. BB provides no
 delivery receipt, and the orchestrator still verifies the named artifact and
 exact head.
 

@@ -627,19 +627,24 @@ reports a stalled trigger; it never converts time into a pass.
 
 PR-wait heartbeats are a safety-fuse, not the primary routing path. When a
 heartbeat or queue owner finds actionable PR feedback that needs the implementer
-to change their branch, it must send a durable mailbox packet and inspect the
-`deliver.py` result. If `autobridge_ready: true`, the current Phase 1 route is
-session autobridge and no AX doorbell was requested. If
-`ax_doorbell_required: true`, ring the implementer once with AX even if busy.
+to change their branch, it must send a durable mailbox packet. For OpenAI-model
+interaction, focus is BB until the Codex app reaches parity with the Claude app
+and BB. Use BB unless this task needs a Codex-app-only tool that BB cannot
+reach. Only when that condition is true should the sender inspect the
+`deliver.py` result for AX: if `autobridge_ready: true`, no AX doorbell was
+requested; if `ax_doorbell_required: true`, ring the implementer once with AX
+even if busy. See the
+[`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface).
 Do not prove the composer empty first: composer content and `AXValue`
 readability/opacity are never a hold for Codex, and busy alone is not a hold
 either — the ring overrides and sends. Only a genuine targeting/operation
 failure (no or ambiguous target, a non-Codex or unrecognized profile, an
 AX-trust failure, a clear/type/submit failure, or post-submit identity loss)
 means hold and enter recovery.
-`VERIFIED` exit 0 confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 preserves the
-mailbox/blocker follow-up but is not exact-thread delivery proof and must not be
-re-rung. The idle input gate applies only if attended screenshot/keyboard
+`VERIFIED` exit 0 confirms only that a turn rendered in the lagging app UI; it
+does not establish delivery to a working harness or a reply path. `QUEUED
+(UNCONFIRMED)` exit 0 preserves the mailbox/blocker follow-up but is not
+exact-thread delivery proof and must not be re-rung. The idle input gate applies only if attended screenshot/keyboard
 Computer Use is needed as fallback. Do not silently wait for the next heartbeat
 or depend on the operator to notice the PR comment.
 
@@ -754,7 +759,10 @@ verification on the new exact head; do not request a second bot pass.
 
 If the wait cannot self-progress because local verification stalled, review state
 is ambiguous, or the implementer has not acknowledged a routed review-fix request,
-the heartbeat must escalate by doorbell with the exact blocker and next action.
+the heartbeat must escalate through the recipient's permitted route with the
+exact blocker and next action. For an OpenAI model that route is BB unless the
+task needs a Codex-app-only tool that BB cannot reach; only then may the
+conditional AX procedure apply.
 Delete or rewrite any PR-wait heartbeat that misses this escalation path.
 
 
@@ -927,8 +935,10 @@ without that config fails closed with exit 64.
   project's `projects.json` `release_closure` — no project inherits another's
   labels. Empty or partial run evidence fails closed.
 - **`FAILURE` / `CANCELLED` / `MISSING` are each actionable**: the watcher
-  sends ONE durable llm-collab packet plus ONE doorbell ring. A missing run is
-  a distinct alarm, never silence and never a pass.
+  sends one durable llm-collab packet and uses the recipient's permitted route.
+  For an OpenAI model use BB unless the task needs a Codex-app-only tool that BB
+  cannot reach; only then may the conditional AX procedure apply. A missing run
+  is a distinct alarm, never silence and never a pass.
 - **On any non-success the task is NOT done**: closure is blocked until Codex
   records a terminal disposition. Preserve the run id and logs
   (`gh run view <id> --log-failed`); **no blind retry or redeploy** as the
