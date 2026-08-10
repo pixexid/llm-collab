@@ -23,6 +23,12 @@ pattern, so the guard stayed green with a bare invocation present):
 - TS/JS files have no parser here, so they are scanned as WHOLE-FILE text
   with regexes whose ``\\s`` spans newlines; a multiline array literal is as
   ordinary there as in Python. The subscript lookbehind is retained for them.
+- Extensionless executable scripts in ``bin/`` (``axsend-ensure``,
+  ``llm-collab``) are detected by SHEBANG, not the mode bit: ``#!`` is direct
+  evidence the file is interpreted as commands, while +x only says it may be
+  executed. They take the same whole-file regex path as TS/JS, plus a shell
+  command-word pattern (``bb`` at a line start or after a shell separator),
+  since a shell invocation is a bare word, not a call.
 
 What this guard does NOT catch, deliberately: a bb literal reaching a spawn
 through a variable or other indirection (``cmd = "bb"; subprocess.run([cmd,
@@ -36,8 +42,9 @@ should take this guard as proof that it is.
 
 Scope and exemptions — deliberately narrow:
 
-- Scanned: ``bin/``, ``llm_collab/``, ``scripts/`` (Python) and ``bb-plugins/``,
-  ``pi-extensions/`` (TS/JS). Those are the trees whose code can spawn a
+- Scanned: ``bin/``, ``llm_collab/``, ``scripts/`` (Python), ``bb-plugins/``
+  and ``pi-extensions/`` (TS/JS), and extensionless shebang scripts in
+  ``bin/`` (shell). Those are the trees whose code can spawn a
   process; a BB invocation outside them cannot execute.
 - Not scanned: ``tests/`` and ``docs/``. Test fixtures carry ``["bb"]`` as
   registry *data* — the configured value the seam validates — never as an
@@ -70,6 +77,17 @@ TS_PATTERNS = (
     ),
     # A PATH lookup for bb: how a silent PATH fallback gets constructed.
     re.compile(r"which\(\s*[\"']bb[\"']"),
+)
+
+# Shell files invoke a command as a bare word, so they take the shared text
+# patterns plus their own.
+SHELL_PATTERNS = TS_PATTERNS + (
+    # bb as a command word: at a line start or after a shell separator,
+    # including $(...) substitution. A mention inside a comment or string
+    # is not preceded by one of these and does not match.
+    re.compile(r"(?m)(?:^|[|;&`(])\s*bb(?:[ \t]|\n|$)"),
+    # bb as the first element of a shell array: ("bb" ...)
+    re.compile(r"\(\s*[\"']bb[\"'\s,\)]"),
 )
 
 
@@ -111,14 +129,31 @@ def _python_hits(path: Path) -> list[str]:
     return hits
 
 
-def _ts_hits(path: Path) -> list[str]:
+def _text_hits(path: Path, patterns) -> list[str]:
     text = path.read_text()
     hits: list[str] = []
-    for pattern in TS_PATTERNS:
+    for pattern in patterns:
         for match in pattern.finditer(text):
             lineno = text.count("\n", 0, match.start()) + 1
             hits.append(f"{lineno}: {match.group(0)!r}")
     return hits
+
+
+def _shell_scripts() -> list[Path]:
+    """Extensionless scripts in bin/ that a kernel can execute directly.
+
+    Detection is by shebang rather than the executable bit: a ``#!`` line is
+    direct evidence the file is interpreted as commands, while the mode bit
+    only says it may be executed.
+    """
+    scripts: list[Path] = []
+    for path in sorted((ROOT / "bin").iterdir()):
+        if not path.is_file() or path.suffix:
+            continue
+        with path.open("rb") as handle:
+            if handle.readline(256).startswith(b"#!"):
+                scripts.append(path)
+    return scripts
 
 
 def bare_bb_invocations() -> list[str]:
@@ -130,8 +165,11 @@ def bare_bb_invocations() -> list[str]:
     for directory in TS_DIRS:
         for suffix in ("*.ts", "*.js"):
             for path in sorted((ROOT / directory).rglob(suffix)):
-                for hit in _ts_hits(path):
+                for hit in _text_hits(path, TS_PATTERNS):
                     hits.append(f"{path.relative_to(ROOT)}:{hit}")
+    for path in _shell_scripts():
+        for hit in _text_hits(path, SHELL_PATTERNS):
+            hits.append(f"{path.relative_to(ROOT)}:{hit}")
     return hits
 
 
