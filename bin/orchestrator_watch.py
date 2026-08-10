@@ -80,7 +80,7 @@ TLS_HOST_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.-])"
     r"((?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"[A-Za-z]{2,63})"
-    r"(?::\d{1,5})?"
+    r"(?::(\d{1,5}))?"
 )
 TLS_FAILURE_HINT_PATTERN = re.compile(
     r"(?<![a-z0-9])(?:tls|ssl|certificate|cert|x509)(?![a-z0-9])|verif",
@@ -508,13 +508,20 @@ def is_certificate_verification_failure(error: BaseException) -> bool:
     return TLS_FAILURE_HINT_PATTERN.search(str(error)) is not None
 
 
-def endpoint_host_from_error(error: BaseException) -> str | None:
+def endpoint_host_from_error(error: BaseException) -> tuple[str, int] | None:
     text = str(error)
     url = re.search(r"https?://[^\s\"']+", text, re.IGNORECASE)
     if url:
-        return urlsplit(url.group(0)).hostname
+        parsed = urlsplit(url.group(0))
+        try:
+            return (parsed.hostname, parsed.port or 443) if parsed.hostname else None
+        except ValueError:
+            return None
     host = TLS_HOST_PATTERN.search(text)
-    return host.group(1) if host else None
+    if host:
+        port = int(host.group(2)) if host.group(2) else 443
+        return (host.group(1), port) if port <= 65535 else None
+    return None
 
 
 def proxy_environment_section() -> str:
@@ -528,7 +535,7 @@ def proxy_environment_section() -> str:
     return "\n".join(lines)
 
 
-def fetch_tls_evidence(host: str | None, timeout_seconds: float) -> str:
+def fetch_tls_evidence(endpoint: tuple[str, int] | None, timeout_seconds: float) -> str:
     """Capture raw command output within one shared hard deadline."""
     deadline = time.monotonic() + timeout_seconds
 
@@ -572,7 +579,7 @@ def fetch_tls_evidence(host: str | None, timeout_seconds: float) -> str:
             lines.append(f"FAILED: {str(error) or type(error).__name__}")
         return "\n".join(lines)
 
-    if host is None:
+    if endpoint is None:
         missing = "endpoint host could not be determined"
         openssl_section = command_section("OPENSSL S_CLIENT", "not run", None, unavailable=missing)
         system_dns_section = command_section(
@@ -582,7 +589,8 @@ def fetch_tls_evidence(host: str | None, timeout_seconds: float) -> str:
             "PUBLIC DNS 1.1.1.1 (A AND AAAA)", "not run", None, unavailable=missing
         )
     else:
-        target = f"[{host}]:443" if ":" in host else f"{host}:443"
+        host, port = endpoint
+        target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
         openssl = shutil.which("openssl")
         openssl_display = (
             f"openssl s_client -connect {target} -servername {host} "
@@ -659,7 +667,7 @@ def capture_tls_failure(
     timeout_seconds: float,
     *,
     failure_count: int = 1,
-    fetcher: Callable[[str | None, float], str] = fetch_tls_evidence,
+    fetcher: Callable[[tuple[str, int] | None, float], str] = fetch_tls_evidence,
     timestamp: Callable[[], str] = utc_iso,
     wall_time: Callable[[], float] = time.time,
 ) -> Path | None:
@@ -675,9 +683,9 @@ def capture_tls_failure(
         pass
 
     captured_at = timestamp()
-    host = endpoint_host_from_error(error)
+    endpoint = endpoint_host_from_error(error)
     try:
-        sections = fetcher(host, timeout_seconds)
+        sections = fetcher(endpoint, timeout_seconds)
         if not isinstance(sections, str):
             raise TypeError("TLS evidence fetcher returned non-text output")
     except Exception as capture_error:
@@ -695,7 +703,7 @@ def capture_tls_failure(
         f"UTC timestamp: {captured_at}",
         f"Watcher: {name}",
         f"Error: {error}",
-        f"Endpoint host: {host or 'could not be determined'}",
+        f"Endpoint host: {f'{endpoint[0]}:{endpoint[1]}' if endpoint else 'could not be determined'}",
         f"Cycle failure count: {failure_count}",
     ]
     if failure_count > 1:
@@ -734,7 +742,7 @@ def run_once(
     check: Callable[[], bool],
     *,
     emit: Callable[[str], None] = emit_event,
-    tls_fetcher: Callable[[str | None, float], str] = fetch_tls_evidence,
+    tls_fetcher: Callable[[tuple[str, int] | None, float], str] = fetch_tls_evidence,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
     deadline = cycle_deadline(None, monotonic)
@@ -761,8 +769,11 @@ def run_once(
                 if not already_emitted:
                     emit(f"{name.upper()} CHECK FAILED — {error}")
                 raise
-            except Exception:
-                pass
+            except Exception as capture_error:
+                emit(
+                    f"{name.upper()} TLS FORENSIC CAPTURE FAILED — "
+                    f"{str(capture_error) or type(capture_error).__name__}"
+                )
         if not already_emitted:
             emit(f"{name.upper()} CHECK FAILED — {error}")
         return False

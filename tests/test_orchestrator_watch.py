@@ -471,6 +471,60 @@ class TlsForensicCaptureTest(unittest.TestCase):
         marker.assert_not_called()
         self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
 
+    def test_persistence_failure_is_emitted_without_changing_cycle_result(self) -> None:
+        messages = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(
+            watch, "write_file_durably", side_effect=OSError("disk full")
+        ), mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "pr-artifacts",
+                "project-a",
+                "session-a",
+                lambda: (_ for _ in ()).throw(self.ERROR),
+                emit=messages.append,
+                tls_fetcher=lambda _endpoint, _timeout: self.RAW_SECTIONS,
+            )
+
+        self.assertFalse(completed)
+        self.assertEqual(
+            [
+                "PR-ARTIFACTS TLS FORENSIC CAPTURE FAILED — disk full",
+                f"PR-ARTIFACTS CHECK FAILED — {self.ERROR}",
+            ],
+            messages,
+        )
+        marker.assert_not_called()
+
+    def test_explicit_endpoint_port_is_retained_and_default_is_443(self) -> None:
+        class Result:
+            exit_code = 0
+            stdout = "raw command output\n"
+            stderr = ""
+
+        def transport(_executable, *, max_response_chars):
+            self.assertEqual(watch.TLS_CAPTURE_MAX_RESPONSE_CHARS, max_response_chars)
+            return lambda _argv, _timeout: Result()
+
+        cases = (
+            ('request to "https://bb.example:8443/status" failed: TLS error', 8443),
+            ('request to "https://bb.example/status" failed: TLS error', 443),
+        )
+        with mock.patch.object(
+            watch.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"
+        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
+            for error_text, expected_port in cases:
+                with self.subTest(port=expected_port):
+                    endpoint = watch.endpoint_host_from_error(RuntimeError(error_text))
+                    self.assertEqual(("bb.example", expected_port), endpoint)
+                    output = watch.fetch_tls_evidence(endpoint, 1.0)
+                    self.assertIn(
+                        f"openssl s_client -connect bb.example:{expected_port} ",
+                        output,
+                    )
+                    self.assertIn("-servername bb.example", output)
+
     def test_fetch_timeout_writes_every_section_as_failed(self) -> None:
         def timed_out(_host, _timeout):
             raise TimeoutError("openssl chain fetch timed out")
