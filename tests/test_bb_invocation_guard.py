@@ -24,6 +24,16 @@ pattern, so the guard stayed green with a bare invocation present):
   with regexes whose ``\\s`` spans newlines; a multiline array literal is as
   ordinary there as in Python. The subscript lookbehind is retained for them.
 
+What this guard does NOT catch, deliberately: a bb literal reaching a spawn
+through a variable or other indirection (``cmd = "bb"; subprocess.run([cmd,
+...])``), where the first element is a Name rather than a constant. The class
+this guard exists to prevent is the accidentally written literal — six
+instances in one day, every one a literal — and nobody assigns ``"bb"`` to a
+variable by accident, so dataflow analysis would be disproportionate to a
+threat that has never occurred. The class is hard to reintroduce
+*accidentally*; it is not closed against a determined author, and no reader
+should take this guard as proof that it is.
+
 Scope and exemptions — deliberately narrow:
 
 - Scanned: ``bin/``, ``llm_collab/``, ``scripts/`` (Python) and ``bb-plugins/``,
