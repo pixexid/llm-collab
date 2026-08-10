@@ -51,8 +51,11 @@ the operator's behalf outside the exact operator-only boundary in
 that authority instead of leaving the decision `pending operator decision`, so
 that state should be rare. This changes what a worker may do: a cached v21
 worker can refuse a valid supervisor decision because its contract still
-reserves the decision to the operator. The version signal makes the corrected
-authority visible.
+reserves the decision to the operator. V22 also makes the fleet-wide
+control-prose rule in
+[`BB Worker Profiles`](docs/workflows/bb-worker-profiles.md) binding on every
+worker; both worker-visible changes share one marker because they ship together
+and bind the whole fleet. The version signal makes both obligations visible.
 
 Contract v21 (2026-08-10) demotes AX to one condition under an operator-sourced
 ruling relayed through the supervisor session. BB threads on OpenAI models and

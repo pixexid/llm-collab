@@ -231,7 +231,11 @@ def next_action(state: dict[str, Any]) -> str:
             "items are recorded."
         )
     if mode == "blocked":
-        return "Stop only if the blocker requires external operator input; otherwise convert it into a fix loop."
+        return (
+            "Stop and escalate to the supervisor when the blocker needs a decision beyond "
+            "the orchestrator's authority, with operator escalation reserved for the canonical "
+            "AGENTS.md boundary; otherwise convert it into a fix loop."
+        )
     if mode == "queue_empty":
         return "Confirm queues are empty, archive the final snapshot, clear this loop state, and report the summary."
     return "Recover inbox, queue, bridge status, active PRs, then choose the next executable workflow step."
