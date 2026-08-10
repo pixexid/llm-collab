@@ -26,8 +26,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
+from _helpers import get_project  # noqa: E402
 from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
-from llm_collab.bb_client import PINNED_BB_VERSION, subprocess_transport  # noqa: E402
+from llm_collab.bb_client import (  # noqa: E402
+    PINNED_BB_VERSION,
+    bb_executable_from_project,
+    subprocess_transport,
+)
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
 HOOK_PROJECT_ID = "llm-collab"  # this hook is llm-collab's own repo hook
@@ -61,8 +66,13 @@ def bb_version_check() -> tuple[str, str]:
     surfaces as UNKNOWN — never a pass, never a crash.
     """
     try:
+        # GH-728: probe through the project's configured executable via the one
+        # resolver seam — never a bare PATH bb, which can be a different
+        # installation than the one spawns use. An unconfigured project is
+        # UNKNOWN (a setup fact), never a pass and never a session failure.
+        executable = bb_executable_from_project(get_project(HOOK_PROJECT_ID))
         transport = subprocess_transport(
-            ["bb"], max_response_chars=BB_PROBE_MAX_RESPONSE_CHARS
+            executable, max_response_chars=BB_PROBE_MAX_RESPONSE_CHARS
         )
         result = transport(["settings", "version", "--json"], BB_PROBE_TIMEOUT_SECONDS)
     except Exception as error:

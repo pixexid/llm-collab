@@ -651,26 +651,44 @@ class SessionGateTest(unittest.TestCase):
             [sys.executable, "-c", script],
             max_response_chars=session_gate.BB_PROBE_MAX_RESPONSE_CHARS,
         )
-        with mock.patch.object(session_gate, "subprocess_transport", return_value=bounded):
-            status, detail = session_gate.bb_version_check()
+        # The probe resolves its executable through the project registry (GH-728),
+        # so the registry read is mocked too: no test may depend on the live tree's
+        # own collab.config.json being present.
+        configured = {"bb": {"enabled": True, "executable": ["configured-bb"]}}
+        with mock.patch.object(session_gate, "get_project", return_value=configured):
+            with mock.patch.object(session_gate, "subprocess_transport", return_value=bounded):
+                status, detail = session_gate.bb_version_check()
         self.assertEqual(session_gate.UNKNOWN, status)
         self.assertIn("exceeded", detail)
 
+    def test_unconfigured_project_probe_is_unknown_not_a_path_fallback(self) -> None:
+        """GH-728: no configured bb.executable is UNKNOWN, never a bare PATH probe."""
+        with mock.patch.object(session_gate, "get_project", return_value=None):
+            with mock.patch.object(session_gate, "subprocess_transport") as transport_factory:
+                status, detail = session_gate.bb_version_check()
+        self.assertEqual(session_gate.UNKNOWN, status)
+        transport_factory.assert_not_called()
+
     def test_real_bb_probe_shape(self) -> None:
         """The unpatched bb probe classifies a well-formed envelope."""
+        configured = {"bb": {"enabled": True, "executable": ["configured-bb"]}}
         envelope = BbTransportResult(0, json.dumps({"currentVersion": PINNED_BB_VERSION}), "")
-        with mock.patch.object(
-            session_gate, "subprocess_transport", return_value=mock.Mock(return_value=envelope)
-        ):
-            status, _detail = session_gate.bb_version_check()
+        with mock.patch.object(session_gate, "get_project", return_value=configured):
+            with mock.patch.object(
+                session_gate, "subprocess_transport", return_value=mock.Mock(return_value=envelope)
+            ) as transport_factory:
+                status, _detail = session_gate.bb_version_check()
         self.assertEqual(session_gate.PASS, status)
+        # The transport is built from the configured argv, not a bare PATH bb.
+        self.assertEqual(["configured-bb"], transport_factory.call_args.args[0])
 
-        with mock.patch.object(
-            session_gate,
-            "subprocess_transport",
-            return_value=mock.Mock(side_effect=OSError("no bb")),
-        ):
-            status, _detail = session_gate.bb_version_check()
+        with mock.patch.object(session_gate, "get_project", return_value=configured):
+            with mock.patch.object(
+                session_gate,
+                "subprocess_transport",
+                return_value=mock.Mock(side_effect=OSError("no bb")),
+            ):
+                status, _detail = session_gate.bb_version_check()
         self.assertEqual(session_gate.UNKNOWN, status)
 
 

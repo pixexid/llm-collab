@@ -26,6 +26,8 @@ import pr_watch  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     MAX_RESPONSE_CHARS,
     PINNED_BB_VERSION,
+    BbExecutableRefused,
+    bb_executable_from_project,
     subprocess_transport,
 )
 
@@ -88,13 +90,12 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
     bb = project.get("bb")
     if not isinstance(bb, Mapping):
         raise ProbeError(f"project {project_id!r} has no bb configuration")
-    executable = bb.get("executable")
-    if (
-        not isinstance(executable, list)
-        or not executable
-        or any(not isinstance(token, str) or not token for token in executable)
-    ):
-        raise ProbeError("bb.executable must be a non-empty list of strings")
+    # GH-728: the executable comes from the one resolver seam; an absent or
+    # malformed bb.executable refuses rather than falling back to PATH bb.
+    try:
+        executable = bb_executable_from_project(project)
+    except BbExecutableRefused as error:
+        raise ProbeError(str(error)) from error
     bb_project_id = bb.get("project_id", project_id)
     if not isinstance(bb_project_id, str) or not bb_project_id:
         raise ProbeError("bb.project_id must be non-empty text")
