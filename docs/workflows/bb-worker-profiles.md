@@ -5,6 +5,17 @@ executable profile registry.
 
 ## Contract
 
+Durable artifacts — code, comments, commit messages, task notes, handoffs,
+documentation — are English-only. This binds the **artifact**, not any
+particular worker. Bind a constraint to the artifact it protects, not to the
+actor most likely to violate it: an actor-scoped rule silently exempts everyone
+else from what is really a property of the artifact.
+
+That scope has its own provenance: on the day the GLM trait migrated, a non-GLM
+model emitted a stray CJK character into a durable artifact in this workspace.
+One typo is not a trend and adds no other model to the exclusion list; it is the
+existence proof that the constraint belongs to the artifact.
+
 Each execution assignment gets one BB thread and one frozen
 `(provider, model, reasoning_level)` triple. The field and CLI flag use BB's
 native names: `reasoning_level` and `--reasoning-level`. A different model,
@@ -75,8 +86,24 @@ pilot used one byte-identical, read-only source-audit task per model.
 |---|---|---|---|
 | Fast, exact source analysis | `codex / gpt-5.6-luna` | 136s; 7/7 citations exact; correct judgment; clean output | Authoring and reasoning-level-specific behavior are unmeasured. Analysis only; not a sole gate. |
 | Deep source analysis or a competing diagnosis | `pi / kimi-coding/k3` | 324s; about 15/15 citations exact; deepest analysis; alone caught a subtle wrong-fix direction and checked `agents.json` for empirical proof | Authoring is measured and qualified at `high` only (GH-596/GH-705); other reasoning levels remain unmeasured. Not a sole gate. |
-| Hard-excluded | `pi / zai/glm-5.2` | 508s; reasoning and conclusions correct | Citation coordinates drifted by 150 and 11 lines; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
+| Hard-excluded | `pi / zai/glm-5.2` | 508s; reasoning and conclusions correct | Citation coordinates drifted by 150 and 11 lines; see the [profile-specific risk](#glm-52-reasoning-language-drift), [re-trial criteria](https://github.com/pixexid/llm-collab/issues/755), and canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
 | Hard-excluded | `pi / meta/muse-spark-1.2-contributor` | About 120s; citations and judgment were initially correct | Output degenerated mid-answer: repetition, a corrupted glyph, emoji burst, and one unreadable item; see the canonical [exclusion rule](bb-workers.md#spawn-in-an-isolated-worktree). |
+
+<a id="glm-52-reasoning-language-drift"></a>
+
+**`zai/glm-5.2` — reasoning-language drift.** GLM models can drift into Chinese
+in internal reasoning even while visible output stays English. Durable
+artifacts — code, comments, commit messages, task notes, handoffs — must be
+English-only. A worker on this profile should think in English and switch back
+immediately on noticing drift.
+
+Provenance: amiga `ZCODE.md` "Language Discipline", carried while zcode ran as a
+separate app harness. Migrated to fleet scope 2026-08-10 because it is a property
+of the model wherever it runs.
+
+[GH-755](https://github.com/pixexid/llm-collab/issues/755) defines the re-trial
+grading criteria and makes reasoning-language drift a pass/fail gate alongside
+source-coordinate fidelity.
 
 The timings are provisional: single runs confound capability with capacity and
 usage limits. The observed failure modes are actionable—load does not explain a

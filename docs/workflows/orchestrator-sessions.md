@@ -25,6 +25,23 @@ limits, or PR gates. Use
 [`task-intake-and-delegation.md`](task-intake-and-delegation.md), and
 [`commit-push-prs.md`](commit-push-prs.md) for those procedures.
 
+## Writing operational clauses
+
+Every operational clause states whether it is **ENFORCED** or a
+**CONVENTION**. An enforced clause names its enforcement seam. A convention is
+legitimate, but a convention that reads as a control is a defect because a
+reader relies on protection that does not exist. Every convention clause
+carries its check — the command that detects a violation — instead of implying
+a gate.
+
+Four review rounds found that same defect on successive clauses of one
+queue-eligibility paragraph. The contract-versioned prose was mistaken for
+enforcement; the first added gate covered only a default that project
+configuration replaced rather than augmented; a third clause named a label
+with no runtime effect; and the documented audit for a fourth omitted both
+`--repo` and `--limit`, so it examined the wrong repository and only the first
+page while claiming completeness.
+
 ## Orchestrator topology
 
 The supervisor is one singleton across all projects. Orchestrators are
@@ -166,6 +183,18 @@ re-derive it.
   undecidability and its maintenance trigger produced an honest deferral;
   pretending the sweep had a completion criterion produced an open-ended lane.
   Related GH-751.
+- **Never gate a connector verdict on `commit_id` alone.** A verdict at the
+  exact head requires a review with a non-empty body, a 👍 reaction, or new
+  inline threads. The connector posts an empty-bodied review when a pass starts
+  and can post the body-bearing review up to six minutes later. On one head, a
+  review at the exact head, zero new threads, a green full suite, and written
+  dispositions for every prior finding appeared to satisfy every merge
+  condition; the real review arrived six minutes later carrying a P1. Two
+  sibling fields are equally unsafe as finding records: a thread's `commit_id`
+  re-anchors to the newest head and says where the thread points now, not which
+  head raised it, while its `line` can become `null` when a fix restructures
+  the code beneath it. **The written disposition must carry the finding, never
+  lean on where the thread sits.**
 - **Audit all four connector artifact classes:** review threads, review bodies,
   issue/PR comments, and reactions. A finding can live only in a review body,
   where thread enumeration cannot see it; a clean pass can be reaction-only,
@@ -303,14 +332,16 @@ permission to guess.
 ## Supervisor arrangement
 
 The singleton supervisor preserves continuity across projects and orchestrator
-generations and routes operator-owned decisions; each per-project orchestrator
-owns that project's technical execution and verification.
+generations and decides on the operator's behalf wherever doing so keeps the
+process unblocked; each per-project orchestrator owns that project's technical
+execution and verification.
 
-- Route business priority, irreversible choices, credentials/account changes,
-  and product decisions without stated authority to the supervisor. Keep
-  technical scope, implementation choices, bounded recovery, and the normal
-  review/release flow with the orchestrator. The broader escalation boundary is
-  canonical in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup).
+- Route decisions beyond the per-project orchestrator's stated authority to the
+  supervisor. The supervisor decides unless the canonical operator-only boundary
+  in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies; do not
+  carry a `pending operator decision` state for anything else. Keep technical
+  scope, implementation choices, bounded recovery, and the normal review/release
+  flow with the orchestrator.
 - Spend expensive-model tokens on orchestration, independent review, and
   judgment. Delegate bounded work that a cheaper eligible worker can perform;
   evaluation candidates use their own execution tokens.
