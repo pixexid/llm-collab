@@ -23,13 +23,19 @@ pattern, so the guard stayed green with a bare invocation present):
   the positional form), so one rule with one exemption pair covers both;
   a second parallel matching path would only duplicate the rule. The
   keyword side is fail-CLOSED too — every keyword is inspected, with an
-  enumerated set of prose-shaped keyword NAMES exempted — for the same
+  enumerated set of (callee, keyword) prose pairs exempted — for the same
   reason the callee side is: an enumerated set of spawn keywords fails
   open on the one nobody listed (the first version of this fix listed six
   verified stdlib spawn keywords and still missed ``executable=``, which
-  ``subprocess.Popen`` uses as the binary to launch). The asymmetry is
-  the argument: missing a spawn keyword is a silent false negative that
-  leaves the class open, while missing a prose keyword is a loud false
+  ``subprocess.Popen`` uses as the binary to launch). The keyword
+  exemption is scoped BY CALLEE, not by keyword name alone, for the same
+  reason the positional exemption (``PROSE_FIRST_ARG_NAMES``) is: a bare
+  keyword set waves through any callee that happens to name a parameter
+  ``help`` or ``detail`` — including a spawn wrapper forwarding it to
+  ``subprocess.run`` (``launch(detail="bb thread list")``) — so do not
+  "simplify" this back to a bare keyword set. The asymmetry is the
+  argument: missing a spawn keyword is a silent false negative that
+  leaves the class open, while missing a prose pair is a loud false
   positive that someone fixes deliberately, in a diff, with a comment.
   The guard enumerates the side where being wrong is safe. The call check
   itself is name-agnostic by design (PR #735 review):
@@ -154,22 +160,27 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-# Keyword names whose VALUES are prose, not commands — the keyword-axis
-# counterpart of PROSE_FIRST_ARG_NAMES, and the fail-closed inversion of
-# the former SPAWN_COMMAND_KEYWORDS admission list. An all-keyword rule
-# flags exactly these two shapes in the scanned trees (measured); both
-# are messages, not invocations. A genuinely benign new prose keyword
-# fails loud until someone exempts it here deliberately, in a diff, with
-# a comment.
-PROSE_KEYWORD_NAMES = frozenset({
-    # argparse add_argument(help="bb projectId from the thread.created
-    # event DTO ...") in bin/record_executed_triples.py — CLI help text
+# (callee, keyword) pairs whose keyword VALUE is prose, not a command —
+# the keyword-axis counterpart of PROSE_FIRST_ARG_NAMES, and the
+# fail-closed inversion of the former SPAWN_COMMAND_KEYWORDS admission
+# list. Scoped by CALLEE, like the positional set: exempting on the
+# keyword name alone would wave through any spawn wrapper whose parameter
+# happens to share the name (``launch(detail="bb thread list")`` slipped
+# under exactly that shape). An all-keyword rule flags exactly these two
+# pairs in the scanned trees (measured); both callees verified in source.
+# A genuinely benign new prose site fails loud until someone exempts its
+# pair here deliberately, in a diff, with a comment.
+PROSE_KEYWORD_PAIRS = frozenset({
+    # result.add_argument("--thread-project", ..., help="bb projectId
+    # from the thread.created event DTO ...") in
+    # bin/record_executed_triples.py:383 — argparse CLI help text
     # rendered to the user, never spawned.
-    "help",
+    ("add_argument", "help"),
     # _ambiguous_without_retry(detail="bb send returned an unrecognized
-    # result ...") in llm_collab/bb_continuation.py — an error-message
-    # field carried in a typed result, never spawned.
-    "detail",
+    # result after the send boundary", ...) in
+    # llm_collab/bb_continuation.py:599-601 — an error-message field
+    # carried in a typed result, never spawned.
+    ("_ambiguous_without_retry", "detail"),
 })
 
 
@@ -181,9 +192,8 @@ def _supplied_args(node: ast.Call) -> list[tuple[ast.AST, str | None]]:
     ``run(args="bb x")`` spawn identically — so one rule inspects both.
     Keywords are ALL inspected, not enumerated: listing spawn keywords
     fails open on the one nobody listed (see module docstring). The
-    keyword name is carried alongside so prose-shaped keywords
-    (``PROSE_KEYWORD_NAMES``) can be exempted by literal name. A
-    ``**kwargs`` entry (``arg is None``) yields its dict expression,
+    keyword name is carried alongside so the callee-scoped prose pairs
+    (``PROSE_KEYWORD_PAIRS``) can be exempted. A ``**kwargs`` entry (``arg is None``) yields its dict expression,
     which is a Name/Dict, never a str constant — the documented
     indirection limit.
     """
@@ -201,8 +211,8 @@ def _python_hits(path: Path) -> list[str]:
         elif isinstance(node, ast.Call):
             name = _call_name(node)
             for first, kw_name in _supplied_args(node):
-                if kw_name in PROSE_KEYWORD_NAMES:
-                    # A prose-shaped keyword (help=/detail=) — message
+                if (name, kw_name) in PROSE_KEYWORD_PAIRS:
+                    # A verified prose site (callee, keyword) — message
                     # text, never a command; see the set's comment.
                     continue
                 if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
