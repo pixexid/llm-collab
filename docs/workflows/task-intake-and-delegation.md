@@ -180,8 +180,11 @@ Do not stop on these states:
 
 `llm-collab` messages are part of the loop, not a side channel. Before sending a
 worker follow-up, update the task/issue if scope changed, write one consolidated
-message, and use the approved worker bridge. Only a Codex recipient may use the
-AX command printed by `deliver.py`; a supported `ax_attended_only` target reports
+message, and use the approved worker bridge. For OpenAI-model interaction use BB
+unless the task needs a Codex-app-only tool that BB cannot reach. Only after
+that condition is met may a Codex recipient use the AX command printed by
+`deliver.py`; the printed command does not itself satisfy the condition. A
+supported `ax_attended_only` target reports
 `ax_attended_recovery_required` instead — route control to Codex-attended
 recovery, never a routine ring. A terminal-only
 CLI worker needs a dispatchable runtime session. Every watcher-backed worker, Codex
@@ -578,14 +581,15 @@ built and the orchestrator waits for work it never assigned.
   not say why or prove completion.
 - **Confirm the worker is alive before treating silence as waiting.** A worker
   with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
-  turn awaiting its next wake — routine exact-session dispatch for a
-  watcher-backed worker, the `deliver.py`-selected doorbell only when dispatch is
-  unavailable — and a stopped or lease-expired session, or a stopped watcher,
-  hears a re-drive as silence forever. The orchestrator confirms the session is active (or
-  reactivates it) and that the ring/delivery actually landed — a silently-failed
-  delivery is its own defect, not "no progress" — before re-driving. An open lane
-  with nobody acting is a defect, and the orchestrator that owns the lane is who
-  checks.
+  turn awaiting its next wake. For OpenAI-model interaction that wake is through
+  BB unless the task needs a Codex-app-only tool that BB cannot reach; only then
+  may the `deliver.py`-selected doorbell apply. A stopped or lease-expired
+  session, or a stopped watcher, hears a re-drive as silence forever. The
+  orchestrator confirms the session is active (or
+  reactivates it) and that the live harness or acceptance receipt actually saw
+  the packet — AX `VERIFIED` alone is not that proof — before re-driving. An
+  open lane with nobody acting is a defect, and the orchestrator that owns the
+  lane is who checks.
   This bullet applies to an explicitly registered first-class mailbox
   participant, not a BB worker.
 - **Then keep the loop alive — through the recipient's own transport.**
@@ -593,10 +597,15 @@ built and the orchestrator waits for work it never assigned.
   reports for that recipient — never a hand-chosen ring. For a watcher-backed
   recipient whose binding dispatches (`autobridge_ready: true`) — Claude, the Pi
   workers, and Codex alike — deliver durably and stop; its watcher owns pickup,
-  so never ring it. Only when `deliver.py` reports `ax_doorbell_required: true`
-  does the alternate path apply: run exactly the AX command it prints, and never
-  re-ring a `QUEUED (UNCONFIRMED)` attempt. Re-driving a question just yields another answer. (See AGENTS.md
-  contract v10 and `## Delegation message requirements`.)
+  so never ring it. For OpenAI-model interaction, use BB unless the task needs a
+  Codex-app-only tool that BB cannot reach. Only when that condition is true and
+  `deliver.py` reports `ax_doorbell_required: true` does the alternate path
+  apply: run exactly the AX command it prints, and never re-ring a `QUEUED
+  (UNCONFIRMED)` attempt. `VERIFIED` proves only that a turn rendered in the
+  lagging app UI, not delivery to a working harness or a reply path. Re-driving
+  a question just yields another answer. See the
+  [`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface) and
+  `## Delegation message requirements`.
   This bullet applies to an explicitly registered first-class mailbox
   participant; a BB worker receives its follow-up through BB.
 

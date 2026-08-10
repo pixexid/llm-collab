@@ -1,7 +1,11 @@
 # Session Autobridge Runbook
 
-> **Current BB routing status: dormant.** The current worker fleet routes through
-> BB. Session autobridge dispatch and its AX fallback are not BB transports and
+> **AX status: conditional, not the OpenAI-model interaction surface.** Under
+> the operator-sourced standing routing rule in
+> [`AGENTS.md`](../../AGENTS.md#bb-worker-surface), focus is BB until the Codex
+> app reaches parity with the Claude app and BB; use the Codex app only for
+> app-exclusive tooling. Session autobridge
+> dispatch and its AX fallback are not BB transports and
 > are not used to reach BB workers, whose threads are not `llm-collab`
 > participants, session bindings, watcher recipients, or receipt-bearing
 > endpoints. Use
@@ -15,12 +19,9 @@
 > [`AGENTS.md`](../../AGENTS.md#one-writer-per-lane)—read the lifecycle log,
 > reconcile what it names, restart cleanly, prove one fresh probe receipt, then
 > consider the stranded packet—remains the proven repair path; the diagnostic
-> mechanics below support it. Contract v12's fallback predicate is unchanged
-> and remains the authority for whether `deliver.py` offers a doorbell. When it
-> does, run the exact command it prints or follow the live AX capability check in
-> [`bb-workers.md`](bb-workers.md) and read its current `windows` count. Never
-> infer reachability from `pgrep -x Codex`: it can return no match while the
-> surface is live inside `ChatGPT.app`.
+> mechanics below support it. `deliver.py` still offers an AX fallback pending
+> GH-748; that output does not itself satisfy the task condition. Use the AX
+> mechanics only when the task needs that app-only tool; otherwise use BB.
 
 Session autobridge lets a worker bind the current runtime thread to a
 project/chat so future messages can be routed to that parked worker session.
@@ -28,7 +29,7 @@ project/chat so future messages can be routed to that parked worker session.
 Use it to reduce short manual relays. Do not use it to make workers fully
 autonomous.
 
-## Status: the primary wake (contract v12)
+## Status: routine dispatch; AX conditioned
 
 Routine exact-session dispatch through session autobridge is **the** routine wake
 for every watcher-backed recipient. Bounded polling and heartbeat observation are
@@ -36,18 +37,17 @@ a separate thing and remain a safety-fuse; do not read the limits on those as
 limits on dispatch.
 
 Current `deliver.py` gives a matching dispatchable session autobridge precedence
-and suppresses `ax_doorbell_required` for that packet. Only Codex may receive
-the busy-safe **bidirectional AX doorbell**, and only through the exact command
-printed by `deliver.py`. Every watcher-backed worker, Codex included, is woken
-by its durable packet and its own watcher; AX is reached only when that dispatch
-is unavailable. See
+and suppresses `ax_doorbell_required` for that packet. Its remaining Codex AX
+fallback does not decide whether AX is allowed. The task must need a
+Codex-app-only tool that BB cannot reach; otherwise use BB. The conditional
+mechanism is described in
 `claude-code-desktop-computer-use-bridge.md`. **GH-470: composer content and
 `AXValue` readability are never a sender-side hold, and neither is a busy/running
 recipient.** The recipient never types into its own composer, so any value there
 — readable non-empty, readable empty, readable nil, or an opaque profile whose
 value cannot be read — is stray; the ring clears and overrides it, and AX send
 takes preference over any composer content, **including the operator actively
-typing**. Ring even when the recipient is busy; the doorbell queues. Do not wait
+typing**. The mechanism queues even when the recipient is busy. Do not wait
 for an empty composer and do not route a non-empty/unreadable composer to
 attended recovery — that stranded the sender indefinitely. A routine `ring`
 fails closed **only** on a genuine targeting or operation failure: no or
@@ -56,7 +56,9 @@ target identity — some editable field resolved but it cannot be confirmed as t
 right target), an AX-trust failure, a clear/type/submit failure, or post-submit
 identity loss. Distinguish opaque `AXValue` **content** (proceed and override)
 from an unresolved/unknown **target** (fail closed). `VERIFIED` exit 0 confirms
-delivery. `QUEUED (UNCONFIRMED)` exit 0 does not prove exact-thread delivery:
+only that a turn rendered in the lagging app UI; it does not establish delivery
+to a working harness or a reply path. `QUEUED
+(UNCONFIRMED)` exit 0 does not prove exact-thread delivery:
 preserve the durable mailbox packet, record the unconfirmed blocker/follow-up,
 and never re-ring. The idle input gate applies only to attended
 screenshot/keyboard Computer Use fallback, not to AX `ring`. Computer Use is

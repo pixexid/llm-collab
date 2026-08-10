@@ -1,42 +1,57 @@
 # Desktop Computer-Use Doorbell (Agent-to-Agent Comms)
 
-> **Current BB routing status: dormant, retained in place.** The current worker
-> fleet routes through BB. AX is not a BB transport and is not used to reach BB
+> **AX status: legitimate under one condition, not the OpenAI-model interaction
+> surface.** Under the operator-sourced standing routing rule in
+> [`AGENTS.md`](../../AGENTS.md#bb-worker-surface), BB threads on OpenAI models
+> and Codex-app sessions are the same sessions; the difference is the harness,
+> not the model. BB is the live harness, while the app is a lagging render that
+> needs an app restart to display those sessions and app-server does not refresh
+> its UI either. Focus is BB until the Codex app reaches parity with the Claude
+> app and BB; use the Codex app only for app-exclusive tooling. AX is not a BB
+> transport and is not used to reach BB
 > workers, whose threads are not `llm-collab` participants, session bindings, or
 > receipt-bearing endpoints. Use [`bb-workers.md`](bb-workers.md) for current BB
 > operations. None of this document's AX lane applies to BB. Its durable-packet
 > and receipt reasoning still applies when the orchestrator itself authors a
 > collab packet after verifying a BB result, not to the BB worker.
 >
-> This guide stays in `docs/workflows/` because AX is parked rather than proven
-> dead; [GH-560](https://github.com/pixexid/llm-collab/issues/560) tracks the
-> remaining guidance for a surface that may return. Keeping the targeting,
+> The condition selects the surface for the app-exclusive work, not a wake for
+> a BB worker. Do not delegate that work to a BB worker; the orchestrator or
+> operator performs it in the app. No AX path targets a BB-backed session by
+> design: an AX command selects an app and composer, not a BB thread, while a
+> BB session binding, where one exists, continues through BB.
+>
+> This guide stays in `docs/workflows/` because
+> [GH-560](https://github.com/pixexid/llm-collab/issues/560) tracks the retained
+> mechanics for this conditional surface. Keeping the targeting,
 > verification, and recovery mechanics together avoids reconstructing a safety
-> procedure if that happens. Contract v12's fallback predicate is unchanged and
-> remains the authority for whether `deliver.py` offers a doorbell. When it does,
-> run the exact command it prints or follow the live AX capability check in
-> [`bb-workers.md`](bb-workers.md) and read its current `windows` count. Never
-> infer reachability from `pgrep -x Codex`: it can return no match while the
-> surface is live inside `ChatGPT.app`.
+> procedure whenever the condition is met. Apply one condition: does this task need a
+> Codex-app-only tool that BB cannot reach? If no, use BB and never AX. If yes,
+> the AX procedure below is legitimate. `deliver.py` still prints an AX command
+> pending GH-748, but that output does not itself satisfy the condition.
+>
+> A `VERIFIED` AX result means a turn rendered in a lagging app UI; it is not a
+> reply path. App-side silence is not evidence about a collaborator because it
+> confounds an unattended app, a stale unrefreshed UI, and a genuine non-answer.
 
 This is the agent-to-agent communication workflow for collaborators running in
 dedicated desktop apps (e.g. Claude in `/Applications/Claude.app`, Codex in
 `/Applications/Codex.app`). It is intentionally separate from `claude --resume`,
 `claude -p`, and other CLI/session-file flows.
 
-> Claude may ring Codex after writing a durable packet, but only when
-> `deliver.py` prints the command — routine exact-session dispatch is the wake
-> whenever Codex's binding dispatches. Codex never rings
+> When the task satisfies the app-only-tool condition, Claude may ring Codex
+> after writing a durable packet. Codex never rings
 > Claude: Claude is woken by its durable packet and the Claude app's own
 > background inbox watcher. The heartbeat survives only as a bounded,
 > provisional **safety-fuse** (see below), not as the primary path.
 
 The AX doorbell is **Codex-only**: only a Codex/ChatGPT app is ever an AX ring
-target, and only as the wake for a durable `deliver.py` packet, using exactly the
-command `deliver.py` prints. Every other worker (Claude, ZCode, …) is woken by
+target, and only when the task needs a Codex-app-only tool that BB cannot reach.
+It wakes a durable `deliver.py` packet using exactly the command `deliver.py`
+prints. Every other worker (Claude, ZCode, …) is woken by
 its durable packet and its own background watcher — never by AX. The durable
 mailbox is the sole agent-to-agent channel; AX is a wake mechanism for a
-delivered Codex packet, not a separate messaging path. It does not apply to
+durable Codex packet, not a separate messaging path. It does not apply to
 `codex -> codex`, root self-handoffs, or managed Codex workers.
 
 ## One channel: the durable mailbox (AX is only a Codex wake)
@@ -56,9 +71,9 @@ not to the operator. The operator decides product, visual/UX, scope, and busines
 calls — not technical implementation. Routing eng decisions to the operator
 stalls the work (they can't adjudicate them).
 
-**Queueing to a busy recipient is SAFE, unconditionally, for Codex.** Only a
-Codex recipient may receive an AX doorbell, using exactly the command
-`deliver.py` prints. For Codex, composer content and `AXValue`
+**Queueing to a busy recipient is safe after the app-only-tool condition is
+met.** Only a Codex recipient may receive an AX doorbell, using exactly the
+command `deliver.py` prints. For Codex, composer content and `AXValue`
 readability/opacity are NEVER a hold, and a busy/running recipient is NOT a
 hold either: the ring clears and overrides whatever is in the composer and
 sends (Codex never types into its own composer, so any content there is
@@ -81,7 +96,8 @@ copy already handled from the inbox. This policy does not authorize a Codex
 self-doorbell or AX delivery to any non-Codex worker.
 
 **Verification is enforced, not optional.** `ring --submit` verifies by default.
-Exit 0 with `VERIFIED` confirms a visible conversation turn. Exit 0 with
+`VERIFIED` exit 0 confirms only that a turn rendered in the lagging app UI; it
+does not establish delivery to a working harness or a reply path. Exit 0 with
 `QUEUED (UNCONFIRMED)` means only that the recipient became busy during submit;
 it does not prove the pointer landed in the intended thread. Preserve the
 durable mailbox packet, record the unconfirmed state and follow-up, never
@@ -113,16 +129,18 @@ a Codex session from it. The watcher also excludes older `from: codex` /
 `to: codex` packets created before the persistent flag existed. External
 Claude/ZCode-to-Codex packets do not receive the guard and keep their ordinary
 activation behavior: routine exact-session dispatch when the binding dispatches,
-and the AX doorbell only as the fallback `deliver.py` selects.
+and the AX doorbell only when the task satisfies the app-only-tool condition and
+`deliver.py` selects the fallback.
 
 Native subagents use native subagent coordination for bounded local support.
 Do not route them through AX or Computer Use. Attended Computer Use is reserved
 for supervision and recovery of external collaborator desktop apps; it is not
 a managed-Codex task selector, wake path, or transport.
 
-## Preferred doorbell transport: `axsend` (AX bridge, no focus steal)
+## Conditional doorbell transport: `axsend` (AX bridge, no focus steal)
 
-Ring the other agent with the **Accessibility-API bridge** rather than
+When the task satisfies the app-only-tool condition, ring with the
+**Accessibility-API bridge** rather than
 screenshot computer-use. Screenshot tools must raise the target window and steal
 the operator's keyboard focus, and on overlapping windows they misroute
 keystrokes. `axsend` sets the composer text and presses send through AXUIElement
@@ -135,22 +153,24 @@ $AX state --app Codex                                   # optional status + rece
 $AX state --app Codex                                   # read the reply
 ```
 
-For delivery, run only the complete command printed by `deliver.py`; never
-hand-author a ring command.
+After the task satisfies the app-only-tool condition, run only the complete
+command printed by `deliver.py`; never hand-author a ring command.
 
-Rules: deliver the durable packet with `deliver.py` FIRST (mailbox = truth);
-then ring once, even when the recipient is busy. Do not prove the composer
-empty first — for Codex, composer content and `AXValue` readability/opacity
-are never a hold, so the ring overrides and sends; only a genuine targeting
-failure (no/ambiguous target, unrecognized profile, AX-trust failure) enters
-recovery. `VERIFIED` exit 0 is confirmed;
+Conditional mechanics: deliver the durable packet with `deliver.py` first
+(mailbox = truth), then ring once, even when the recipient is busy. Do not prove
+the composer empty first — for Codex, composer content and `AXValue`
+readability/opacity are never a hold, so the ring overrides and sends; only a
+genuine targeting failure (no/ambiguous target, unrecognized profile, AX-trust
+failure) enters recovery. `VERIFIED` exit 0 confirms only that a turn rendered
+in the lagging app UI; it does not establish delivery to a working harness or a
+reply path.
 `QUEUED (UNCONFIRMED)` exit 0 must be recorded and followed up without re-ringing
 or claiming exact-thread delivery. Use `--dry-run` first on any new app and
 `--verify` (non-zero means the text did not land; a post-send empty composer is
 not proof of delivery). The idle input gate applies only to attended screenshot/keyboard
-Computer Use fallback. Any collaborator may run the exact command printed by
-`deliver.py` to ring the canonical Codex recipient. No other recipient is an
-AX target, and Codex must not target itself. Needs the running process enabled in
+Computer Use fallback. On a task that satisfies the condition, any collaborator
+may run the exact printed command for the canonical Codex recipient. No other
+recipient is an AX target, and Codex must not target itself. Needs the running process enabled in
 Privacy & Security → Accessibility. Falls back to screenshot Computer Use only if
 AX fails for an external-app target that is a valid ring target at all — never
 for Claude. Full reference:
@@ -220,9 +240,9 @@ a different failure class and are not TCC update-survival evidence.
   Every task, handoff, blocker, clarification, decision, and piece of evidence is
   a file written with `deliver.py`. Nothing load-bearing lives only in an app's
   visible thread. This is the message.
-- **Doorbell = AX (the wake only, to Codex only — not a second channel).** When
-  `deliver.py` reports `ax_doorbell_required`, run its exact printed command to
-  send one short, sender-tagged pointer to the
+- **Doorbell = AX (conditional Codex-app wake, not a second channel).** When the
+  task needs a Codex-app-only tool that BB cannot reach, use the exact printed
+  command to send one short, sender-tagged pointer to the
   durable packet. Screenshot/keyboard Computer Use is a fallback only when AX is
   unavailable and the target path is explicitly configured for desktop bridging.
 
@@ -254,17 +274,16 @@ messages.
   message as peer-agent coordination; the work is always the durable packet —
   read and reply through the mailbox, never treat the ring pointer as the message.
 
-## Ringing the doorbell
+## Ringing the doorbell after the condition is met
 
-For task-grade work, in order:
+Only for a task that needs a Codex-app-only tool BB cannot reach, in order:
 
 1. Write the durable instruction/handoff with `deliver.py` to `Chats/` and the
    recipient's `agents/<agent>/inbox.json`.
 2. If the recipient is non-Codex, stop: its background watcher owns pickup.
-   If sender and recipient are both `codex`, stop app routing and use Thread
-   Coordination (`read_thread` / `send_message_to_thread`). Otherwise, only
-   when `deliver.py` reports `ax_doorbell_required`, run its exact printed
-   command. Do not prove the composer empty first: composer content and
+   If the task does not need a Codex-app-only tool, stop app routing and use BB.
+   Otherwise, only when `deliver.py` reports `ax_doorbell_required`, run its
+   exact printed command. Do not prove the composer empty first: composer content and
    `AXValue` readability/opacity are never a hold for Codex, and the ring
    overrides and sends. Ring even if the recipient is busy — the one-line
    pointer queues behind the current turn. Only a genuine targeting failure
@@ -275,7 +294,9 @@ For task-grade work, in order:
    sender-tagged, one-line pointer** to the exact inbox/chat/message path as the
    `--text` value. Full context stays in the durable packet, never in the
    visible prompt.
-3. Classify exit 0 by output: `VERIFIED` confirms delivery;
+3. Classify exit 0 by output: `VERIFIED` exit 0 confirms only that a turn
+   rendered in the lagging app UI; it does not establish delivery to a working
+   harness or a reply path.
    `QUEUED (UNCONFIRMED)` does not. For queued-unconfirmed, keep the mailbox
    packet unresolved, record the blocker/follow-up, never re-ring, and wait for
    later `axsend confirm` or explicit recipient evidence that the pointer
@@ -374,11 +395,14 @@ the settled UI, then records the meaningful content into the mailbox.
 
 ## Failure modes
 
+These failure modes apply only after the task satisfies the app-only-tool
+condition above.
+
 - Recipient idle/awaiting input: safe to read the last answer and decide whether
   an explicit next ring exists.
 - Recipient still generating / shows `Stop` / creating a worktree: one AX ring
-  is allowed unconditionally and may queue the pointer behind the active turn
-  — do not wait for or prove an empty composer first; composer content and
+  is allowed without waiting for idle and may queue the pointer behind the
+  active turn — do not wait for or prove an empty composer first; composer content and
   `AXValue` readability/opacity are never a hold for Codex. Only a genuine
   targeting failure (no/ambiguous target, unrecognized profile, AX-trust
   failure) means hold and enter recovery. If the result is

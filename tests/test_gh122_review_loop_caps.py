@@ -1374,8 +1374,13 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 20 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 21 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
+        self.assertIn(
+            "Focus is BB until the Codex app reaches parity with the Claude "
+            "app and BB; use the Codex app only for app-exclusive tooling",
+            normalized(text),
+        )
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
         # A v12 block was added while the marker still read 11, the suite stayed
@@ -1399,6 +1404,23 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v21",
+            "operator-sourced ruling",
+            "demotes AX to one condition",
+            "BB threads on OpenAI models and Codex-app sessions are the same "
+            "sessions",
+            "the difference is the harness, not the model",
+            "BB is the surface for all OpenAI-model interaction",
+            "if and only if the task needs a Codex-app-only tool that BB "
+            "cannot reach",
+            "condition selects the surface for the app-exclusive work, not a "
+            "wake route for a BB worker",
+            "no AX path targets a BB-backed session",
+            "reported `VERIFIED` by AX does not establish delivery to a "
+            "working harness or a reply path",
+            "app-side silence is not evidence about a collaborator",
+            "a cached v20 worker would still run the printed AX fallback "
+            "without applying the task condition",
             "Contract v20",
             "fixtures that stand in for real system output",
             "reviewed and sanitized before commit",
@@ -1484,6 +1506,109 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(normalized(phrase), workflow)
+
+    def test_ax_corrections_do_not_regress_in_changed_docs(self):
+        """Reject the two corrected claims in this PR's documentation files."""
+
+        docs = (
+            AGENTS_DOC,
+            REPO_ROOT / "README.md",
+            REPO_ROOT / "docs/adapters/pm2.md",
+            REPO_ROOT / "docs/multi-project.md",
+            REPO_ROOT / "docs/schema-reference.md",
+            REPO_ROOT / "docs/workflows/README.md",
+            REPO_ROOT / "docs/workflows/bb-workers.md",
+            REPO_ROOT / "docs/workflows/claude-code-desktop-computer-use-bridge.md",
+            REPO_ROOT / "docs/workflows/collab-thread-quickstart.md",
+            REPO_ROOT / "docs/workflows/commit-push-prs.md",
+            REPO_ROOT / "docs/workflows/isolated-worktrees.md",
+            REPO_ROOT / "docs/workflows/pi-workers.md",
+            REPO_ROOT / "docs/workflows/review-and-handoff.md",
+            REPO_ROOT / "docs/workflows/session-autobridge-runbook.md",
+            REPO_ROOT / "docs/workflows/session-autobridge-rfc.md",
+            REPO_ROOT / "docs/workflows/session-startup.md",
+            REPO_ROOT / "docs/workflows/task-intake-and-delegation.md",
+            REPO_ROOT / "tools/axbridge/README.md",
+        )
+        verified_means_delivery = (
+            re.compile(
+                r"`?VERIFIED`?(?:\s+exit\s+0)?\s+"
+                r"(?:confirms?|proves?|establishes?)\s+delivery\b",
+                re.I,
+            ),
+            re.compile(r"\brecord\s+`?VERIFIED`?(?:\s+exit\s+0)?\s+as\s+confirmed\s+delivery\b", re.I),
+            re.compile(
+                r"`?VERIFIED`?.{0,60}\b(?:means|is)\s+(?:that\s+)?"
+                r"(?:the\s+)?(?:message\s+|packet\s+|turn\s+)?"
+                r"(?:was\s+)?(?:confirmed\s+)?delivered\b",
+                re.I,
+            ),
+            re.compile(
+                r"`?VERIFIED`?.{0,60}\b(?:marks?|reports?)\b.{0,30}"
+                r"\bas\s+delivered\b",
+                re.I,
+            ),
+        )
+        printed_ax_signal = re.compile(
+            r"(?:deliver\.py.{0,300}(?:prints?|printed).{0,100}command.{0,100}"
+            r"(?:sender|worker|you|run|execute|take|taken|ring)|"
+            r"deliver\.py.{0,300}(?:run|execute|take|taken|ring).{0,120}"
+            r"command.{0,80}(?:prints?|printed)|"
+            r"(?:run|execute|take|taken|ring).{0,120}command.{0,80}"
+            r"(?:prints?|printed).{0,300}deliver\.py|"
+            r"(?:run|execute|take|taken|ring).{0,120}deliver\.py.{0,120}"
+            r"(?:prints?|printed).{0,100}command)",
+            re.I,
+        )
+        ax_action = re.compile(r"\b(?:run|ring|invoke|execute|use|take|taken)\b", re.I)
+        ax_subject = re.compile(r"\b(?:AX|doorbell|ax_doorbell_required|command)\b", re.I)
+        app_only_condition = re.compile(
+            r"Codex-app-only tool|app-only-tool condition|"
+            r"tool that exists only in the Codex app|"
+            r"task (?:satisfies|needs).{0,100}(?:condition|Codex app|app-only)|"
+            r"condition (?:is|has been) met",
+            re.I,
+        )
+        offenders = []
+        for path in docs:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if path == AGENTS_DOC:
+                in_history = False
+                for index, line in enumerate(lines):
+                    if line == "### Recent contract changes":
+                        in_history = True
+                    elif line == "## Required Reading":
+                        in_history = False
+                    if in_history:
+                        lines[index] = ""
+
+            block_start = None
+            block_lines = []
+            for line_number, line in enumerate((*lines, ""), start=1):
+                if line.strip():
+                    if block_start is None:
+                        block_start = line_number
+                    block_lines.append(line)
+                    continue
+                if block_start is None:
+                    continue
+                block = normalized(" ".join(block_lines))
+                location = f"{path.relative_to(REPO_ROOT)}:{block_start}"
+                if any(pattern.search(block) for pattern in verified_means_delivery):
+                    offenders.append(f"{location}: VERIFIED claims delivery")
+                if (
+                    printed_ax_signal.search(block)
+                    and ax_action.search(block)
+                    and ax_subject.search(block)
+                    and not app_only_condition.search(block)
+                ):
+                    offenders.append(
+                        f"{location}: printed AX command is actionable without the app-only condition"
+                    )
+                block_start = None
+                block_lines = []
+
+        self.assertEqual([], offenders, "prohibited AX claims remain:\n" + "\n".join(offenders))
 
     def test_the_merge_checklist_does_not_inherit_the_origin_rule_narrowing(self):
         """The hole the origin rule opened in the checklist below it.

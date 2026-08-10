@@ -85,10 +85,13 @@ misbound.
 Share each printed prompt with its worker. The initiator's own pickup command —
 and each co-worker's — is **branched by that agent's wake channel**: a
 watcher-backed worker — claude, gemini, and Codex alike — arms its own inbox
-watcher, and routine exact-session dispatch wakes it. AX is a fallback for Codex
-only, taken only when `deliver.py` prints it. It is not a routine lane, and
-whether the printed command can land is a runtime property checked for that
-attempt, never a standing process or window-count fact. **Do your own pickup
+watcher, and routine exact-session dispatch wakes it. For OpenAI-model work,
+focus is BB until the Codex app reaches parity with the Claude app and BB. AX
+applies only when the task needs a Codex-app-only tool that BB cannot reach;
+`deliver.py` printing a command does not satisfy that condition. Whether an
+allowed command can land is a runtime property checked for that attempt, never
+a standing process or window-count fact. See the
+[`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface). **Do your own pickup
 step** (the helper prints yours first); a packet you never see is a packet you
 never answer.
 
@@ -235,10 +238,10 @@ restart invalidates the old session-owned monitor; start a fresh session rather
 than reusing it.
 
 Codex is watcher-backed like every other worker: routine exact-session dispatch
-is its wake. The attended AX wake described in `session-autobridge-runbook.md` is
-a Codex-only fallback, and only when `deliver.py` prints the command. In this
-first-class mailbox context it is still not a routine worker lane, and its
-landing capability is checked live for that attempt.
+is its wake. For OpenAI-model interaction, use BB unless the task needs a
+Codex-app-only tool that BB cannot reach. Only then may the conditional AX
+procedure in `session-autobridge-runbook.md` apply, and only when `deliver.py`
+prints the command. Its landing capability is checked live for that attempt.
 
 ## 2. Know your three coordinates
 
@@ -293,9 +296,10 @@ routing refusal naming both scopes. The fix is to declare the scope.
 Prefer `--body-file` over inline text: long bodies and shell quoting do not mix.
 
 For a Codex recipient, `deliver.py` may also print an `AX DOORBELL REQUIRED`
-block. Run only its exact printed command, and only when it is
-printed. Contract v12's fallback predicate is unchanged, and landing capability
-is a live runtime property rather than a standing window-count claim.
+block. That output does not authorize AX by itself. If the task does not need a
+Codex-app-only tool that BB cannot reach, use BB. If it does, run only the exact
+printed command, and only when it is printed. Landing capability is a live
+runtime property rather than a standing window-count claim.
 A bound recipient reports `autobridge_ready: true` with
 `watcher_pickup_ready: false`, and that is the routine success case. An unbound
 watcher-backed recipient is refused before write. Exit 0 means the durable packet

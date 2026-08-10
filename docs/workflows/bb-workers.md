@@ -251,15 +251,22 @@ agent's live session and thread-pair provenance. That is impersonation, not
 relay. [GH-604](https://github.com/pixexid/llm-collab/issues/604) tracks a real
 relay-provenance surface; it is prospective, not present.
 
-Contract v12's unchanged predicate remains the authority for whether the
-orchestrator's `deliver.py` call offers an AX doorbell. If it does, run only the
-exact command it prints. Whether that doorbell can land is a dynamic runtime
-property: run the printed command, or run
-`axsend-ensure tree --app Codex --editable-only` and read its current `windows`
-count. Do not infer reachability from process names: `pgrep -x Codex` can return
-no match while the surface is live inside `ChatGPT.app`. BB is the routine
-worker fleet; AX is not a BB transport or routine lane. BB provides no delivery
-receipt, and the orchestrator still verifies the named artifact and exact head.
+Under the operator-sourced standing routing rule in
+[`AGENTS.md`](../../AGENTS.md#bb-worker-surface), focus is BB until the Codex
+app reaches parity with the Claude app and BB; use the Codex app only for
+app-exclusive tooling. Do not switch harnesses merely because `deliver.py`
+prints an AX command; GH-748 tracks that separate output change. Ask one
+question: does this task need a Codex-app-only tool that BB cannot reach? If no,
+use BB and never AX. If yes, do not delegate that app-exclusive work to a BB
+worker; the orchestrator or operator performs it in the app through the
+conditional AX procedure. This selects the surface for the work, not a wake
+route: no AX path targets a BB-backed session, and a BB session binding
+continues through BB. Even then, `VERIFIED` proves only that a turn rendered in
+the lagging app UI; it does not
+establish delivery to a working harness or a reply path, and app-side silence is
+not evidence about a collaborator. BB provides no
+delivery receipt, and the orchestrator still verifies the named artifact and
+exact head.
 
 ## Delegate for a loopless worker
 

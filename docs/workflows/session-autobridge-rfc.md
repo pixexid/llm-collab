@@ -4,6 +4,17 @@
 
 Experimental spike. Not part of the default `llm-collab` workflow yet.
 
+> **Operational routing boundary (operator-sourced).** This RFC records an
+> experimental design and its mechanics; it is not current routing authority.
+> For OpenAI-model interaction, BB is the surface until the Codex app reaches
+> parity with the Claude app and BB. The app-server setup and dispatch sections
+> below apply only when the orchestrator must perform work using a Codex-app-only
+> tool that BB cannot reach. A published binding, a running app-server, or
+> `deliver.py` output does not satisfy that condition. Do not delegate the
+> app-only work to a BB worker or treat the app-server/AX design as a route to a
+> BB-backed session. See the standing rule in
+> [`AGENTS.md`](../../AGENTS.md#bb-worker-surface).
+
 ## Problem
 
 `llm-collab` can already do three useful things:

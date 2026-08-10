@@ -192,9 +192,13 @@ surfaces.
 
 `claude_desktop_bridge` no longer selects a wake path. Every non-Codex worker
 with `watcher_enabled: true` is woken by its durable packet and its own watcher
-in every project and registration shape. Only the Codex recipient may use the
-project-independent AX doorbell, and only through the exact command printed by
-`deliver.py`; a worker without either route needs a dispatchable runtime session.
+in every project and registration shape. For OpenAI-model interaction use BB
+unless the task needs a Codex-app-only tool that BB cannot reach. Only after
+that condition is met may the Codex recipient use the project-independent AX
+procedure, and only through the exact command printed by `deliver.py`; the
+printed command does not itself satisfy the condition. A worker without either
+route needs a dispatchable runtime session. See the
+[`AGENTS.md` standing routing rule](../AGENTS.md#bb-worker-surface).
 
 ### Project state root
 

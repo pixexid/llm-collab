@@ -51,7 +51,11 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request worker activation through the approved mailbox path; routine wake is session-autobridge dispatch, and use a doorbell only when `deliver.py` prints one (see the contract v12 routing rule)
+5. only then request worker activation through the approved mailbox path; for
+   OpenAI-model interaction use BB unless the task needs a Codex-app-only tool
+   that BB cannot reach. Only then may the conditional AX procedure apply, and
+   only when `deliver.py` prints the command (see the
+   [`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface))
 
 ## Provisioning ownership
 
@@ -71,7 +75,11 @@ Minimum pre-activation gate:
 2. verify branch exists
 3. verify worktree exists
 4. record exact branch/worktree/base metadata in task/chat
-5. only then request worker activation through the approved mailbox path; routine wake is session-autobridge dispatch, and use a doorbell only when `deliver.py` prints one (see the contract v12 routing rule)
+5. only then request worker activation through the approved mailbox path; for
+   OpenAI-model interaction use BB unless the task needs a Codex-app-only tool
+   that BB cannot reach. Only then may the conditional AX procedure apply, and
+   only when `deliver.py` prints the command (see the
+   [`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface))
 
 ## Required metadata
 

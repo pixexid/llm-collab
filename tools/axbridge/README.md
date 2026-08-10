@@ -1,14 +1,20 @@
 # axsend — focus-independent AX doorbell bridge
 
+> **Conditional Codex-app procedure.** For OpenAI-model interaction, focus is
+> BB until the Codex app reaches parity with the Claude app and BB. Use this
+> tool only when the task needs a Codex-app-only tool that BB cannot reach;
+> `deliver.py` printing an AX command does not satisfy that condition. See the
+> [`AGENTS.md` standing routing rule](../../AGENTS.md#bb-worker-surface).
+
 Rings another agent app's composer (Codex or ZCode) using the
 macOS Accessibility API (AXUIElement) — **no screenshots, no window raising, no
 focus stealing**. Built because screenshot-based computer-use grabs focus while
 the operator is working and misroutes keystrokes across overlapping windows.
 
-AX is a doorbell between distinct collaborator app identities. External
-workers such as Claude and ZCode may ring root Codex, and root Codex may ring an
-external worker except Claude. Claude-targeted delivery is its durable packet
-plus its own background inbox watcher. Never use AX for `codex -> codex`, a root
+After the app-only-tool condition is met, AX is a doorbell between distinct
+collaborator app identities. External workers such as Claude and ZCode may ring
+root Codex. Claude-targeted delivery is its durable packet plus its own
+background inbox watcher. Never use AX for `codex -> codex`, a root
 self-handoff, or a managed Codex worker: use Codex Thread Coordination
 (`read_thread` / `send_message_to_thread`) instead. Native subagents use native
 subagent coordination, not an app doorbell. `deliver.py` persists a sender-aware
@@ -37,6 +43,7 @@ bin/axsend check        # -> "AX trusted: YES"
 
 ## Usage
 
+These commands apply only after the task satisfies the app-only-tool condition.
 Routine `ring` targets Codex only. For Codex, composer **content** and
 `AXValue` readability/opacity are never a sender-side hold, and neither is a
 busy/running recipient: Codex never types into its own composer, so any value
@@ -78,9 +85,9 @@ bin/axsend ring  --app Codex --submit --dry-run --text "x"
 # VERIFIED or QUEUED (UNCONFIRMED); classify the output as documented below.
 bin/axsend ring  --app Codex --submit --text "[from claude] ..."
 
-# Feedback WITHOUT a screenshot — did the message actually send? Call after any
-# ring (or anytime). This is the reliable check; DO NOT use computer-use to verify.
-#   exit 0 delivered | exit 7 not-delivered (draft or never typed)
+# Feedback WITHOUT a screenshot — did the app turn render? Call after any ring
+# (or anytime). This does not establish a working harness or reply path.
+#   exit 0 app turn present | exit 7 app turn absent (draft or never typed)
 bin/axsend confirm --app Codex --text "[from claude] ..."
 
 # Only after a non-zero/not-delivered result, retry once — and ONLY when the
@@ -98,10 +105,12 @@ bin/axsend state --app Codex
 ```
 
 Exit codes: `ring --verify` returns 7 if the sent text isn't found in the
-conversation after the press (treat as "did not land"; the draft is cleared so
-nothing is left stuck). `confirm` returns 0 delivered / 7 not-delivered.
+conversation after the press (treat as "did not render"; the draft is cleared so
+nothing is left stuck). `confirm` returns 0 app-turn-present / 7 app-turn-absent.
 `ring --submit` (verify default) exits 0 with either `VERIFIED` or
-`QUEUED (UNCONFIRMED)`. Only `VERIFIED` confirms a visible conversation turn.
+`QUEUED (UNCONFIRMED)`. `VERIFIED` exit 0 confirms only that a turn rendered in
+the lagging app UI; it does not establish delivery to a working harness or a
+reply path.
 Queued-unconfirmed means the recipient became busy during submit, but it does
 not prove the message entered the intended thread. Never resend it; preserve the
 mailbox packet, record the unconfirmed blocker/follow-up, and do not claim
@@ -123,8 +132,9 @@ TARGET-resolution rule, not an empty-composer rule (GH-470): composer content an
 `AXValue` readability are never a hold for a *resolvable* Codex composer — a
 routine ring clears and overrides whatever is there and sends, and busy is not a
 hold. `axsend confirm` checks the conversation after a ring. `VERIFIED` exit 0
-confirms delivery; `QUEUED (UNCONFIRMED)` exit 0 remains unresolved and must not
-be re-rung.
+confirms only that a turn rendered in the lagging app UI; it does not establish
+delivery to a working harness or a reply path. `QUEUED (UNCONFIRMED)` exit 0
+remains unresolved and must not be re-rung.
 
 `--app` matches by localized name or bundle id (substring ok). `--window-index N`
 targets a specific window. It is OPTIONAL: when ABSENT the resolver is in AUTO
@@ -181,7 +191,8 @@ out of range, REJECTED (not clamped). Absent is not the same as `0`.
   overrides whatever is there before sending. A visible `Stop`, `Running`, or
   processing state alone is not an idle-wait requirement. Submit exactly one
   message. Also hold when the same pointer is already queued, and never stack or
-  re-ring that pointer behind the running turn. `VERIFIED` confirms delivery;
+  re-ring that pointer behind the running turn. `VERIFIED` confirms only that
+  an app turn rendered, not delivery to a working harness or a reply path;
   `QUEUED (UNCONFIRMED)` preserves the mailbox/follow-up but cannot be reported
   as exact-thread delivery. `tree`/`state` are optional diagnostics, not AX ring
   idle gates. The idle input gate applies only to attended screenshot/keyboard
@@ -196,7 +207,7 @@ tries the send button, `AXConfirm`, and a posted Return.
 
 | App | Composer identity | Submit | Status (2026-07-11) |
 |-----|-------------------|--------|---------------------|
-| **Codex** | `AXTextArea` "Ask for follow-up changes" or "Do anything" (bundle `com.openai.codex`, localized app name may be `ChatGPT`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + confirmed delivery |
+| **Codex** | `AXTextArea` "Ask for follow-up changes" or "Do anything" (bundle `com.openai.codex`, localized app name may be `ChatGPT`) | send-arrow `AXPress` (same chat web area) | ✅ resolves + app-turn verification |
 | **Claude Desktop** | `AXTextArea` "Prompt" | — | ⛔ mutation refused; durable mailbox watcher only |
 | **ZCode** | `AXTextArea` "Ask for follow-up changes"; draft state is `AXValue`-opaque | "Send" button | ⛔ routine ring REFUSES (exit 11, enforced) — Codex-attended recovery only (`--attended`) |
 | **Antigravity / Gemini** | ❌ no profile yet → `.unknown` | — | ⛔ **FAILS CLOSED** — `.unknown` is opaque, routine ring REFUSES (exit 11); attended recovery only |
@@ -270,8 +281,9 @@ its durable packet and background inbox watcher remain the only target-side path
 
 ## Computer Use supervision
 
-AX is the **fallback** doorbell between distinct external collaborator apps,
-including an external worker ringing root Codex — taken only when `deliver.py`
+Only after the task satisfies the app-only-tool condition, AX is the
+**fallback** doorbell between distinct external collaborator apps, including an
+external worker ringing root Codex. Even then it is taken only when `deliver.py`
 prints the command, because routine exact-session dispatch is the wake whenever
 the recipient's binding dispatches (contract v12). Where it is printed it should
 not be disabled or bypassed merely because an external desktop app needs
