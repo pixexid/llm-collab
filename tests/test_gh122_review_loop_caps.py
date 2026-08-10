@@ -1374,7 +1374,7 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         the assertions below moved to the document that owns them.
         """
         text = AGENTS_DOC.read_text(encoding="utf-8")
-        self.assertIn("<!-- CONTRACT_VERSION: 19 -->", text)
+        self.assertIn("<!-- CONTRACT_VERSION: 20 -->", text)
         self.assertNotIn("<!-- CONTRACT_VERSION: 3 -->", text)
 
         # GH-556: pinning the marker alone let the marker and the body disagree.
@@ -1399,6 +1399,15 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v20",
+            "fixtures that stand in for real system output",
+            "reviewed and sanitized before commit",
+            "without flattening the tested shapes or states",
+            "malformed, adversarial, or otherwise un-inducible fixtures",
+            "comment names what they represent and why they cannot be recorded",
+            "queued specs, task lists, and scratchpad plans as caches",
+            "artifact's location, owner, or terminology",
+            "Both rules change worker obligations",
             "Contract v19",
             "named inbox owner",
             "first lane",

@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 19 -->
+<!-- CONTRACT_VERSION: 20 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,20 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v20 (2026-08-09) scopes fixture provenance by role: fixtures that stand
+in for real system output must be recorded from the live system, reviewed and
+sanitized before commit without flattening the tested shapes or states;
+deliberately malformed, adversarial, or otherwise un-inducible fixtures may be
+authored when a comment names what they represent and why they cannot be
+recorded. It also treats queued specs, task lists, and scratchpad plans as
+caches: decisions that change an artifact's location, owner, or terminology
+require affected queued work to be reread before dispatch. Both rules change
+worker obligations, so the version signal makes the canonical workflow visible
+to cached sessions. An authored fixture previously claimed live output with the
+wrong timestamp type, and queued follow-up outlived a decision that moved its
+artifact; review caught both only after they escaped their closed loops. Related
+GH-727, GH-732.
 
 Contract v19 (2026-08-09) makes a named inbox owner a prerequisite before a
 project's first lane; the per-project orchestrator owns that project's drain.
