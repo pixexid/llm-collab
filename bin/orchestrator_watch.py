@@ -762,9 +762,12 @@ def run_once(
         complete = check()
     except Exception as error:
         already_emitted = isinstance(error, HeartbeatProbeFailure)
-        forensic_error = error.failures[0] if already_emitted else error
-        failure_count = len(error.failures) if already_emitted else 1
-        if is_certificate_verification_failure(forensic_error):
+        failures = error.failures if already_emitted else (error,)
+        forensic_error = next(
+            filter(is_certificate_verification_failure, failures), None
+        )
+        failure_count = len(failures)
+        if forensic_error is not None:
             try:
                 capture_tls_failure(
                     name,

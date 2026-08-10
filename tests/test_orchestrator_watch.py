@@ -619,13 +619,19 @@ class TlsForensicCaptureTest(unittest.TestCase):
 
         self.assertIn(f"Error: {error}", record)
 
-    def test_heartbeat_probe_failure_reaches_seam_and_discloses_first_only(self) -> None:
+    def test_heartbeat_captures_certificate_failure_after_unrelated_failure(self) -> None:
         messages = []
+        unrelated = watch.ProbeError("BB worker endpoint timed out")
 
         def call(_executable, argv, _timeout):
             if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            raise unrelated
+
+        def enumerate_open(kind, *_, **__):
+            if kind == "pr":
                 raise self.ERROR
-            raise watch.ProbeError("second heartbeat endpoint failed")
+            return []
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "project_state_dir", return_value=Path(directory)
@@ -637,7 +643,7 @@ class TlsForensicCaptureTest(unittest.TestCase):
                 lambda: watch.heartbeat_cycle(
                     config(),
                     call=call,
-                    enumerate_open=lambda *_, **__: [],
+                    enumerate_open=enumerate_open,
                     emit=messages.append,
                 ),
                 emit=messages.append,
@@ -651,10 +657,39 @@ class TlsForensicCaptureTest(unittest.TestCase):
         self.assertIn("Cycle failure count: 2", record)
         self.assertIn("Captured failure: first only", record)
         self.assertIn(f"Error: {self.ERROR}", record)
-        self.assertTrue(messages[0].startswith("BB VERSION CHECK FAILED"))
-        self.assertTrue(messages[1].startswith("HEARTBEAT WORKER PROBE FAILED"))
+        self.assertNotIn(f"Error: {unrelated}", record)
+        self.assertTrue(messages[0].startswith("HEARTBEAT WORKER PROBE FAILED"))
+        self.assertTrue(messages[1].startswith("HEARTBEAT PR ENUMERATION FAILED"))
         self.assertTrue(messages[2].startswith("HEARTBEAT openPRs="))
         self.assertFalse(any("HEARTBEAT CHECK FAILED" in line for line in messages))
+        marker.assert_not_called()
+
+    def test_heartbeat_without_certificate_failure_writes_no_record(self) -> None:
+        def call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            raise watch.ProbeError("BB worker endpoint timed out")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: watch.heartbeat_cycle(
+                    config(),
+                    call=call,
+                    enumerate_open=lambda *_, **__: [],
+                    emit=lambda _line: None,
+                ),
+                emit=lambda _line: None,
+                tls_fetcher=lambda _host, _timeout: self.RAW_SECTIONS,
+            )
+            records = self.records_for(directory)
+
+        self.assertFalse(completed)
+        self.assertEqual([], records)
         marker.assert_not_called()
 
     def test_mtime_floor_skips_inside_window_and_allows_after_it(self) -> None:
