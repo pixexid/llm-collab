@@ -357,8 +357,11 @@ session, receipt-bearing participant, or canonical-bus member. The orchestrator
 reads its results through BB, authors any durable packet under its own
 registered identity, and remains the integration point. A BB worker never
 supplies another agent as `deliver.py --from`; that records the agent as the
-author, not a relay. First-class relay provenance remains prospective in
-[GH-604](https://github.com/pixexid/llm-collab/issues/604).
+author, not a relay. The decision recorded in
+[GH-604](https://github.com/pixexid/llm-collab/issues/604) rejects a first-class
+relay-provenance surface as actively harmful because a second authorship concept
+risks making identity and deduplication ambiguous. Revisit that decision only if
+a concrete downstream decision consumes producer identity.
 
 **Operator-sourced standing routing rule:** Focus is BB until the Codex app
 reaches parity with the Claude app and BB; use the Codex app only for

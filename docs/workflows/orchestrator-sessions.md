@@ -95,7 +95,8 @@ completed every check; a failed or incomplete cycle leaves the marker stale.
 python3.11 bin/orchestrator_watch.py worker-lifecycle --project <COLLAB_PROJECT_ID> --session <SESSION_ID> --state-dir "$SD"
 ```
 
-`--include-hidden` keeps probe threads observable. The watcher records
+The watcher invokes `bb thread list` internally with that command's
+`--include-hidden` flag so probe threads remain observable. It records
 transitions, so steady state does not notify repeatedly.
 
 ### PR connector artifacts
@@ -137,6 +138,34 @@ re-derive it.
 
 ## Verification traps
 
+- **Quote mid-lane proposals before reporting action.** When an orchestrator
+  sends a proposal or correction into an active lane, the worker quotes the
+  instruction verbatim in its report before describing what it did. A proposal
+  about a gap between two surfaces returned as its opposite: an exclusion became
+  an `unless` clause permitting the excluded case. The change and report were
+  each internally coherent; only placing the original beside the result exposed
+  the inversion. A paraphrase reports the worker's interpretation, which is the
+  thing under suspicion.
+- **A grep bounds its pattern, not the world.** A zero-hit or low-hit result says
+  only what that pattern matched; any claim about what exists requires a second,
+  differently shaped check. A directory-axis guard check missed a multiline
+  form; `run the exact` missed three required-reading files containing `run
+  exactly`, including the sharpest correction under audit; and a match count
+  became an issue work plan before reading showed the matched text said the
+  opposite.
+- **Line-scoped checks cannot see wrapped prose.** A grep over hard-wrapped
+  Markdown reads fragments, not sentences. One sweep called an instruction
+  unconditional because its condition was on the preceding wrapped line. Widen
+  the result to its enclosing sentence or paragraph before recording a prose
+  finding; a false defect that reaches a worker costs a lane.
+- **A line that holds only until it is tested is not a line.** When a proposed
+  rule's scope cannot be decided by inspection, do not ship it as a sweep;
+  convert the residue into a maintenance stream with a recorded trigger. A sweep
+  for prose that implied a condition acquired a new loophole under every hostile
+  reading because implication was not pattern-decidable. Recording that
+  undecidability and its maintenance trigger produced an honest deferral;
+  pretending the sweep had a completion criterion produced an open-ended lane.
+  Related GH-751.
 - **Audit all four connector artifact classes:** review threads, review bodies,
   issue/PR comments, and reactions. A finding can live only in a review body,
   where thread enumeration cannot see it; a clean pass can be reaction-only,
