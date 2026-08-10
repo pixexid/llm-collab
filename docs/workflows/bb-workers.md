@@ -248,8 +248,9 @@ registered identity after reading and verifying the BB result. A BB worker must
 not author a mailbox packet. It has no collab identity, and any registered agent
 it supplies to `deliver.py --from` is recorded as the author, including that
 agent's live session and thread-pair provenance. That is impersonation, not
-relay. [GH-604](https://github.com/pixexid/llm-collab/issues/604) tracks a real
-relay-provenance surface; it is prospective, not present.
+relay. Relay provenance was considered and deliberately not built;
+[GH-604](https://github.com/pixexid/llm-collab/issues/604) records that decision.
+Revisit it only if a concrete downstream decision consumes producer identity.
 
 Under the operator-sourced standing routing rule in
 [`AGENTS.md`](../../AGENTS.md#bb-worker-surface), focus is BB until the Codex
