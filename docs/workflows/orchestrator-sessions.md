@@ -152,6 +152,31 @@ re-derive it.
   named for a bound still passes with `read(-1)` because it asserts only that
   some read occurred. Quality of reasoning and hollowness of a specific test are
   independent.
+- **Scope fixture provenance by role.** A fixture that stands in for real system
+  output is recorded from the live system; review it before committing, sanitize
+  non-load-bearing content, and preserve the fields and states under test. Prefer
+  a recording that contains what nobody would author. A fixture representing a
+  malformed, adversarial, or otherwise un-inducible state is authored deliberately
+  and carries a comment saying what it represents and why it cannot be recorded.
+  The defect is not authorship: it is an authored fixture claiming to represent
+  reality with no live sample in the loop to contradict it. A validator and its
+  hand-authored fixtures agreed that a timestamp was text while the live system
+  returned an integer, so every real-data cycle failed; review and a large test
+  suite missed it because nothing sampled live output. The version fixture at
+  `tests/fixtures/bb/settings_version.json` was re-recorded from the live CLI
+  rather than edited by hand; the replacement recording at
+  `tests/fixtures/bb/thread_list.json` contains 164 rows, including five
+  error-status rows from the provider quota that killed two workers that day—
+  states an author would not have supplied. Redacting a task title keeps the
+  recording honest; changing an integer timestamp to text destroys the evidence.
+- **Treat queued specs as caches, including task lists and scratchpad plans.** A
+  decision that changes where something lives, who owns it, or what a term means
+  invalidates queued work that assumes the old world, and nothing marks it
+  stale. A follow-up instruction was queued, then a later decision moved its
+  artifact; the stale instruction was dispatched
+  into a contract-versioned document until review caught the project-boundary
+  violation. Reread queued items mentioning the affected artifact when such a
+  decision lands, and ask what changed before dispatching work that has waited.
 - **Bind verification to its checkout.** Print `pwd` and
   `git rev-parse HEAD` inside the suite directory, in the same shell invocation
   as the test run.
