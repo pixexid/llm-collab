@@ -468,8 +468,11 @@ class SessionGateTest(unittest.TestCase):
 
         def __init__(self, path: Path) -> None:
             self.path = path
+            self.fspath_calls = 0
+            self.post_read_operations: list[str] = []
 
         def __fspath__(self) -> str:
+            self.fspath_calls += 1
             return os.fspath(self.path)
 
         def __str__(self) -> str:
@@ -479,6 +482,7 @@ class SessionGateTest(unittest.TestCase):
             return self._reject("resolve")
 
         def _reject(self, operation: str):
+            self.post_read_operations.append(operation)
             raise AssertionError(
                 f"no post-read filesystem access on registry path: {operation}"
             )
@@ -599,28 +603,75 @@ class SessionGateTest(unittest.TestCase):
         self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
         markers.assert_not_called()
 
-    def test_absent_registry_does_not_touch_path_after_bounded_read(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            registry = self._NoSecondTouchPath(Path(temporary) / "registry.json")
-            with mock.patch.object(
-                session_gate, "PROJECTS_FILE", registry
-            ), mock.patch.object(
-                _helpers, "PROJECTS_FILE", registry
-            ), mock.patch.object(
-                _helpers, "_projects_cache", None
-            ), mock.patch.object(
-                _helpers, "_projects_registry_missing", None
-            ), mock.patch.object(session_gate, "check_markers") as markers:
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
-        self.assertEqual(0, code)
-        self.assertIn(
-            "checks skipped: project registry not found",
-            output.getvalue(),
+    def test_registry_resolution_never_touches_path_after_bounded_read_for_all_states(
+        self,
+    ) -> None:
+        """Every resolver outcome uses one bounded registry-path access.
+
+        The path guard permits only the path protocol needed by the bounded
+        reader (``__fspath__``). Any later ``Path`` probe raises with the
+        invariant in its message, so both a new ``resolve`` and an old
+        ``is_file`` regression fail this structural test.
+        """
+        cases = (
+            ("identity absent", None, [], "project identity absent", 0),
+            (
+                "registry absent",
+                None,
+                ["--project", LLM_COLLAB_PROJECT],
+                "project registry not found",
+                1,
+            ),
+            (
+                "unregistered",
+                '{"projects": [{"id": "some-other-project"}]}\n',
+                ["--project", UNREGISTERED_PROJECT],
+                "project identity unregistered",
+                1,
+            ),
+            (
+                "unresolvable",
+                "{\n",
+                ["--project", LLM_COLLAB_PROJECT],
+                "project registry: UNKNOWN",
+                1,
+            ),
         )
-        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
-        markers.assert_not_called()
+        with tempfile.TemporaryDirectory() as temporary:
+            for state, content, argv, expected, bounded_reads in cases:
+                with self.subTest(state=state):
+                    registry_path = Path(temporary) / f"{state.replace(' ', '-')}.json"
+                    if content is not None:
+                        registry_path.write_text(content, encoding="utf-8")
+                    registry = self._NoSecondTouchPath(registry_path)
+                    with mock.patch.object(
+                        session_gate, "PROJECTS_FILE", registry
+                    ), mock.patch.object(
+                        _helpers, "PROJECTS_FILE", registry
+                    ), mock.patch.object(
+                        _helpers, "_projects_cache", None
+                    ), mock.patch.object(
+                        _helpers, "_projects_registry_missing", None
+                    ), mock.patch.object(session_gate, "check_markers") as markers:
+                        output = io.StringIO()
+                        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(
+                            output
+                        ):
+                            code = session_gate.main(argv)
+                    self.assertEqual(0, code)
+                    self.assertEqual(
+                        bounded_reads,
+                        registry.fspath_calls,
+                        "registry path access must remain inside the one bounded read",
+                    )
+                    self.assertEqual(
+                        [],
+                        registry.post_read_operations,
+                        "no filesystem operations on the registry path after the "
+                        "bounded read deadline ends",
+                    )
+                    self.assertIn(expected, output.getvalue())
+                    markers.assert_not_called()
 
     def test_unresolvable_project_registry_is_unknown_and_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
