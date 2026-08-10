@@ -39,16 +39,15 @@ class BacklogTest(unittest.TestCase):
 
         self.assertEqual([issue.number for issue in eligible], [10])
 
-    def test_default_exclusions_filter_state_and_legacy_labels_for_amiga_and_non_amiga(self) -> None:
-        issues = [
-            self.issue(10, "Parked", ["state:parked"]),
-            self.issue(11, "Epic", ["epic"]),
-            self.issue(12, "Active", ["state:active"]),
-            self.issue(13, "Unlabeled", []),
-            self.issue(14, "Legacy epic", ["type:epic"]),
-            self.issue(15, "Legacy deferred", ["status:deferred"]),
+    def test_contract_exclusions_augment_realistic_amiga_and_nuvyr_configs(self) -> None:
+        legacy_exclusions = [
+            "type:epic",
+            "wontfix",
+            "duplicate",
+            "invalid",
+            "question",
+            "status:deferred",
         ]
-
         for project_id, repo in (
             ("amiga", "pixexid/amiga"),
             ("nuvyr", "pixexid/nuvyr"),
@@ -56,13 +55,73 @@ class BacklogTest(unittest.TestCase):
             with self.subTest(project_id=project_id):
                 project = {
                     "id": project_id,
-                    "github": {"enabled": True, "repo": repo},
+                    "github": {
+                        "enabled": True,
+                        "repo": repo,
+                        "backlog": {"exclude_labels": legacy_exclusions},
+                    },
                 }
+                issues = [
+                    self.issue(10, "Parked", ["state:parked"], repo=repo),
+                    self.issue(11, "Epic", ["epic"], repo=repo),
+                    self.issue(12, "Active", ["state:active"], repo=repo),
+                    self.issue(13, "Unlabeled", [], repo=repo),
+                    self.issue(14, "Legacy epic", ["type:epic"], repo=repo),
+                    self.issue(15, "Legacy deferred", ["status:deferred"], repo=repo),
+                ]
                 with patch.object(_backlog, "get_project", return_value=project):
                     with patch.object(_backlog, "load_open_github_issues", return_value=issues):
                         eligible = _backlog.eligible_open_issues(project_id)
 
                 self.assertEqual([issue.number for issue in eligible], [12, 13])
+
+    def test_contract_exclusions_apply_without_backlog_config(self) -> None:
+        project = {
+            "id": "synthetic-defaults",
+            "github": {"enabled": True, "repo": "example/synthetic-defaults"},
+        }
+        issues = [
+            self.issue(10, "Parked", ["state:parked"]),
+            self.issue(11, "Epic", ["epic"]),
+            self.issue(12, "Active", ["state:active"]),
+            self.issue(13, "Unlabeled", []),
+        ]
+
+        with patch.object(_backlog, "get_project", return_value=project):
+            with patch.object(_backlog, "load_open_github_issues", return_value=issues):
+                eligible = _backlog.eligible_open_issues("synthetic-defaults")
+
+        self.assertEqual([issue.number for issue in eligible], [12, 13])
+
+    def test_contract_exclusions_preserve_project_specific_exclusions(self) -> None:
+        project = {
+            "id": "synthetic-custom",
+            "github": {
+                "enabled": True,
+                "repo": "example/synthetic-custom",
+                "backlog": {
+                    "exclude_labels": ["team:paused", "epic", "team:paused"]
+                },
+            },
+        }
+        issues = [
+            self.issue(10, "Parked", ["state:parked"]),
+            self.issue(11, "Epic", ["epic"]),
+            self.issue(12, "Active", ["state:active"]),
+            self.issue(13, "Unlabeled", []),
+            self.issue(14, "Project exclusion", ["team:paused"]),
+        ]
+
+        with patch.object(_backlog, "get_project", return_value=project):
+            config = _backlog.project_backlog_config("synthetic-custom")
+            with patch.object(_backlog, "load_open_github_issues", return_value=issues):
+                eligible = _backlog.eligible_open_issues("synthetic-custom")
+
+        self.assertEqual(
+            config["exclude_labels"],
+            ["team:paused", "epic", "state:parked"],
+        )
+        self.assertEqual([issue.number for issue in eligible], [12, 13])
 
     def test_eligible_open_issues_includes_non_parity_titles_by_default(self) -> None:
         project = {
@@ -187,11 +246,17 @@ class BacklogTest(unittest.TestCase):
                 _backlog.load_open_github_issues("pixexid/amiga")
 
     @staticmethod
-    def issue(number: int, title: str, labels: list[str]) -> dict:
+    def issue(
+        number: int,
+        title: str,
+        labels: list[str],
+        *,
+        repo: str = "pixexid/amiga",
+    ) -> dict:
         return {
             "number": number,
             "title": title,
-            "url": f"https://github.com/pixexid/amiga/issues/{number}",
+            "url": f"https://github.com/{repo}/issues/{number}",
             "labels": [{"name": label} for label in labels],
         }
 

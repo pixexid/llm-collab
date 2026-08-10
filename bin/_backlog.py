@@ -9,15 +9,16 @@ from typing import Any
 from _helpers import get_project
 
 
+CONTRACT_REQUIRED_EXCLUDE_LABELS = ("epic", "state:parked")
+
 DEFAULT_EXCLUDE_LABELS = (
     "type:epic",
-    "epic",
     "wontfix",
     "duplicate",
     "invalid",
     "question",
     "status:deferred",
-    "state:parked",
+    *CONTRACT_REQUIRED_EXCLUDE_LABELS,
 )
 
 
@@ -57,7 +58,11 @@ def project_backlog_config(project_id: str) -> dict[str, Any]:
     return {
         "enabled": True,
         "repo": repo,
-        "exclude_labels": _string_list(exclude_labels, default=DEFAULT_EXCLUDE_LABELS),
+        "exclude_labels": _string_list(
+            exclude_labels,
+            default=DEFAULT_EXCLUDE_LABELS,
+            required=CONTRACT_REQUIRED_EXCLUDE_LABELS,
+        ),
         "require_any_label": _string_list(require_any_label, default=()),
         "priority_labels": _string_list(priority_labels, default=()),
     }
@@ -168,10 +173,16 @@ def parse_backlog_issue(raw_issue: dict[str, Any]) -> BacklogIssue | None:
     )
 
 
-def _string_list(value: Any, *, default: tuple[str, ...]) -> list[str]:
-    if not isinstance(value, list):
-        return list(default)
-    return [item for item in value if isinstance(item, str)]
+def _string_list(
+    value: Any,
+    *,
+    default: tuple[str, ...],
+    required: tuple[str, ...] = (),
+) -> list[str]:
+    items = list(default) if not isinstance(value, list) else [
+        item for item in value if isinstance(item, str)
+    ]
+    return list(dict.fromkeys((*items, *required))) if required else items
 
 
 def _matches_any(label: str, patterns: tuple[str, ...]) -> bool:

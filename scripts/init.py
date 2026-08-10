@@ -629,6 +629,8 @@ def collect_projects(
                     "invalid",
                     "question",
                     "status:deferred",
+                    "epic",
+                    "state:parked",
                 ],
                 "require_any_label": [],
                 "priority_labels": [],
