@@ -25,28 +25,6 @@ limits, or PR gates. Use
 [`task-intake-and-delegation.md`](task-intake-and-delegation.md), and
 [`commit-push-prs.md`](commit-push-prs.md) for those procedures.
 
-## Writing operational clauses
-
-**ENFORCED — authoring rule.** The mandatory independent full-diff review
-checks every operational clause written or revised from this point forward:
-each states whether it is **ENFORCED** or a **CONVENTION**. An enforced clause
-names its enforcement seam. A convention is legitimate, but a convention that
-reads as a control is a defect because a reader relies on protection that does
-not exist. Every convention clause carries its check — the command that detects
-a violation — instead of implying a gate.
-
-This document's existing clauses are not yet classified. An unmarked clause
-carries no implication either way; do not infer its status from the missing
-label or treat the marked subset as a complete sweep.
-
-Four review rounds found that same defect on successive clauses of one
-queue-eligibility paragraph. The contract-versioned prose was mistaken for
-enforcement; the first added gate covered only a default that project
-configuration replaced rather than augmented; a third clause named a label
-with no runtime effect; and the documented audit for a fourth omitted both
-`--repo` and `--limit`, so it examined the wrong repository and only the first
-page while claiming completeness.
-
 ## Orchestrator topology
 
 The supervisor is one singleton across all projects. Orchestrators are
@@ -345,13 +323,12 @@ generations and decides on the operator's behalf wherever doing so keeps the
 process unblocked; each per-project orchestrator owns that project's technical
 execution and verification.
 
-- **CONVENTION — supervisor decision routing.** Route decisions beyond the
-  per-project orchestrator's stated authority to the supervisor. The supervisor
-  decides unless the canonical operator-only boundary in
-  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies. **Check:** a
-  `pending operator decision` state persisting on anything outside that boundary
-  is a violation. Keep technical scope, implementation choices, bounded recovery,
-  and the normal review/release flow with the orchestrator.
+- Route decisions beyond the per-project orchestrator's stated authority to the
+  supervisor. The supervisor decides unless the canonical operator-only boundary
+  in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies; do not
+  carry a `pending operator decision` state for anything else. Keep technical
+  scope, implementation choices, bounded recovery, and the normal review/release
+  flow with the orchestrator.
 - Spend expensive-model tokens on orchestration, independent review, and
   judgment. Delegate bounded work that a cheaper eligible worker can perform;
   evaluation candidates use their own execution tokens.

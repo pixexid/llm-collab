@@ -100,10 +100,9 @@ pilot used one byte-identical, read-only source-audit task per model.
 <a id="glm-52-reasoning-language-drift"></a>
 
 **`zai/glm-5.2` — reasoning-language drift.** GLM models can drift into Chinese
-in internal reasoning even while visible output stays English. Durable
-artifacts — code, comments, commit messages, task notes, handoffs — must be
-English-only. A worker on this profile should think in English and switch back
-immediately on noticing drift.
+in internal reasoning even while visible output stays English. The
+[fleet control-prose rule](#contract) applies to this profile. A worker on this
+profile should think in English and switch back immediately on noticing drift.
 
 Provenance: amiga `ZCODE.md` "Language Discipline", carried while zcode ran as a
 separate app harness. Migrated to fleet scope 2026-08-10 because it is a property
