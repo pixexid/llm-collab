@@ -475,8 +475,8 @@ class SessionGateTest(unittest.TestCase):
         def __str__(self) -> str:
             return str(self.path)
 
-        def resolve(self) -> Path:
-            return self.path.resolve()
+        def resolve(self):
+            return self._reject("resolve")
 
         def _reject(self, operation: str):
             raise AssertionError(
@@ -591,7 +591,7 @@ class SessionGateTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual(
             "[session-gate] checks skipped: project registry not found "
-            f"(no projects.json at {registry.resolve()}; "
+            f"(no projects.json at {registry}; "
             "resolved from this hook's checkout root)\n",
             output.getvalue(),
             "registry absence must not be reported as an unregistered project",

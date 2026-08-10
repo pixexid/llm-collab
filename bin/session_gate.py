@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     if skip_reason == "registry_not_found":
         print(
             "[session-gate] checks skipped: project registry not found "
-            f"(no projects.json at {PROJECTS_FILE.resolve()}; "
+            f"(no projects.json at {PROJECTS_FILE}; "
             "resolved from this hook's checkout root)"
         )
         return 0
