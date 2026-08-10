@@ -153,14 +153,19 @@ re-derive it.
   some read occurred. Quality of reasoning and hollowness of a specific test are
   independent.
 - **Record fixtures from the live system rather than authoring them, and prefer
-  recordings that contain what nobody would author.** A validator and its
-  hand-authored fixtures agreed that a timestamp was text while the live system
-  returned an integer, so every real-data cycle failed; review and a large test
-  suite missed it because nothing sampled live output. The version fixture under
-  `tests/fixtures/bb/` was re-recorded from the live CLI rather than edited by
-  hand; the replacement recording contains 164 rows, including five
-  error-status rows from the provider quota that killed two workers that day;
-  those are states an author would not have supplied.
+  recordings that contain what nobody would author. Review a recording before
+  committing it, and sanitize what is not load-bearing while preserving the
+  fields and states the test depends on.** A validator and its hand-authored
+  fixtures agreed that a timestamp was text while the live system returned an
+  integer, so every real-data cycle failed; review and a large test suite missed
+  it because nothing sampled live output. The version fixture at
+  `tests/fixtures/bb/settings_version.json` was re-recorded from the live CLI
+  rather than edited by hand; the replacement recording at
+  `tests/fixtures/bb/thread_list.json`
+  contains 164 rows, including five error-status rows from the provider quota
+  that killed two workers that day—states an author would not have supplied.
+  Redacting a task title keeps the recording honest; changing an integer
+  timestamp to text destroys the evidence.
 - **Treat queued specs as caches, including task lists and scratchpad plans.** A
   decision that changes where something lives, who owns it, or what a term means
   invalidates queued work that assumes the old world, and nothing marks it
