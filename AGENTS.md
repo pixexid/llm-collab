@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 22 -->
+<!-- CONTRACT_VERSION: 21 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,13 +44,6 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
-
-Contract v22 (2026-08-10) excludes parked issues and epics from queue selection
-and permits taking a parked issue only when its recorded trigger fires. This
-changes which lanes a worker may take: a cached v21 worker would keep selecting
-queue entries that are now prohibited. The canonical state-label, trigger, and
-review-cadence rules live in
-[`Canonical ordered queue`](docs/workflows/task-intake-and-delegation.md#canonical-ordered-queue).
 
 Contract v21 (2026-08-10) demotes AX to one condition under an operator-sourced
 ruling relayed through the supervisor session. BB threads on OpenAI models and

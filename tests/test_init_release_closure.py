@@ -363,10 +363,6 @@ class InitReleaseClosureTest(unittest.TestCase):
 
         by_id = {project["id"]: project for project in projects}
         self.assertEqual(len(projects), 2)
-        for project in by_id.values():
-            exclude_labels = project["github"]["backlog"]["exclude_labels"]
-            self.assertIn("epic", exclude_labels)
-            self.assertIn("state:parked", exclude_labels)
         self.assertIsNot(by_id["amiga"], by_id["nuvyr"])
         self.assertIsNot(
             by_id["amiga"]["release_closure"],

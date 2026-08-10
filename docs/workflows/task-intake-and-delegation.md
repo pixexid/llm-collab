@@ -136,43 +136,6 @@ remaining issue-sized lanes.
 - do not hand-edit queue state to clear blockers or materialize lanes unless repairing a reconcile failure with an explicit note
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
-### Issue state labels
-
-- **ENFORCED — queue eligibility.** Queue drains and next-lane selection exclude
-  `state:parked` and `epic`. `CONTRACT_REQUIRED_EXCLUDE_LABELS` in
-  `bin/_backlog.py` is the floor no project configuration can lower. An epic is
-  a container; taking one as a lane is a scoping error.
-- **CONVENTION — exactly one state label.** The orchestrator maintains exactly
-  one of `state:active`, `state:parked`, or `state:blocked` on every open issue;
-  `epic` is orthogonal, not a state. No tool validates this convention. Run this
-  check at succession and during the parked sweep:
-
-  ```bash
-  gh issue list --state open --json number,labels \
-    --jq '.[] | "\(.number) \([.labels[].name] | map(select(startswith("state:"))) | length)"'
-  ```
-
-  Any issue that does not print `1` has a labelling defect to repair.
-- **CONVENTION — `state:blocked` is a human signal.** It does not gate the
-  queue. Queue state comes from task frontmatter, so an issue labelled
-  `state:blocked` whose mirror remains `open` can still normalize to `ready`.
-  Use the queue's own `blocked` state when work must be blocked at runtime.
-- **CONVENTION — parking triggers and review cadence.** These are orchestrator
-  practice, not automation. A `state:parked` issue may be taken only when its
-  own recorded trigger fires. A parked issue without a recorded trigger is a
-  defect in the parking, not a free lane: record the trigger or change the
-  state. Run a close-or-recommit sweep over everything parked at succession, or
-  monthly, whichever comes first. Bias toward closing: an issue nobody can
-  justify restarting is better closed with its reasoning preserved than carried
-  as permanent furniture.
-
-The failure this prevents is **"the trigger fired but nobody re-examined."**
-Parking without a trigger and parking without a review cadence both produce an
-issue that is neither being worked nor being decided, an outcome
-indistinguishable from having forgotten it. A rule written into a contract is
-not an enforcement mechanism; three review rounds on this PR found that same
-error on successive clauses.
-
 ## Autonomous queue loop
 
 When the operator gives standing instructions to keep processing tasks, the
