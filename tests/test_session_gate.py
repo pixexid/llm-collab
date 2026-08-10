@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 LLM_COLLAB_PROJECT = "llm-collab"
 SECOND_PROJECT = "nuvyr"
+UNREGISTERED_PROJECT = "not-registered"
 
 import _bounded_io  # noqa: E402
 import _watcher_liveness  # noqa: E402
@@ -517,17 +518,43 @@ class SessionGateTest(unittest.TestCase):
         markers.assert_not_called()
 
     def test_unregistered_project_identity_skips_without_reading_markers(self) -> None:
-        with mock.patch.object(session_gate, "get_project", return_value=None), mock.patch.object(
-            session_gate, "check_markers"
-        ) as markers:
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                code = session_gate.main(["--project", SECOND_PROJECT])
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "registry.json"
+            registry.touch()
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                session_gate, "get_project", return_value=None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", UNREGISTERED_PROJECT])
         self.assertEqual(0, code)
         self.assertEqual(
             "[session-gate] checks skipped: project identity unregistered "
-            f"({SECOND_PROJECT!r} is not registered in projects.json)\n",
+            f"({UNREGISTERED_PROJECT!r} is not registered in projects.json)\n",
             output.getvalue(),
+        )
+        markers.assert_not_called()
+
+    def test_absent_project_registry_skips_without_reading_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "registry.json"
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                session_gate, "get_project", return_value=None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "[session-gate] checks skipped: project registry not found "
+            f"(no projects.json at {registry.resolve()}; "
+            "resolved from this hook's checkout root)\n",
+            output.getvalue(),
+            "registry absence must not be reported as an unregistered project",
         )
         markers.assert_not_called()
 

@@ -29,7 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path[:0] = [str(SCRIPT_DIR), str(SCRIPT_DIR.parent)]
 
 import session_bootstrap  # noqa: E402
-from _helpers import get_project  # noqa: E402
+from _helpers import PROJECTS_FILE, get_project  # noqa: E402
 from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
@@ -70,6 +70,12 @@ def resolve_project_id(argv: list[str] | None = None) -> tuple[str | None, str |
     except BaseException:
         registered = None
     if registered is None:
+        try:
+            registry_present = PROJECTS_FILE.is_file()
+        except BaseException:
+            registry_present = False
+        if not registry_present:
+            return project_id, "registry_not_found"
         return project_id, "unregistered"
     return project_id, None
 
@@ -253,6 +259,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "[session-gate] checks skipped: project identity unregistered "
             f"({project_id!r} is not registered in projects.json)"
+        )
+        return 0
+    if skip_reason == "registry_not_found":
+        print(
+            "[session-gate] checks skipped: project registry not found "
+            f"(no projects.json at {PROJECTS_FILE.resolve()}; "
+            "resolved from this hook's checkout root)"
         )
         return 0
     print("[session-gate] session-setup checks (results and pointers only):")
