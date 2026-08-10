@@ -1524,13 +1524,33 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             )
         }
         verified_means_delivery = (
-            re.compile(r"`?VERIFIED`?(?:\s+exit\s+0)?\s+confirms?\s+delivery\b", re.I),
+            re.compile(
+                r"`?VERIFIED`?(?:\s+exit\s+0)?\s+"
+                r"(?:confirms?|proves?|establishes?)\s+delivery\b",
+                re.I,
+            ),
             re.compile(r"\brecord\s+`?VERIFIED`?(?:\s+exit\s+0)?\s+as\s+confirmed\s+delivery\b", re.I),
-            re.compile(r"`?VERIFIED`?.{0,60}\b(?:means|is)\s+(?:confirmed\s+)?delivered\b", re.I),
+            re.compile(
+                r"`?VERIFIED`?.{0,60}\b(?:means|is)\s+(?:that\s+)?"
+                r"(?:the\s+)?(?:message\s+|packet\s+|turn\s+)?"
+                r"(?:was\s+)?(?:confirmed\s+)?delivered\b",
+                re.I,
+            ),
+            re.compile(
+                r"`?VERIFIED`?.{0,60}\b(?:marks?|reports?)\b.{0,30}"
+                r"\bas\s+delivered\b",
+                re.I,
+            ),
         )
         printed_ax_signal = re.compile(
-            r"(?:deliver\.py.{0,240}prints?.{0,100}command|"
-            r"command.{0,100}(?:prints?|printed).{0,240}deliver\.py)",
+            r"(?:deliver\.py.{0,300}(?:prints?|printed).{0,100}command.{0,100}"
+            r"(?:sender|worker|you|run|execute|take|taken|ring)|"
+            r"deliver\.py.{0,300}(?:run|execute|take|taken|ring).{0,120}"
+            r"command.{0,80}(?:prints?|printed)|"
+            r"(?:run|execute|take|taken|ring).{0,120}command.{0,80}"
+            r"(?:prints?|printed).{0,300}deliver\.py|"
+            r"(?:run|execute|take|taken|ring).{0,120}deliver\.py.{0,120}"
+            r"(?:prints?|printed).{0,100}command)",
             re.I,
         )
         ax_action = re.compile(r"\b(?:run|ring|invoke|execute|use|take|taken)\b", re.I)
