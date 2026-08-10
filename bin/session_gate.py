@@ -194,7 +194,7 @@ def watcher_checks(project_id: str, own_session_id: str | None) -> list[tuple[st
                 f"fresh marker owned by FOREIGN session {verdict['session_id']} — "
                 "a predecessor session's watcher is still running and "
                 "double-notifying this one; message that session to TaskStop "
-                "its watchers, or escalate to the operator",
+                "its watchers, or escalate to the supervisor per AGENTS.md",
             ))
         elif reason == "owner_unknown":
             results.append((

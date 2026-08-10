@@ -147,8 +147,10 @@ The classification is auditable: it names the lane-contract clause or
 pre-existing/broadening boundary relied on, and a deferred finding that was in
 fact contract-violating is a gate violation attributable to the classifier.
 The lane owner and release-gate worker may accept a known, bounded risk by
-recording it and preserving the follow-up. Escalate only when they cannot reach
-or execute a safe decision without operator-only input.
+recording it and preserving the follow-up. Escalate to the supervisor only when
+they cannot reach or execute a safe decision. The supervisor decides unless the
+canonical operator-only boundary in
+[`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies.
 
 Apply a convergence circuit breaker per finding family:
 
