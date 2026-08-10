@@ -73,6 +73,10 @@ TLS_HOST_PATTERN = re.compile(
     r"[A-Za-z]{2,63})"
     r"(?::\d{1,5})?"
 )
+TLS_FAILURE_HINT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:tls|ssl|certificate|cert|x509)(?![a-z0-9])|verif",
+    re.IGNORECASE,
+)
 
 
 class ProbeError(RuntimeError):
@@ -479,18 +483,10 @@ def heartbeat_cycle(
 
 
 def is_certificate_verification_failure(error: BaseException) -> bool:
-    text = str(error).lower()
-    return "certificate" in text and any(
-        phrase in text
-        for phrase in (
-            "failed to verify",
-            "verify failed",
-            "verification failed",
-            "unknown authority",
-            "self-signed",
-            "not trusted",
-        )
-    )
+    # Deliberately over-inclusive across Go, Node, and future clients: an extra
+    # artifact on an already-failed cycle is cheaper than silently missing the
+    # incident because one runtime used an unenumerated certificate phrase.
+    return TLS_FAILURE_HINT_PATTERN.search(str(error)) is not None
 
 
 def endpoint_host_from_error(error: BaseException) -> str | None:
@@ -544,6 +540,9 @@ def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
             host,
         )
         try:
+            # Despite its bb-named parameter, subprocess_transport is the shared
+            # bounded-process primitive. Reuse accepts that coupling so OpenSSL
+            # and route inherit its launch deadline, bounded reads, and cleanup.
             result = subprocess_transport(
                 command, max_response_chars=TLS_CAPTURE_MAX_RESPONSE_CHARS
             )((), remaining())
@@ -558,7 +557,7 @@ def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
                     result.stderr.strip()
                     or f"openssl exited {result.exit_code} without a presented certificate"
                 )
-        except BaseException as error:
+        except Exception as error:
             detail = str(error) or type(error).__name__
             chain_error = f"openssl s_client failed: {detail}"
 
@@ -590,7 +589,7 @@ def fetch_tls_evidence(host: str, timeout_seconds: float) -> dict:
                 output=output,
                 error=None if result.exit_code == 0 else f"exit {result.exit_code}",
             )
-        except BaseException as error:
+        except Exception as error:
             route_context["error"] = str(error) or type(error).__name__
 
     return {
@@ -623,7 +622,7 @@ def capture_tls_failure(
             evidence = fetcher(host, timeout_seconds)
             if not isinstance(evidence, Mapping):
                 raise TypeError("TLS evidence fetcher returned a non-object")
-        except BaseException as capture_error:
+        except Exception as capture_error:
             fetch_error = str(capture_error) or type(capture_error).__name__
             evidence = {}
 
@@ -725,7 +724,10 @@ def run_once(
                     ),
                     fetcher=tls_fetcher,
                 )
-            except BaseException:
+            except (KeyboardInterrupt, SystemExit):
+                emit(f"{name.upper()} CHECK FAILED — {error}")
+                raise
+            except Exception:
                 pass
         emit(f"{name.upper()} CHECK FAILED — {error}")
         return False

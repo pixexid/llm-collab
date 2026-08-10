@@ -498,6 +498,53 @@ class TlsForensicCaptureTest(unittest.TestCase):
         self.assertFalse(record["network_route_context"]["captured"])
         marker.assert_not_called()
 
+    def test_node_style_verification_wording_also_triggers_capture(self) -> None:
+        error = watch.ProbeError(
+            'request to "https://api.github.com/graphql" failed: '
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+        )
+        chain = "-----BEGIN CERTIFICATE-----\nnode-peer\n-----END CERTIFICATE-----"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            self.assertFalse(
+                watch.run_once(
+                    "worker-lifecycle",
+                    "project-a",
+                    "session-a",
+                    lambda: (_ for _ in ()).throw(error),
+                    emit=lambda _line: None,
+                    tls_fetcher=lambda _host, _timeout: {
+                        "presented_certificate_chain_pem": [chain],
+                        "network_route_context": {
+                            "best_effort": True,
+                            "captured": False,
+                        },
+                    },
+                )
+            )
+            record = self.record_for(directory)
+
+        self.assertTrue(record["completeness"]["chain_captured"])
+        self.assertEqual(str(error), record["error_text"])
+
+    def test_shutdown_during_capture_emits_cycle_failure_then_propagates(self) -> None:
+        messages = []
+
+        def interrupt(_host, _timeout):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: (_ for _ in ()).throw(self.ERROR),
+                emit=messages.append,
+                tls_fetcher=interrupt,
+            )
+        self.assertEqual([f"HEARTBEAT CHECK FAILED — {self.ERROR}"], messages)
+
     def test_capture_timeout_uses_only_the_cycle_time_remaining(self) -> None:
         now = [100.0]
         seen_timeouts = []
