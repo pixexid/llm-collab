@@ -460,7 +460,9 @@ class TlsForensicCaptureTest(unittest.TestCase):
             record = self.record_for(directory)
 
         self.assertFalse(completed)
-        self.assertEqual({"chain_captured": True, "reason": None}, record["completeness"])
+        self.assertTrue(record["completeness"]["chain_captured"])
+        self.assertIsNone(record["completeness"]["chain_reason"])
+        self.assertFalse(record["completeness"]["dns_snapshot_captured"])
         self.assertEqual([chain], record["presented_certificate_chain_pem"])
         self.assertEqual("api.github.com", record["endpoint"]["host"])
         self.assertEqual(str(self.ERROR), record["error_text"])
@@ -487,16 +489,187 @@ class TlsForensicCaptureTest(unittest.TestCase):
             record = self.record_for(directory)
 
         self.assertFalse(completed)
+        self.assertFalse(record["completeness"]["chain_captured"])
         self.assertEqual(
-            {
-                "chain_captured": False,
-                "reason": "openssl chain fetch timed out",
-            },
-            record["completeness"],
+            "openssl chain fetch timed out",
+            record["completeness"]["chain_reason"],
+        )
+        self.assertFalse(record["completeness"]["dns_snapshot_captured"])
+        self.assertEqual(
+            "openssl chain fetch timed out",
+            record["completeness"]["dns_snapshot_reason"],
         )
         self.assertEqual([], record["presented_certificate_chain_pem"])
         self.assertFalse(record["network_route_context"]["captured"])
         marker.assert_not_called()
+
+    def test_heartbeat_probe_certificate_failure_reaches_capture_seam(self) -> None:
+        messages = []
+
+        def call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                raise self.ERROR
+            return {"threads": []}
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: watch.heartbeat_cycle(
+                    config(),
+                    call=call,
+                    enumerate_open=lambda *_, **__: [],
+                    emit=messages.append,
+                ),
+                emit=messages.append,
+                tls_fetcher=lambda _host, _timeout: {
+                    "presented_certificate_chain_pem": [
+                        "-----BEGIN CERTIFICATE-----\nheartbeat\n"
+                        "-----END CERTIFICATE-----"
+                    ],
+                },
+            )
+            record = self.record_for(directory)
+
+        self.assertFalse(completed)
+        self.assertTrue(record["completeness"]["chain_captured"])
+        self.assertEqual(str(self.ERROR), record["error_text"])
+        self.assertTrue(messages[0].startswith("BB VERSION CHECK FAILED"))
+        self.assertTrue(messages[1].startswith("HEARTBEAT openPRs="))
+        self.assertFalse(any("HEARTBEAT CHECK FAILED" in line for line in messages))
+        marker.assert_not_called()
+
+    def test_record_disclaims_route_equivalence_and_records_no_proxy(self) -> None:
+        proxy_environment = {key: None for key in watch.PROXY_ENV_KEYS}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            watch.capture_tls_failure(
+                "pr-artifacts",
+                "project-a",
+                self.ERROR,
+                1.0,
+                fetcher=lambda _host, _timeout: {
+                    "route_fidelity": {
+                        "equivalent_to_failing_client": False,
+                        "reason": "independent direct probe",
+                    },
+                    "proxy_configuration": {
+                        "best_effort": True,
+                        "captured": True,
+                        "environment": proxy_environment,
+                        "explicit_environment_proxy_present": False,
+                        "system": {
+                            "command": ["scutil", "--proxy"],
+                            "output": "<dictionary> { }",
+                            "error": None,
+                        },
+                    },
+                },
+            )
+            record = self.record_for(directory)
+
+        self.assertFalse(record["route_fidelity"]["equivalent_to_failing_client"])
+        self.assertFalse(record["completeness"]["capture_complete"])
+        self.assertFalse(record["completeness"]["route_equivalence_established"])
+        self.assertTrue(record["completeness"]["proxy_configuration_captured"])
+        self.assertFalse(
+            record["proxy_configuration"]["explicit_environment_proxy_present"]
+        )
+        self.assertTrue(
+            all(
+                value is None
+                for value in record["proxy_configuration"]["environment"].values()
+            )
+        )
+        self.assertEqual(
+            "<dictionary> { }", record["proxy_configuration"]["system"]["output"]
+        )
+
+    def test_dns_snapshot_records_both_resolvers_and_dns64_signature(self) -> None:
+        system_a = ["192.0.2.33"]
+        system_aaaa = ["64:ff9b::c000:221"]
+        matches = watch.dns64_synthesis_matches(system_a, system_aaaa)
+        dns_snapshot = {
+            "best_effort": True,
+            "captured": True,
+            "system_resolver": {"a": system_a, "aaaa": system_aaaa, "error": None},
+            "public_resolver": {
+                "server": "1.1.1.1",
+                "a": ["140.82.112.5"],
+                "aaaa": [],
+                "error": None,
+            },
+            "dns64_synthesis_signature_present": bool(matches),
+            "dns64_matches": matches,
+            "error": None,
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            watch.capture_tls_failure(
+                "pr-artifacts",
+                "project-a",
+                self.ERROR,
+                1.0,
+                fetcher=lambda _host, _timeout: {
+                    "dns_resolution_snapshot": dns_snapshot,
+                },
+            )
+            record = self.record_for(directory)
+
+        self.assertTrue(record["completeness"]["dns_snapshot_captured"])
+        self.assertIsNone(record["completeness"]["dns_snapshot_reason"])
+        self.assertTrue(
+            record["dns_resolution_snapshot"]["dns64_synthesis_signature_present"]
+        )
+        self.assertEqual(
+            [{"aaaa": "64:ff9b::c000:221", "embedded_ipv4": "192.0.2.33"}],
+            record["dns_resolution_snapshot"]["dns64_matches"],
+        )
+
+    def test_tls_record_retention_keeps_only_the_newest_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(watch, "TLS_RECORD_RETENTION_LIMIT", 2):
+            paths = []
+            for index in range(3):
+                path = watch.capture_tls_failure(
+                    "pr-artifacts",
+                    "project-a",
+                    self.ERROR,
+                    1.0,
+                    fetcher=lambda _host, _timeout: {},
+                    timestamp=lambda index=index: f"2026-08-10T00:00:0{index}+00:00",
+                )
+                paths.append(path)
+                if path.exists():
+                    os.utime(path, ns=(index + 1, index + 1))
+            records = list((Path(directory) / "tls-forensics").glob("*.json"))
+            existence = [path.exists() for path in paths]
+
+        self.assertEqual(2, len(records))
+        self.assertEqual([False, True, True], existence)
+
+    def test_retention_failure_does_not_remove_the_new_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(
+            watch, "prune_tls_records", side_effect=OSError("state directory busy")
+        ):
+            path = watch.capture_tls_failure(
+                "pr-artifacts",
+                "project-a",
+                self.ERROR,
+                1.0,
+                fetcher=lambda _host, _timeout: {},
+            )
+            exists = path.exists()
+
+        self.assertTrue(exists)
 
     def test_node_style_verification_wording_also_triggers_capture(self) -> None:
         error = watch.ProbeError(
