@@ -36,6 +36,7 @@ from llm_collab.bb_client import (  # noqa: E402
     bb_executable_from_project,
     subprocess_transport,
 )
+from llm_collab.ledger.paths import validate_project_id  # noqa: E402
 
 ORCHESTRATOR_DOC = "docs/workflows/orchestrator-sessions.md"
 
@@ -65,6 +66,10 @@ def resolve_project_id(argv: list[str] | None = None) -> tuple[str | None, str |
     if len(args) != 2 or args[0] != "--project" or not args[1]:
         return None, "absent"
     project_id = args[1]
+    try:
+        validate_project_id(project_id)
+    except ValueError:
+        return project_id, "invalid"
     try:
         registered = get_project(project_id)
     # The bounded registry reader fails closed with SystemExit. Preserve that
@@ -267,6 +272,15 @@ def main(argv: list[str] | None = None) -> int:
             "[session-gate] checks skipped: project identity unregistered "
             f"({project_id!r} is not registered in projects.json)"
         )
+        return 0
+    if skip_reason == "invalid":
+        print(
+            "[session-gate] project identity: UNKNOWN — invalid project ID "
+            f"{project_id!r}; checks not run"
+        )
+        print("━" * 60)
+        print("⚠️  SESSION SETUP INCOMPLETE — see the ✗/? lines above and the pointers")
+        print("━" * 60)
         return 0
     if skip_reason == "registry_not_found":
         print(

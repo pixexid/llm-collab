@@ -33,7 +33,11 @@ RUNTIME_ROOT = (
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from llm_collab.ledger.paths import generate_workspace_id, validate_workspace_id
+from llm_collab.ledger.paths import (
+    generate_workspace_id,
+    validate_project_id,
+    validate_workspace_id,
+)
 
 
 def prompt(
@@ -562,6 +566,11 @@ def collect_projects(
         ).lower().replace(" ", "-")
         if not pid:
             break
+        try:
+            pid = validate_project_id(pid)
+        except ValueError as error:
+            _print_project_key_error(pid, "id", local_projects_path, str(error))
+            continue
 
         display = prompt("  Display name", pid.replace("-", " ").title(), input_fn=input_fn)
         repos_raw = prompt_list(

@@ -28,6 +28,10 @@ from _bounded_io import (
     active_read_budget,
     read_regular_file_bounded,
 )
+# Bin-only entrypoints can import this module before the package is available;
+# add the source root for calls that need package-owned validators.
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
 # Root resolution
@@ -180,6 +184,9 @@ def project_state_root() -> Path:
 
 
 def project_state_dir(project_id: str) -> Path:
+    from llm_collab.ledger.paths import validate_project_id
+
+    project_id = validate_project_id(project_id)
     return project_state_root() / project_id
 
 

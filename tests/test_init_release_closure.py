@@ -102,6 +102,51 @@ class InitReleaseClosureTest(unittest.TestCase):
         injected.assert_exhausted()
         return projects, output.getvalue(), injected
 
+    def test_path_bearing_project_id_is_refused_before_registration(self) -> None:
+        project_id_prompts = 0
+
+        def answer(prompt_text: str) -> str:
+            nonlocal project_id_prompts
+            if "Add projects now?" in prompt_text:
+                return "y"
+            if "Project ID" in prompt_text:
+                project_id_prompts += 1
+                return "../nuvyr" if project_id_prompts == 1 else ""
+            if "Display name" in prompt_text:
+                return "Nuvyr"
+            if "Repo IDs and paths" in prompt_text:
+                return "app:nuvyr"
+            if "preflight/build check" in prompt_text:
+                return "n"
+            if "Enable GitHub integration" in prompt_text:
+                return "n"
+            if "Default branch base" in prompt_text:
+                return "main"
+            if "Release gate agent ID" in prompt_text:
+                return "codex"
+            if "Add another project" in prompt_text:
+                return "n"
+            raise AssertionError(f"unexpected prompt: {prompt_text}")
+
+        with TemporaryDirectory() as tmp:
+            output = StringIO()
+            with redirect_stdout(output):
+                projects = init_script.collect_projects(
+                    ["codex"],
+                    input_fn=answer,
+                    projects_path=Path(tmp) / "projects.json",
+                )
+
+        project_ids = [project["id"] for project in projects]
+        self.assertNotIn(
+            "../nuvyr",
+            project_ids,
+            "path-bearing project ID escaped registration into projects.json",
+        )
+        self.assertEqual([], project_ids)
+        self.assertIn("invalid projects.json key 'id'", output.getvalue())
+        self.assertIn("project_id must be an exact registered-project token", output.getvalue())
+
     def test_github_disabled_omits_closure_and_prints_exact_repair_path(self) -> None:
         with TemporaryDirectory() as tmp:
             projects_path = Path(tmp) / "projects.json"

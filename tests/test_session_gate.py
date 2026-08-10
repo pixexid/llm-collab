@@ -579,6 +579,22 @@ class SessionGateTest(unittest.TestCase):
         self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
         markers.assert_not_called()
 
+    def test_invalid_project_identity_is_unknown_incomplete_and_does_not_probe(self) -> None:
+        with mock.patch.object(session_gate, "get_project") as get_project, mock.patch.object(
+            session_gate, "check_markers"
+        ) as markers:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = session_gate.main(["--project", "../nuvyr"])
+        out = output.getvalue()
+        self.assertEqual(0, code)
+        self.assertIn("project identity: UNKNOWN", out)
+        self.assertIn("../nuvyr", out)
+        self.assertIn("SESSION SETUP INCOMPLETE", out)
+        self.assertNotIn("Traceback", out)
+        get_project.assert_not_called()
+        markers.assert_not_called()
+
     def test_absent_project_registry_skips_without_reading_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             registry = Path(temporary) / "registry.json"
