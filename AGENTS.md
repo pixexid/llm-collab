@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 21 -->
+<!-- CONTRACT_VERSION: 22 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,18 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v22 (2026-08-10) makes the singleton supervisor the decision-maker on
+the operator's behalf outside the exact operator-only boundary in
+[`Workers own their own setup`](#workers-own-their-own-setup). A worker accepts
+that authority instead of leaving the decision `pending operator decision`, so
+that state should be rare. This changes what a worker may do: a cached v21
+worker can refuse a valid supervisor decision because its contract still
+reserves the decision to the operator. V22 also makes the fleet-wide
+control-prose rule in
+[`BB Worker Profiles`](docs/workflows/bb-worker-profiles.md) binding on every
+worker; both worker-visible changes share one marker because they ship together
+and bind the whole fleet. The version signal makes both obligations visible.
 
 Contract v21 (2026-08-10) demotes AX to one condition under an operator-sourced
 ruling relayed through the supervisor session. BB threads on OpenAI models and
@@ -333,14 +345,17 @@ do not duplicate its registration and monitor setup by hand. A worker with no
 eligible project profile supplies its profile and runtime home explicitly on that
 first start; later starts restore the recorded profile.
 
-**Genuinely operator-owned**, and worth stopping for: credentials and account
-settings, legal or financial commitments, destructive actions outside normal
-recovery, and product decisions for which the workers have no stated authority.
-Routine merges, releases, issue closure, and bounded risk acceptance are worker
-work when the objective gates and standing project policy permit them. The lane
-owner and release-gate worker must discuss material trade-offs, record the
-decision and preserve any follow-up. Escalate to the operator only when those
-workers cannot reach or execute a safe decision without operator-only input.
+**Genuinely operator-owned**, and worth stopping for: **credentials and
+accounts, real spend, legal or financial commitments, product direction, and
+destructive-irreversible actions**. The singleton supervisor decides on the
+operator's behalf everywhere outside that set; workers accept those decisions
+as authority instead of blocking on a separate operator response. Routine
+merges, releases, issue closure, and bounded risk acceptance are worker work
+when the objective gates and standing project policy permit them. The lane owner
+and release-gate worker must discuss material trade-offs, record the decision
+and preserve any follow-up. Escalate to the supervisor when those workers cannot
+reach or execute a safe decision; the supervisor escalates only the operator-only
+set above.
 
 The test is not "is this tedious" or "did they mention it" — it is whether you could do
 it and check that it worked. If you could, it is yours.

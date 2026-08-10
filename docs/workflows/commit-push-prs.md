@@ -147,8 +147,10 @@ The classification is auditable: it names the lane-contract clause or
 pre-existing/broadening boundary relied on, and a deferred finding that was in
 fact contract-violating is a gate violation attributable to the classifier.
 The lane owner and release-gate worker may accept a known, bounded risk by
-recording it and preserving the follow-up. Escalate only when they cannot reach
-or execute a safe decision without operator-only input.
+recording it and preserving the follow-up. Escalate to the supervisor only when
+they cannot reach or execute a safe decision. The supervisor decides unless the
+canonical operator-only boundary in
+[`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies.
 
 Apply a convergence circuit breaker per finding family:
 
@@ -191,9 +193,10 @@ Hard cycle cap, independent of family counting:
   bounded risk with a follow-up issue and merge that exact head; or descope,
   split, use `backend-first`, or close the lane. `merge-with-followups` remains the default for
   findings classified deferrable before the cap; it is never a silent default
-  for a contract violation. A durable operator escalation packet remains the escape
-  only when the lane owner and release-gate worker cannot resolve the trade-off
-  without operator-only input. Under per-finding defer-first
+  for a contract violation. A durable escalation packet to the supervisor remains
+  the escape only when the lane owner and release-gate worker cannot resolve the
+  trade-off. The supervisor decides unless the canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies. Under per-finding defer-first
   most findings never reach the cap: only contract-violating findings are
   still open here, so a cap disposition is the rare case where the lane
   contract itself could not be satisfied — which usually means the authority
@@ -216,9 +219,10 @@ Hard cycle cap, independent of family counting:
   lane owner and release-gate worker to decide, for the exact current SHA,
   merge-with-followups or close.** Any later push invalidates that decision.
   This budget ends review-fix loops; it is not a connector terminal signal and
-  waives none of the exact-head merge gates. Escalate to the operator only when
-  the workers cannot reach or execute either safe outcome without operator-only
-  input.
+  waives none of the exact-head merge gates. Escalate to the supervisor only when
+  the workers cannot reach or execute either safe outcome. The supervisor decides
+  unless the canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies.
 
 When a project supports structured review notes, the disposition may be
 recorded as the optional line `Convergence-disposition: <value>` and must use
@@ -896,7 +900,9 @@ failure, it must classify that diff before starting the next lane:
 
 - own PR
 - explicitly bundled into the current task PR
-- intentionally abandoned or kept local with operator approval
+- intentionally abandoned or kept local with supervisor approval, subject to the
+  canonical operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup)
 
 Run `git status --short --branch --untracked-files=all` in each touched repo,
 commit/push/open the PR for changes that should persist, and record any

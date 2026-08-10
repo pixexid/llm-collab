@@ -166,6 +166,22 @@ re-derive it.
   undecidability and its maintenance trigger produced an honest deferral;
   pretending the sweep had a completion criterion produced an open-ended lane.
   Related GH-751.
+- **Never gate a connector verdict on `commit_id` alone.** At the exact head,
+  evidence that the pass produced a result can be a review with a non-empty
+  body, a top-level connector comment naming that head, a 👍 reaction, or new
+  inline threads. The
+  [`PR Review Wait Gate`](commit-push-prs.md#pr-review-wait-gate) is canonical
+  for which signals are terminal and under what conditions; this list only
+  prevents `commit_id`-only gating. An empty-bodied review means the pass is
+  starting, not that a verdict has arrived; the connector can post the
+  body-bearing review up to six minutes later. On one head, a review at the exact head, zero new threads, a green full
+  suite, and written dispositions for every prior finding appeared to satisfy
+  every merge condition; the real review arrived six minutes later carrying a
+  P1. Two sibling fields are equally unsafe as finding records: a thread's
+  `commit_id` re-anchors to the newest head and says where the thread points
+  now, not which head raised it, while its `line` can become `null` when a fix
+  restructures the code beneath it. **The written disposition must carry the
+  finding, never lean on where the thread sits.**
 - **Audit all four connector artifact classes:** review threads, review bodies,
   issue/PR comments, and reactions. A finding can live only in a review body,
   where thread enumeration cannot see it; a clean pass can be reaction-only,
@@ -303,14 +319,16 @@ permission to guess.
 ## Supervisor arrangement
 
 The singleton supervisor preserves continuity across projects and orchestrator
-generations and routes operator-owned decisions; each per-project orchestrator
-owns that project's technical execution and verification.
+generations and decides on the operator's behalf wherever doing so keeps the
+process unblocked; each per-project orchestrator owns that project's technical
+execution and verification.
 
-- Route business priority, irreversible choices, credentials/account changes,
-  and product decisions without stated authority to the supervisor. Keep
-  technical scope, implementation choices, bounded recovery, and the normal
-  review/release flow with the orchestrator. The broader escalation boundary is
-  canonical in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup).
+- Route decisions beyond the per-project orchestrator's stated authority to the
+  supervisor. The supervisor decides unless the canonical operator-only boundary
+  in [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies; do not
+  carry a `pending operator decision` state for anything else. Keep technical
+  scope, implementation choices, bounded recovery, and the normal review/release
+  flow with the orchestrator.
 - Spend expensive-model tokens on orchestration, independent review, and
   judgment. Delegate bounded work that a cheaper eligible worker can perform;
   evaluation candidates use their own execution tokens.

@@ -1403,6 +1403,9 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v22",
+            "singleton supervisor the decision-maker on the operator's behalf",
+            "cached v21 worker can refuse a valid supervisor decision",
             "Contract v21",
             "operator-sourced ruling",
             "demotes AX to one condition",
@@ -1493,6 +1496,18 @@ class ReviewLoopCapContractTest(unittest.TestCase):
         # The summary is only safe to keep short because it names where the full
         # rules live. Without this the section becomes a lossy paraphrase.
         self.assertIn("commit-push-prs.md", recent_entry)
+
+        operator_boundary = contract_section(
+            text, "## Workers own their own setup", "## BB worker surface"
+        )
+        for phrase in (
+            "**Genuinely operator-owned**",
+            "credentials and accounts, real spend, legal or financial commitments, "
+            "product direction, and destructive-irreversible actions",
+            "singleton supervisor decides on the operator's behalf everywhere "
+            "outside that set",
+        ):
+            self.assertIn(normalized(phrase), operator_boundary)
 
         workflow = normalized(WORKFLOW_DOC.read_text(encoding="utf-8"))
         for phrase in (

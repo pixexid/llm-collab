@@ -125,9 +125,11 @@ remove it and rely on exact-session dispatch plus the mailbox-drain self-heal.
 - If Claude is stale, idle with no durable progress, or repeatedly erroring, its
   exact-session watcher is not picking up. Preserve the durable packet and
   repair or reinstall that watcher from an attended worker, then prove pickup
-  with one disposable exact-session packet. Escalate to the operator only when
-  the watcher cannot be repaired without credentials, an irreversible action,
-  or a scope decision.
+  with one disposable exact-session packet. Escalate to the supervisor only
+  when the watcher cannot be repaired without credentials, an irreversible
+  action, or a scope decision. The supervisor decides unless the canonical
+  operator-only boundary in
+  [`AGENTS.md`](../../AGENTS.md#workers-own-their-own-setup) applies.
 
 ## Activate A Session
 
