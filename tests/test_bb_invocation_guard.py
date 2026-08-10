@@ -15,9 +15,21 @@ pattern, so the guard stayed green with a bare invocation present):
 - Python files are parsed with ``ast`` and walked. Two node shapes flag: a
   list/tuple literal whose first element is the constant string ``bb`` (an
   argv being constructed, whether assigned or passed inline, on one line or
-  many), and ANY call whose first argument is a bb literal — bare ``"bb"``
-  or a shell-string command starting with ``"bb "`` — regardless of the
-  callee's name. The call check is name-agnostic by design (PR #735 review):
+  many), and ANY call supplied a bb literal — bare ``"bb"`` or a
+  shell-string command starting with ``"bb "`` — either as its first
+  positional argument OR under one of the spawn-command keywords in
+  ``SPAWN_COMMAND_KEYWORDS``, regardless of the callee's name. Positional
+  and keyword supply are the same argument in two forms
+  (``subprocess.run(args="bb ...", shell=True)`` spawns identically to
+  the positional form), so one rule with one exemption pair covers both;
+  a second parallel matching path would only duplicate the rule. The
+  keyword set is the exhaustive enumeration of CPython's spawn-command
+  parameter names (verified against 3.11, see the constant below) rather
+  than every keyword of any call: every keyword is prose-shaped too
+  (``add_argument(help="bb ...")``, ``detail="bb send ..."``), and
+  flagging prose under a non-spawn keyword would not distinguish a
+  violation from a message, which is what the exemption sets exist to do.
+  The call check itself is name-agnostic by design (PR #735 review):
   an enumerated list of spawn APIs fails open on every API nobody listed —
   ``asyncio.create_subprocess_exec`` passed under exactly such a list — so
   unknown names fail CLOSED instead: a spawn helper nobody anticipated is
@@ -139,26 +151,59 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
+# Keyword names under which CPython's spawn APIs accept their command
+# argument — the exhaustive set, verified against the 3.11 stdlib by
+# signature inspection and keyword-binding smoke tests:
+#   args    subprocess.run/Popen/call/check_call/check_output
+#   cmd     os.popen, subprocess.getoutput/getstatusoutput,
+#           asyncio.create_subprocess_shell
+#   command os.system (accepts the keyword despite a positional-only-looking
+#           signature — smoke-tested)
+#   argv    pty.spawn
+#   program asyncio.create_subprocess_exec
+#   file    os.spawnl/spawnle/spawnlp/spawnv/spawnve/spawnvp family
+# Verified NOT to bind a command by keyword: os.posix_spawn (path, argv and
+# env are positional-only). These are supply forms of the same first
+# argument the positional check inspects, so the same literal-matching rule
+# and the same two exemption sets apply. A keyword nobody can pass a
+# command to is not coverage; a keyword CPython has not introduced cannot
+# be supplied — if one ever is, add it here deliberately, with a comment.
+SPAWN_COMMAND_KEYWORDS = frozenset({"args", "cmd", "command", "argv", "program", "file"})
+
+
+def _command_candidates(node: ast.Call) -> list[ast.AST]:
+    """Argument nodes a command literal could be supplied through.
+
+    The first positional argument and every spawn-command keyword value
+    are the same argument in different supply forms — ``run("bb x")`` and
+    ``run(args="bb x")`` spawn identically — so both are inspected by one
+    rule with one exemption pair.
+    """
+    candidates = list(node.args[:1])
+    candidates.extend(kw.value for kw in node.keywords if kw.arg in SPAWN_COMMAND_KEYWORDS)
+    return candidates
+
+
 def _python_hits(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     hits: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.List, ast.Tuple)) and node.elts and _is_bb_constant(node.elts[0]):
             hits.append(f"{node.lineno}: argv literal starting with the bb binary")
-        elif isinstance(node, ast.Call) and node.args:
-            first = node.args[0]
-            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                # A List/Tuple first argument is flagged at the List node
-                # itself; anything else (a Name, a call) is the documented
-                # indirection limit, not a literal.
-                continue
-            name = _call_name(node)
-            if first.value == "bb":
-                if name not in BENIGN_KEY_READ_NAMES:
-                    hits.append(f"{node.lineno}: bb literal as the first argument of a call")
-            elif first.value.startswith(("bb ", "bb\t")):
-                if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
-                    hits.append(f"{node.lineno}: bb command string as the first argument of a call")
+        elif isinstance(node, ast.Call):
+            for first in _command_candidates(node):
+                if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                    # A List/Tuple argument is flagged at the List node
+                    # itself; anything else (a Name, a call) is the documented
+                    # indirection limit, not a literal.
+                    continue
+                name = _call_name(node)
+                if first.value == "bb":
+                    if name not in BENIGN_KEY_READ_NAMES:
+                        hits.append(f"{node.lineno}: bb literal supplied to a call")
+                elif first.value.startswith(("bb ", "bb\t")):
+                    if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
+                        hits.append(f"{node.lineno}: bb command string supplied to a call")
     return hits
 
 
