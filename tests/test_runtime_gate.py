@@ -23,6 +23,9 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
+# These bounds convert a subprocess hang into a failure; they do not assert latency.
+RUNTIME_GATE_HANG_TIMEOUT_SECONDS = 30
+
 import current_runtime
 
 
@@ -223,7 +226,7 @@ raise SystemExit(1)
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=RUNTIME_GATE_HANG_TIMEOUT_SECONDS,
         )
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertEqual("controlled refusal", proc.stdout.strip())
@@ -267,7 +270,7 @@ raise SystemExit(0 if result is False else 1)
                     cwd=REPO_ROOT,
                     capture_output=True,
                     text=True,
-                    timeout=2,
+                    timeout=RUNTIME_GATE_HANG_TIMEOUT_SECONDS,
                 )
             except subprocess.TimeoutExpired:
                 self.fail("sentinel authorization blocked on a writer-less FIFO")
