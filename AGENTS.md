@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 21 -->
+<!-- CONTRACT_VERSION: 22 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,13 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v22 (2026-08-10) excludes parked issues and epics from queue selection
+and permits taking a parked issue only when its recorded trigger fires. This
+changes which lanes a worker may take: a cached v21 worker would keep selecting
+queue entries that are now prohibited. The canonical state-label, trigger, and
+review-cadence rules live in
+[`Canonical ordered queue`](docs/workflows/task-intake-and-delegation.md#canonical-ordered-queue).
 
 Contract v21 (2026-08-10) demotes AX to one condition under an operator-sourced
 ruling relayed through the supervisor session. BB threads on OpenAI models and
@@ -357,8 +364,11 @@ session, receipt-bearing participant, or canonical-bus member. The orchestrator
 reads its results through BB, authors any durable packet under its own
 registered identity, and remains the integration point. A BB worker never
 supplies another agent as `deliver.py --from`; that records the agent as the
-author, not a relay. First-class relay provenance remains prospective in
-[GH-604](https://github.com/pixexid/llm-collab/issues/604).
+author, not a relay. The decision recorded in
+[GH-604](https://github.com/pixexid/llm-collab/issues/604) rejects a first-class
+relay-provenance surface as actively harmful because a second authorship concept
+risks making identity and deduplication ambiguous. Revisit that decision only if
+a concrete downstream decision consumes producer identity.
 
 **Operator-sourced standing routing rule:** Focus is BB until the Codex app
 reaches parity with the Claude app and BB; use the Codex app only for

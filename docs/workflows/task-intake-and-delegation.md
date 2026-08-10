@@ -136,6 +136,25 @@ remaining issue-sized lanes.
 - do not hand-edit queue state to clear blockers or materialize lanes unless repairing a reconcile failure with an explicit note
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
+### Issue state labels
+
+- Every open issue carries **exactly one** state label: `state:active`,
+  `state:parked`, or `state:blocked`. `epic` is an orthogonal label, not a state.
+- Queue drains and next-lane selection **exclude** `state:parked` and `epic`.
+  An epic is a container; taking one as a lane is a scoping error.
+- A `state:parked` issue may be taken only when **its own recorded trigger
+  fires**. A parked issue without a recorded trigger is a defect in the parking,
+  not a free lane: record the trigger or change the state.
+- Run a close-or-recommit sweep over everything parked at succession, or
+  monthly, whichever comes first. Bias toward closing: an issue nobody can
+  justify restarting is better closed with its reasoning preserved than carried
+  as permanent furniture.
+
+The failure this prevents is **"the trigger fired but nobody re-examined."**
+Parking without a trigger and parking without a review cadence both produce an
+issue that is neither being worked nor being decided, an outcome
+indistinguishable from having forgotten it.
+
 ## Autonomous queue loop
 
 When the operator gives standing instructions to keep processing tasks, the
