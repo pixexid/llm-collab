@@ -152,6 +152,23 @@ re-derive it.
   named for a bound still passes with `read(-1)` because it asserts only that
   some read occurred. Quality of reasoning and hollowness of a specific test are
   independent.
+- **Record fixtures from the live system rather than authoring them, and prefer
+  recordings that contain what nobody would author.** A validator and its
+  hand-authored fixtures agreed that a timestamp was text while the live system
+  returned an integer, so every real-data cycle failed; review and a large test
+  suite missed it because nothing sampled live output. The version fixture under
+  `tests/fixtures/bb/` was re-recorded from the live CLI rather than edited by
+  hand; the replacement recording contains 164 rows, including five
+  error-status rows from the provider quota that killed two workers that day;
+  those are states an author would not have supplied.
+- **Treat queued specs as caches, including task lists and scratchpad plans.** A
+  decision that changes where something lives, who owns it, or what a term means
+  invalidates queued work that assumes the old world, and nothing marks it
+  stale. A follow-up instruction was queued, then a later decision moved its
+  artifact; the stale instruction was dispatched
+  into a contract-versioned document until review caught the project-boundary
+  violation. Reread queued items mentioning the affected artifact when such a
+  decision lands, and ask what changed before dispatching work that has waited.
 - **Bind verification to its checkout.** Print `pwd` and
   `git rev-parse HEAD` inside the suite directory, in the same shell invocation
   as the test run.
