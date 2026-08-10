@@ -26,6 +26,7 @@ SECOND_PROJECT = "nuvyr"
 UNREGISTERED_PROJECT = "not-registered"
 
 import _bounded_io  # noqa: E402
+import _helpers  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import session_bootstrap  # noqa: E402
 import session_gate  # noqa: E402
@@ -535,6 +536,7 @@ class SessionGateTest(unittest.TestCase):
             f"({UNREGISTERED_PROJECT!r} is not registered in projects.json)\n",
             output.getvalue(),
         )
+        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
         markers.assert_not_called()
 
     def test_absent_project_registry_skips_without_reading_markers(self) -> None:
@@ -555,6 +557,38 @@ class SessionGateTest(unittest.TestCase):
             "resolved from this hook's checkout root)\n",
             output.getvalue(),
             "registry absence must not be reported as an unregistered project",
+        )
+        self.assertNotIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        markers.assert_not_called()
+
+    def test_unresolvable_project_registry_is_unknown_and_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "malformed-registry.json"
+            # Authored malformed fixture: a healthy registry cannot record this
+            # parse-refusal state, but the bounded reader must fail closed here.
+            registry.write_text("{\n", encoding="utf-8")
+            with mock.patch.object(
+                session_gate, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "PROJECTS_FILE", registry
+            ), mock.patch.object(
+                _helpers, "_projects_cache", None
+            ), mock.patch.object(session_gate, "check_markers") as markers:
+                output = io.StringIO()
+                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(output):
+                    code = session_gate.main(["--project", LLM_COLLAB_PROJECT])
+        self.assertEqual(0, code)
+        self.assertIn(
+            "[session-gate] project registry: UNKNOWN — registry present but "
+            "unresolvable; project identity could not be determined",
+            output.getvalue(),
+            "an unresolvable registry must report incomplete rather than skipped",
+        )
+        self.assertIn("SESSION SETUP INCOMPLETE", output.getvalue())
+        self.assertNotIn(
+            "checks skipped",
+            output.getvalue(),
+            "an unresolvable registry must not be reported as a skip",
         )
         markers.assert_not_called()
 

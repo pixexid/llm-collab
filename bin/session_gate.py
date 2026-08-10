@@ -67,15 +67,24 @@ def resolve_project_id(argv: list[str] | None = None) -> tuple[str | None, str |
     project_id = args[1]
     try:
         registered = get_project(project_id)
-    except BaseException:
-        registered = None
+    # The bounded registry reader fails closed with SystemExit. Preserve that
+    # refusal as UNKNOWN; ordinary unexpected resolution errors are the same
+    # incomplete state, while KeyboardInterrupt is intentionally not caught.
+    except FileNotFoundError:
+        return project_id, "registry_not_found"
+    except SystemExit:
+        return project_id, "registry_unresolvable"
+    except Exception:
+        return project_id, "registry_unresolvable"
     if registered is None:
         try:
-            registry_present = PROJECTS_FILE.is_file()
-        except BaseException:
-            registry_present = False
-        if not registry_present:
+            PROJECTS_FILE.stat()
+        except FileNotFoundError:
             return project_id, "registry_not_found"
+        except OSError:
+            return project_id, "registry_unresolvable"
+        except Exception:
+            return project_id, "registry_unresolvable"
         return project_id, "unregistered"
     return project_id, None
 
@@ -267,6 +276,15 @@ def main(argv: list[str] | None = None) -> int:
             f"(no projects.json at {PROJECTS_FILE.resolve()}; "
             "resolved from this hook's checkout root)"
         )
+        return 0
+    if skip_reason == "registry_unresolvable":
+        print(
+            "[session-gate] project registry: UNKNOWN — registry present but "
+            "unresolvable; project identity could not be determined"
+        )
+        print("━" * 60)
+        print("⚠️  SESSION SETUP INCOMPLETE — see the ✗/? lines above and the pointers")
+        print("━" * 60)
         return 0
     print("[session-gate] session-setup checks (results and pointers only):")
     # I5: coverage must be observable. A reader in ANY checkout must be able to
