@@ -15,8 +15,16 @@ pattern, so the guard stayed green with a bare invocation present):
 - Python files are parsed with ``ast`` and walked. Two node shapes flag: a
   list/tuple literal whose first element is the constant string ``bb`` (an
   argv being constructed, whether assigned or passed inline, on one line or
-  many), and a call whose first positional argument is the constant string
-  ``bb`` (``spawn("bb", ...)``, ``which("bb")`` — the PATH-fallback probe).
+  many), and ANY call whose first argument is a bb literal — bare ``"bb"``
+  or a shell-string command starting with ``"bb "`` — regardless of the
+  callee's name. The call check is name-agnostic by design (PR #735 review):
+  an enumerated list of spawn APIs fails open on every API nobody listed —
+  ``asyncio.create_subprocess_exec`` passed under exactly such a list — so
+  unknown names fail CLOSED instead: a spawn helper nobody anticipated is
+  caught by default, and a genuinely benign new shape fails loud until
+  someone exempts it deliberately, in a diff, with a comment. The exemptions
+  are named literals below: config-key reads (``get``) and prose constructors
+  whose first argument is a message, not a command.
   AST matching needs no subscript lookbehind (``entry["bb"]`` is a Subscript,
   never a List) and cannot be fooled by comments, docstrings, or formatting.
   An unparseable production file fails the guard rather than being skipped.
@@ -66,17 +74,18 @@ ROOT = Path(__file__).resolve().parent.parent
 PY_DIRS = ("bin", "llm_collab", "scripts")
 TS_DIRS = ("bb-plugins", "pi-extensions")
 
+# bb literal as the first argument of ANY call, across line breaks — the
+# same fail-closed inversion as the Python check: the callee name is captured
+# so the config-key read (get) can be exempted deliberately, and every other
+# name, anticipated or not, is flagged.
+TS_CALL_PATTERN = re.compile(r"(?P<callee>[\w$]+(?:\.[\w$]+)*)\(\s*[\"']bb[\"'\s,\)]")
+
 TS_PATTERNS = (
     # argv array literal starting with the bb binary, across line breaks.
     # The lookbehind excludes subscripts (entry["bb"]), which are config
     # reads, not invocations.
     re.compile(r"(?<![\w\)\]\"'`])\[\s*[\"']bb[\"'\s,\]]"),
-    # bb literal as the command argument of a process-spawning call.
-    re.compile(
-        r"(?:Popen|run|exec|spawn|check_output|check_call|call)\(\s*[\"']bb[\"'\s,\)]"
-    ),
-    # A PATH lookup for bb: how a silent PATH fallback gets constructed.
-    re.compile(r"which\(\s*[\"']bb[\"']"),
+    TS_CALL_PATTERN,
 )
 
 # Shell files invoke a command as a bare word, so they take the shared text
@@ -91,13 +100,29 @@ SHELL_PATTERNS = TS_PATTERNS + (
 )
 
 
-# Function names whose first argument is a command: process spawns and PATH
-# lookups. ``get``/subscript-style config reads (``project.get("bb")``) are
-# deliberately NOT in this set — they read the registry, they do not invoke.
-SPAWN_NAMES = frozenset({
-    "Popen", "run", "exec", "execv", "execve", "execl", "execlp", "execvp",
-    "spawn", "spawnl", "spawnlp", "system", "popen", "check_output",
-    "check_call", "call", "which",
+# Exemptions to the name-agnostic call check — each a named literal with its
+# reason. Anything taking a bb literal as its first argument under any other
+# name is flagged.
+
+# ``get`` reads a registry KEY named "bb" (``project.get("bb")``); it never
+# invokes a command. (8 such reads across bin/, llm_collab/, scripts/ when
+# this inversion landed.)
+BENIGN_KEY_READ_NAMES = frozenset({"get"})
+
+# Message/label constructors whose first argument is PROSE that happens to
+# start with "bb " ("bb session is not active", "bb thread row ...", the
+# hook's "bb version" label) — not a shell-string command. The string-command
+# form (``os.system("bb thread list")``) stays caught under every other name,
+# known or not. (27 such call sites when this inversion landed; every one
+# verified prose.)
+PROSE_FIRST_ARG_NAMES = frozenset({
+    "ValueError",
+    "RuntimeError",
+    "ProbeError",
+    "BbContinuationRefused",
+    "CanonicalIntegrityError",
+    "SessionLifecycleError",
+    "_line",
 })
 
 
@@ -105,12 +130,13 @@ def _is_bb_constant(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value == "bb"
 
 
-def _is_bb_command_text(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and (node.value == "bb" or node.value.startswith(("bb ", "bb\t")))
-    )
+def _call_name(node: ast.Call) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
 
 
 def _python_hits(path: Path) -> list[str]:
@@ -119,13 +145,20 @@ def _python_hits(path: Path) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.List, ast.Tuple)) and node.elts and _is_bb_constant(node.elts[0]):
             hits.append(f"{node.lineno}: argv literal starting with the bb binary")
-        elif isinstance(node, ast.Call) and node.args and _is_bb_command_text(node.args[0]):
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else (
-                func.id if isinstance(func, ast.Name) else None
-            )
-            if name in SPAWN_NAMES:
-                hits.append(f"{node.lineno}: bb literal as the command argument of a call")
+        elif isinstance(node, ast.Call) and node.args:
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                # A List/Tuple first argument is flagged at the List node
+                # itself; anything else (a Name, a call) is the documented
+                # indirection limit, not a literal.
+                continue
+            name = _call_name(node)
+            if first.value == "bb":
+                if name not in BENIGN_KEY_READ_NAMES:
+                    hits.append(f"{node.lineno}: bb literal as the first argument of a call")
+            elif first.value.startswith(("bb ", "bb\t")):
+                if name not in PROSE_FIRST_ARG_NAMES and name not in BENIGN_KEY_READ_NAMES:
+                    hits.append(f"{node.lineno}: bb command string as the first argument of a call")
     return hits
 
 
@@ -134,6 +167,12 @@ def _text_hits(path: Path, patterns) -> list[str]:
     hits: list[str] = []
     for pattern in patterns:
         for match in pattern.finditer(text):
+            # The fail-closed call pattern captures its callee so the one
+            # benign shape — a config-KEY read, get("bb") — can be exempted
+            # deliberately; every other callee name flags.
+            callee = match.groupdict().get("callee")
+            if callee is not None and callee.rsplit(".", 1)[-1] == "get":
+                continue
             lineno = text.count("\n", 0, match.start()) + 1
             hits.append(f"{lineno}: {match.group(0)!r}")
     return hits
