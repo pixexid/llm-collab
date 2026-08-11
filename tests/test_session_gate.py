@@ -348,6 +348,23 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         self.assertEqual("covered", verdict["reason"])
         self.assertTrue(verdict["acceptable"])
 
+    def test_process_probe_requests_unlimited_ps_output_width(self) -> None:
+        """Prevent platform-conditional COLUMNS truncation of ps command output."""
+        runner = mock.Mock(
+            return_value=mock.Mock(exit_code=0, stdout="recorded argv marker")
+        )
+        with mock.patch.object(
+            _watcher_liveness, "subprocess_transport", return_value=runner
+        ):
+            result = _watcher_liveness.probe_process_liveness(
+                os.getpid(), "recorded argv marker"
+            )
+        runner.assert_called_once_with(
+            ("-ww", "-p", str(os.getpid()), "-o", "command="),
+            _watcher_liveness.LIVENESS_PROBE_TIMEOUT_SECONDS,
+        )
+        self.assertEqual((True, None), result)
+
     def test_live_recycled_pid_with_wrong_argv_marker_is_owner_gone(self) -> None:
         process, _marker = self._live_watcher_process()
         try:

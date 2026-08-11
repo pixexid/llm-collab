@@ -200,7 +200,7 @@ def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str
         result = subprocess_transport(
             ("ps",), max_response_chars=LIVENESS_PROBE_MAX_RESPONSE_CHARS
         )(
-            ("-p", str(pid), "-o", "command="),
+            ("-ww", "-p", str(pid), "-o", "command="),
             LIVENESS_PROBE_TIMEOUT_SECONDS,
         )
         if result.exit_code != 0:
