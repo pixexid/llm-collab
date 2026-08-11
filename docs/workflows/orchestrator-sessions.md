@@ -24,6 +24,9 @@ limits, or PR gates. Use
 [`bb-worker-profiles.md`](bb-worker-profiles.md),
 [`task-intake-and-delegation.md`](task-intake-and-delegation.md), and
 [`commit-push-prs.md`](commit-push-prs.md) for those procedures.
+Manual promotion of an orchestrator role into a BB thread, including the frozen
+spawn brief, is owned by
+[`Manual BB-Native Orchestrator Cutover`](bb-native-cutover-runbook.md).
 
 ## Orchestrator topology
 

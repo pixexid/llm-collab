@@ -30,10 +30,14 @@ Recommended read order:
    orchestrator-managed BB worker threads without overstating bus integration
 8. `bb-worker-profiles.md` — Phase 2 BB model routing by measured failure mode;
    prospective analysis-only policy and the current hard-coded bootstrap gap
-9. `task-intake-and-delegation.md`
-10. `review-and-handoff.md`
-11. `isolated-worktrees.md`
-12. `commit-push-prs.md`
-13. `github-projects.md`
-14. `pm2-log-rotation.md` — canonical archive-before-install, configuration,
+9. `orchestrator-sessions.md` — watcher coverage, succession, supervisor
+   routing, model routing, and bb-update operation for orchestrator sessions
+10. `bb-native-cutover-runbook.md` — manual BB-native orchestrator promotion
+    and the frozen role-thread spawn brief
+11. `task-intake-and-delegation.md`
+12. `review-and-handoff.md`
+13. `isolated-worktrees.md`
+14. `commit-push-prs.md`
+15. `github-projects.md`
+16. `pm2-log-rotation.md` — canonical archive-before-install, configuration,
     retention, and two-store verification procedure for optional PM2 logging

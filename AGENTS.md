@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 27 -->
+<!-- CONTRACT_VERSION: 28 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,20 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v28 (2026-08-11) adds the manual BB-native orchestrator cutover
+runbook to Required Reading and freezes the role-thread brief. An orchestrator
+must wait in-turn while it owns live workers or startable queue work, delegate
+code, documentation, and fixtures through `bin/bb_spawn.py`, use both writing
+lanes when two items pass the startable/non-overlap gates, and may write its own
+project handoff and role-generation state while never writing another project's
+state, repositories, Tasks, or queues. A cached v27 worker can fail to do those
+newly required actions, keep authoring delegated work in-thread, or keep
+trusting the overbroad belief that project isolation forbids its own succession
+records, so all three cached-worker branches require the version signal.
+Watcher tells remain an approved implementation slice until their code merges;
+in-turn waiting is the safe path with or without them. Related GH-786 and
+GH-789.
 
 Contract v27 (2026-08-11) removes the mandatory leading-positional watcher
 spelling. Watcher liveness now matches argument order independently while
@@ -386,6 +400,8 @@ Before changing shared tooling or operating a project lane, read:
   thread end to end
 - `docs/workflows/orchestrator-sessions.md` — watcher, succession, supervisor,
   model-routing, and bb-update protocol for orchestrator sessions
+- `docs/workflows/bb-native-cutover-runbook.md` — manual BB-native role cutover
+  and the frozen orchestrator role-thread brief
 - `docs/workflows/task-intake-and-delegation.md`
 - `docs/workflows/bb-workers.md` — required before spawning or driving BB workers
 - `## Requesting Code Review` in this file — it governs every repository a lane
