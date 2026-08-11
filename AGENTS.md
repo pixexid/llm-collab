@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 23 -->
+<!-- CONTRACT_VERSION: 24 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,27 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v24 (2026-08-11) deletes four verification commands from
+[`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md) that were
+proven to report the wrong answer, and records those clauses as
+`IMPLEMENTATION GAP` instead. Two were measured wrong against real data: the
+evaluation-log check identified rows by a truthy `thread_id` while a fifth of
+the live artifact is keyed by `lane` only, so correctly recorded historical rows
+would fail permanently after the next bb upgrade; and the version probe captured
+subprocess output unbounded against a deliberately not-yet-qualified CLI.
+
+This changes what a worker may execute. A cached v23 session holds the previous
+text, would keep running those commands, and would act on output now known to be
+false — the same shape as v21, where a cached worker kept running a printed
+command the ruling had already retired. The version signal is what makes the
+deletion visible to a session that will never re-read the file otherwise.
+
+The same change tightens `ENFORCED`: an alert reports a violation while leaving
+it possible, so alert-only is a check and not a control. The one bb-update
+clause that cited alert-only evidence now names the actual refusal
+(`bb_version_mismatch` on the spawn path). Related GH-771.
+
 
 Contract v23 (2026-08-11) enforces the GitHub issue-state model at both queue
 reconciliation and exact-issue task activation. The non-removable exclusion
