@@ -35,6 +35,7 @@ from _activation_lease import runtime_id_from_env
 from _bounded_io import UnreadableFile, read_regular_file_prefix
 from _helpers import (
     InboxScanLimitExceeded,
+    MAX_MESSAGE_SCAN_ENTRIES,
     ROOT,
     agent_ids,
     agent_identity_path,
@@ -727,7 +728,10 @@ def main():
 
     # ── 2. Inbox ──
     try:
-        messages = get_unread_messages(args.agent, limit=args.limit)
+        scan_limit = (
+            args.limit + 1 if args.limit < MAX_MESSAGE_SCAN_ENTRIES else args.limit
+        )
+        messages = get_unread_messages(args.agent, limit=scan_limit)
     except InboxScanLimitExceeded as error:
         if args.json_output:
             print(
@@ -743,8 +747,13 @@ def main():
         else:
             print(f"[inbox] {error}", file=sys.stderr)
         sys.exit(75)
+    unread_truncated = len(messages) > args.limit
+    messages = messages[: args.limit]
     inbox_summary = {
         "unread_count": len(messages),
+        "unread_limit": args.limit,
+        "unread_truncated": unread_truncated,
+        "unread_scope": "all-projects",
         "messages": [
             {
                 "path": m["path"],
@@ -759,14 +768,20 @@ def main():
 
     if not args.json_output:
         if messages:
-            print(f"[inbox] {len(messages)} unread message(s):\n")
+            if unread_truncated:
+                print(
+                    f"[inbox] showing {len(messages)} all-projects unread message(s) "
+                    f"(--limit {args.limit}; more exist):\n"
+                )
+            else:
+                print(f"[inbox] {len(messages)} all-projects unread message(s):\n")
             for i, m in enumerate(messages, 1):
                 fm = m["frontmatter"]
                 proj = f"  [{fm['project_id']}]" if fm.get("project_id") else ""
                 print(f"  {i}. [{fm.get('priority','normal').upper()}]{proj} {fm.get('title','(no title)')} (from: {fm.get('from','?')})")
             print(f"\nRun: python bin/inbox.py --me {args.agent}   to read messages\n")
         else:
-            print(f"[inbox] No unread messages for {args.agent}.\n")
+            print(f"[inbox] No all-projects unread messages for {args.agent}.\n")
 
     # ── 2b. Queue summaries ──
     queue_info = queue_summaries()

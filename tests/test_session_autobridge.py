@@ -5590,7 +5590,10 @@ class SessionAutobridgeTest(unittest.TestCase):
             "[session] publish refused codex_app: heuristic_runtime_discovery_refused",
             human_result.stdout,
         )
-        self.assertIn("[inbox] No unread messages for codex.", human_result.stdout)
+        self.assertIn(
+            "[inbox] 0 unread message(s) for codex (project amiga).",
+            human_result.stdout,
+        )
 
     def test_discover_runtime_for_claude_project_session_jsonl(self):
         root = self.make_workspace()

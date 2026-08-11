@@ -439,7 +439,7 @@ class BindingDriftBannerTest(unittest.TestCase):
         self.assertIn("No self-service repair exists yet", text)
         self.assertNotIn("session_autobridge.py register", text)
         self.assertNotIn("--supersedes-session", text)
-        get_unread.assert_called_once_with("claude", limit=5)
+        get_unread.assert_called_once_with("claude", limit=6)
 
     def test_matching_runtime_is_silent(self) -> None:
         with (
@@ -585,6 +585,86 @@ class BindingDriftBannerTest(unittest.TestCase):
         self.assertFalse(report["canonical_binding_resolved"])
         resolve.assert_called_once_with(
             "llm-collab", "CHAT-DRIFT", "claude", "runtime-new", strict=True
+        )
+
+
+class BootstrapInboxPopulationTest(unittest.TestCase):
+    @staticmethod
+    def messages(count: int) -> list[dict]:
+        return [
+            {
+                "path": f"Chats/test/{index}.md",
+                "frontmatter": {
+                    "from": "codex",
+                    "title": f"Message {index}",
+                    "priority": "normal",
+                    "project_id": "amiga" if index % 2 else "nuvyr",
+                },
+            }
+            for index in range(count)
+        ]
+
+    def run_bootstrap(self, *, json_output: bool) -> tuple[str, object]:
+        argv = ["session_bootstrap.py", "--agent", "claude", "--no-watcher"]
+        if json_output:
+            argv.append("--json")
+        output = StringIO()
+        ax = SimpleNamespace(as_dict=lambda: {})
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(session_bootstrap, "agent_ids", return_value=["claude"]),
+            patch.object(
+                session_bootstrap,
+                "get_agent",
+                return_value={"id": "claude", "activation": {"watcher_enabled": False}},
+            ),
+            patch.object(
+                session_bootstrap,
+                "tooling_currency",
+                return_value={"state": "current", "head": "abc", "fetched": True},
+            ),
+            patch.object(session_bootstrap, "announce_tooling"),
+            patch.object(session_bootstrap, "dependency_report", return_value={}),
+            patch.object(session_bootstrap, "announce_dependencies"),
+            patch.object(session_bootstrap, "announce_contract"),
+            patch.object(
+                session_bootstrap,
+                "agent_identity_path",
+                return_value=Path("/definitely/missing/identity.md"),
+            ),
+            patch.object(session_bootstrap, "binding_drifts", return_value={"status": "clear"}),
+            patch.object(session_bootstrap, "announce_binding_drifts"),
+            patch.object(session_bootstrap, "probe_ax_trust", return_value=ax),
+            patch.object(session_bootstrap, "format_ax_status", return_value="[ax] skipped"),
+            patch.object(
+                session_bootstrap,
+                "get_unread_messages",
+                return_value=self.messages(6),
+            ) as get_unread,
+            patch.object(session_bootstrap, "queue_summaries", return_value=[]),
+            redirect_stdout(output),
+        ):
+            session_bootstrap.main()
+        return output.getvalue(), get_unread
+
+    def test_json_payload_names_capped_all_projects_population(self) -> None:
+        output, get_unread = self.run_bootstrap(json_output=True)
+
+        inbox = json.loads(output)["inbox"]
+        self.assertEqual(5, inbox["unread_count"])
+        self.assertEqual(5, inbox["unread_limit"])
+        self.assertTrue(inbox["unread_truncated"])
+        self.assertEqual("all-projects", inbox["unread_scope"])
+        self.assertEqual(5, len(inbox["messages"]))
+        get_unread.assert_called_once_with("claude", limit=6)
+
+    def test_human_output_names_capped_all_projects_population(self) -> None:
+        output, _ = self.run_bootstrap(json_output=False)
+
+        self.assertIn(
+            "[inbox] showing 5 all-projects unread message(s) "
+            "(--limit 5; more exist)",
+            output,
         )
 
 

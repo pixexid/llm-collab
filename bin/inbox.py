@@ -1076,19 +1076,36 @@ def main():
     )
     repo_scope_refused.extend(filtered_repo_scope)
 
+    ordinary_read = not exact_requested and not args.packet
+    total = len(messages)
+    applied_limit = args.limit if ordinary_read else None
+    truncated = False
+    scope_parts = [f"project {args.project}" if args.project else "all projects"]
+    if args.chat:
+        scope_parts.append(f"chat {args.chat}")
+    if args.repo_target:
+        scope_parts.append(f"repo {', '.join(args.repo_target)}")
+    ordinary_scope = ", ".join(scope_parts)
+
     if not messages:
         if args.json_output:
-            if not repo_scope_refused and published_runtime is None:
+            if ordinary_read:
+                payload = {
+                    "messages": [],
+                    "total": total,
+                    "limit": applied_limit,
+                    "truncated": truncated,
+                }
+            elif not repo_scope_refused and published_runtime is None:
                 print("[]")
                 return
-            payload = {"messages": []}
+            else:
+                payload = {"messages": []}
             if repo_scope_refused:
                 payload["repo_scope_refused"] = repo_scope_refused
-            if published_runtime is None:
-                print(json.dumps(payload, indent=2))
-            else:
+            if published_runtime is not None:
                 payload["published_runtime"] = published_runtime
-                print(json.dumps(payload, indent=2))
+            print(json.dumps(payload, indent=2))
         else:
             if published_runtime is not None:
                 if published_runtime.get("published") is False:
@@ -1104,7 +1121,15 @@ def main():
                         f"{published_runtime['session']['runtime']['session_id']} "
                         f"for {published_runtime['session']['session_id']}\n"
                     )
-            print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
+            if ordinary_read:
+                population = "message(s)" if args.show_all else "unread message(s)"
+                print(f"[inbox] 0 {population} for {args.me} ({ordinary_scope}).")
+            else:
+                print(
+                    f"[inbox] No "
+                    f"{'messages' if args.show_all else 'unread messages'} "
+                    f"for {args.me}."
+                )
             for refused in repo_scope_refused:
                 print(
                     f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
@@ -1134,15 +1159,31 @@ def main():
                     continue
             selected.append(message)
         messages = selected
+        # `truncated` means entries beyond what was shown existed. An examined
+        # activation packet refused while filling the cap is already surfaced in
+        # activation_refused, so it does not count. An unexamined trailing entry
+        # does count regardless of eventual eligibility: learning that eligibility
+        # would require gating it, which can claim an activation lease in consume mode.
+        truncated = total > len(messages) + len(refused_gates)
 
     # Only an all-refused scan (no valid packet anywhere to show or drain) keeps the
     # exit-75 failure; a mixed batch shows/drains the valid packets and exits 0.
     shown_paths = [m["path"] for m in messages if not m.get("read")]
     if refused_gates and not shown_paths:
         if args.json_output:
+            payload = {
+                "activation_refused": refused_gates,
+                "messages": messages,
+            }
+            if ordinary_read:
+                payload.update(
+                    total=total,
+                    limit=applied_limit,
+                    truncated=truncated,
+                )
             print(
                 json.dumps(
-                    {"activation_refused": refused_gates, "messages": messages},
+                    payload,
                     indent=2,
                     sort_keys=True,
                 )
@@ -1158,6 +1199,12 @@ def main():
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
+        if ordinary_read:
+            payload.update(
+                total=total,
+                limit=applied_limit,
+                truncated=truncated,
+            )
         if refused_gates:
             payload["activation_refused"] = refused_gates
         if repo_scope_refused:
@@ -1180,7 +1227,16 @@ def main():
                     f"{published_runtime['session']['runtime']['session_id']} "
                     f"for {published_runtime['session']['session_id']}\n"
                 )
-        print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
+        population = "message(s)" if args.show_all else "unread message(s)"
+        if ordinary_read and truncated:
+            print(
+                f"\n[inbox] showing {len(messages)} of {total} {population} for "
+                f"{args.me} ({ordinary_scope}, --limit {applied_limit})\n"
+            )
+        elif ordinary_read:
+            print(f"\n[inbox] {total} {population} for {args.me} ({ordinary_scope})\n")
+        else:
+            print(f"\n[inbox] {len(messages)} {population} for {args.me}\n")
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
         if refused_gates:

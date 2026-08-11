@@ -1182,6 +1182,76 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "bootstrap would report no unread messages while live packets wait",
         )
 
+    def test_ordinary_json_distinguishes_truncated_and_complete_populations(self) -> None:
+        for name in ("ONE", "TWO", "THREE"):
+            self.add_message(name, project_line="amiga")
+        self.add_message("OTHER", project_line="nuvyr")
+
+        partial_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2", "--json"
+        )
+        complete_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "3", "--json"
+        )
+
+        self.assertEqual(0, partial_result.returncode, partial_result.stderr)
+        self.assertEqual(0, complete_result.returncode, complete_result.stderr)
+        partial = json.loads(partial_result.stdout)
+        complete = json.loads(complete_result.stdout)
+        self.assertEqual(
+            {"total": 3, "limit": 2, "truncated": True},
+            {key: partial[key] for key in ("total", "limit", "truncated")},
+        )
+        self.assertEqual(2, len(partial["messages"]))
+        self.assertEqual(
+            {"total": 3, "limit": 3, "truncated": False},
+            {key: complete[key] for key in ("total", "limit", "truncated")},
+        )
+        self.assertEqual(complete["total"], len(complete["messages"]))
+        self.assertNotEqual(partial["truncated"], complete["truncated"])
+
+    def test_ordinary_text_names_scope_population_and_applied_cap(self) -> None:
+        for name in ("ONE", "TWO", "THREE"):
+            self.add_message(name, project_line="amiga")
+
+        partial = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2"
+        )
+        complete = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "3"
+        )
+
+        self.assertEqual(0, partial.returncode, partial.stderr)
+        self.assertIn(
+            "[inbox] showing 2 of 3 unread message(s) for codex "
+            "(project amiga, --limit 2)",
+            partial.stdout,
+        )
+        self.assertEqual(0, complete.returncode, complete.stderr)
+        self.assertIn(
+            "[inbox] 3 unread message(s) for codex (project amiga)",
+            complete.stdout,
+        )
+
+    def test_empty_ordinary_scope_reports_metadata_and_named_scope(self) -> None:
+        json_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2", "--json"
+        )
+        text_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2"
+        )
+
+        self.assertEqual(0, json_result.returncode, json_result.stderr)
+        self.assertEqual(
+            {"messages": [], "total": 0, "limit": 2, "truncated": False},
+            json.loads(json_result.stdout),
+        )
+        self.assertEqual(0, text_result.returncode, text_result.stderr)
+        self.assertIn(
+            "[inbox] 0 unread message(s) for codex (project amiga).",
+            text_result.stdout,
+        )
+
     def test_limited_unread_scan_refuses_oversized_index(self) -> None:
         paths = [
             f"Chats/scan/{index}.md"
@@ -1373,7 +1443,15 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([], json.loads(result.stdout))
+        self.assertEqual(
+            {
+                "messages": [],
+                "total": 0,
+                "limit": inbox_lib.MAX_MESSAGE_SCAN_ENTRIES,
+                "truncated": False,
+            },
+            json.loads(result.stdout),
+        )
         self.assertEqual(before, self.load_inbox())
 
     def test_all_scan_missing_inbox_index_is_empty_without_mutation(self) -> None:
@@ -1383,7 +1461,10 @@ class InboxMarkAllReadTest(unittest.TestCase):
         result = self.run_inbox("--all", "--json")
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([], json.loads(result.stdout))
+        self.assertEqual(
+            {"messages": [], "total": 0, "limit": 10, "truncated": False},
+            json.loads(result.stdout),
+        )
         self.assertFalse(inbox_path.exists())
 
     def test_bounded_packet_scan_refuses_over_cap_without_acknowledging(self) -> None:
@@ -1833,9 +1914,40 @@ class InboxMarkAllReadTest(unittest.TestCase):
             [refused],
             [entry["path"] for entry in payload.get("activation_refused", [])],
         )
+        self.assertEqual(2, payload["total"])
+        self.assertEqual(1, payload["limit"])
+        self.assertFalse(
+            payload["truncated"],
+            "a refused-and-skipped activation packet is not a cap cut",
+        )
         inbox = self.load_inbox()
         self.assertEqual([valid], inbox["read"])
         self.assertEqual([refused], inbox["unread"])
+
+    def test_unexamined_trailing_activation_counts_as_truncated(self) -> None:
+        valid = self.add_message("OK", project_line="amiga")
+        trailing = self.add_malformed_activation("BAD")
+
+        result = self.run_inbox(
+            "--project", "amiga", "--limit", "1", "--json"
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(
+            payload["truncated"],
+            "the unexamined trailing activation packet must make truncation visible",
+        )
+        self.assertEqual(2, payload["total"])
+        self.assertEqual(1, payload["limit"])
+        self.assertEqual(
+            [],
+            payload.get("activation_refused", []),
+            "the trailing activation packet was never examined, so no refusal may be reported",
+        )
+        inbox = self.load_inbox()
+        self.assertEqual([valid], inbox["read"])
+        self.assertEqual([trailing], inbox["unread"])
 
     def test_zero_limit_selects_and_consumes_nothing(self):
         # GH-502: --limit 0 must select nothing and consume nothing (matching the
