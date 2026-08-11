@@ -424,10 +424,15 @@ state.
 The exact pin is a safety control. Do not loosen it to make an unobserved bb
 release pass.
 
-1. **JUDGMENT** Stop new BB lane starts and **ENFORCED** compare the installed version with
+1. **JUDGMENT** Stop new BB lane starts, and compare the installed version with
    `PINNED_BB_VERSION`. If the probe itself fails, repair the probe before using
-   any quiet result; `orchestrator_watch.py heartbeat` and `session_gate.py`
-   refuse to treat a failed or mismatched probe as clean.
+   any quiet result. **ENFORCED** on the spawn path only: a mismatch refuses the
+   spawn as `bb_version_mismatch` (`REFUSAL_VERSION_MISMATCH` in
+   `llm_collab/bb_client.py`, reached through `bin/bb_spawn.py`). The
+   `orchestrator_watch.py heartbeat` event and the `session_gate.py` line are
+   **alert-only** — the gate prints `SESSION SETUP INCOMPLETE` and still returns
+   0 — so by the definition above they report the violation while leaving it
+   possible, and they are not the control.
 2. **JUDGMENT** Read the four load-bearing CLI properties named at the top of
    `llm_collab/bb_client.py`. Re-observe **all four** against the live installed
    CLI before changing the pin; prior observations and release notes are not
@@ -438,10 +443,14 @@ release pass.
 4. **IMPLEMENTATION GAP** Inspect every version-mismatch test before moving the pin. A wrong-version
    literal must not equal the new pin; otherwise the test becomes a match while
    claiming to prove refusal.
-   No tested checker exists for this today. The command removed from here
-   parsed JSONL, diffed a snapshot and invented record identity, and it
-   misclassified real rows; see
-   [GH-771](https://github.com/pixexid/llm-collab/issues/771).
+   No tested checker exists for this today, and the command removed from here
+   was a different shape from the evaluation-log ones: it read
+   `PINNED_BB_VERSION` and ran unbounded `rg` literal searches over `tests`, so
+   it flagged **any** test containing the pin string — including a legitimate
+   assertion that the pin equals that value — while enumerating without a
+   budget. Closing this gap means distinguishing a wrong-version literal from a
+   correct reference to the pin, which is separate work from the evaluation-row
+   recorder; see [GH-771](https://github.com/pixexid/llm-collab/issues/771).
 5. **JUDGMENT** Sweep `AGENTS.md`, `docs/`, fixtures, and tests for commands whose semantics
    changed and version-stamped claims that must be re-verified. Update or record
    a disposition for each affected claim; never carry a live observation
