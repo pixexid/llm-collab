@@ -66,6 +66,12 @@ scratchpad. The script resolves the project's configured `bb.executable`,
 `bb.project_id`, and `github.repo`; no watcher may substitute a PATH-default
 BB or a checkout-default GitHub repository.
 
+**Spell the watcher name as the leading positional**, exactly as shown below:
+the liveness marker records an ordered `argv_marker`, so a spelling that moves
+the name after the flags cannot match its own process
+([GH-779](https://github.com/pixexid/llm-collab/issues/779) tracks making the
+match order-independent, after which this note comes out).
+
 The watchers report changes; they do not decide that work is complete.
 
 - A worker leaving `active` means **go look**. `idle` never means finished:
@@ -245,6 +251,16 @@ re-derive it.
   property.
 - **Gate autolink safety.** Make the prohibited-pattern check exit nonzero before
   publication; a warning on its own line prints and proceeds.
+- **Tightening a definition invalidates its own prior citations, silently.**
+  Re-audit every *use* of a definition in the same pass that narrows it; nothing
+  flags the stale ones. A change that tightened `ENFORCED` to exclude alert-only
+  behaviour left, two sections below, an `ENFORCED` label whose cited evidence
+  was a watcher event and a session-gate line that prints a warning and returns
+  0 — alert-only, forbidden by the definition introduced in that same changeset.
+  The rule failed against itself inside the commit written to fix that class of
+  failure. Grep the label, term, or constant you just narrowed and re-check each
+  hit against the new wording before pushing; the citations that were true under
+  the old definition are exactly the ones nobody re-reads.
 - **Re-check once after merge.** The connector can re-pass an amended head
   asynchronously; inspect the complete reviewed artifact set and adjudicate any
   late finding under the canonical PR workflow.

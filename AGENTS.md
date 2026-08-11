@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 24 -->
+<!-- CONTRACT_VERSION: 25 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,59 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v25 (2026-08-11) states the contract-version test itself and adds a
+required re-audit step. Both change what a worker does. A cached v24 session
+holds no statement of the criterion, so it keeps applying the wrong one — asking
+whether a change touches a permission surface rather than whether a cached
+worker keeps doing something now prohibited — and under-bumps its own changes,
+which propagates: a wrong test causes every later missed signal. It also will
+not re-audit the uses of a definition it narrows, so it can ship the
+rule-fails-against-itself defect this version records.
+
+It also makes one invocation spelling mandatory: start a watcher with the mode
+name as the **leading positional**, because the liveness marker records an
+ordered `argv_marker` and a name-trailing spelling cannot match its own process,
+which fails closed and blocks writing spawns. That obligation is stated here
+because a worker arriving from v24 is directed to this section and nowhere else.
+[GH-779](https://github.com/pixexid/llm-collab/issues/779) removes the
+constraint by making the match order-independent, and this paragraph goes with
+it.
+
+Worth recording plainly: the change adding this criterion was itself first
+proposed without a bump, by the author of the criterion, on the reasoning the
+criterion exists to correct. Review caught it. That is the strongest available
+argument that the test needed writing down rather than being left to inference.
+
+Related GH-771.
+
+**What earns a bump.** The test is *cached-worker behaviour*: would a session
+still running on the previous version
+
+- keep doing something this change **prohibits**,
+- keep trusting something this change made **false**, or
+- **fail to do** something this change newly **requires**?
+
+If any of the three, bump — the marker is the only signal such a session will
+ever receive, because it will not re-read the file on its own.
+
+Those three are meant to be exhaustive over what a worker does: a change either
+forbids an action, invalidates a belief, or imposes an obligation. A change that
+alters *how* an existing action must be performed is the first and third
+together. If a real change fits none of them and still alters behaviour, the
+list is wrong and should be corrected rather than worked around.
+
+The test is **not** whether the change touches a permission or a gate. That
+framing has now produced the wrong answer twice: a change deleting four
+verification commands looked bump-free because it altered no permission, while
+a cached worker would have kept running those commands and acting on output
+already known to be false. Deleting a control, retiring a route, and
+invalidating a documented command all change behaviour without changing any
+permission surface.
+
+Conversely, wording, rationale, examples, tests, and relocating an
+implementation earn nothing on their own — a cached worker behaves identically
+before and after.
 
 Contract v24 (2026-08-11) deletes four verification commands from
 [`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md) that were
