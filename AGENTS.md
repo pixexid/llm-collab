@@ -54,15 +54,6 @@ which propagates: a wrong test causes every later missed signal. It also will
 not re-audit the uses of a definition it narrows, so it can ship the
 rule-fails-against-itself defect this version records.
 
-It also makes one invocation spelling mandatory: start a watcher with the mode
-name as the **leading positional**, because the liveness marker records an
-ordered `argv_marker` and a name-trailing spelling cannot match its own process,
-which fails closed and blocks writing spawns. That obligation is stated here
-because a worker arriving from v24 is directed to this section and nowhere else.
-[GH-779](https://github.com/pixexid/llm-collab/issues/779) removes the
-constraint by making the match order-independent, and this paragraph goes with
-it.
-
 Worth recording plainly: the change adding this criterion was itself first
 proposed without a bump, by the author of the criterion, on the reasoning the
 criterion exists to correct. Review caught it. That is the strongest available

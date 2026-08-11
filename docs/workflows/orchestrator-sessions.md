@@ -66,12 +66,6 @@ scratchpad. The script resolves the project's configured `bb.executable`,
 `bb.project_id`, and `github.repo`; no watcher may substitute a PATH-default
 BB or a checkout-default GitHub repository.
 
-**Spell the watcher name as the leading positional**, exactly as shown below:
-the liveness marker records an ordered `argv_marker`, so a spelling that moves
-the name after the flags cannot match its own process
-([GH-779](https://github.com/pixexid/llm-collab/issues/779) tracks making the
-match order-independent, after which this note comes out).
-
 The watchers report changes; they do not decide that work is complete.
 
 - A worker leaving `active` means **go look**. `idle` never means finished:

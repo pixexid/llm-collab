@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from datetime import datetime, timezone
 
@@ -188,6 +187,89 @@ def _parse_owner(data: bytes, project_id):
     return owner, None
 
 
+def _identity_requirements(argv_marker: str):
+    """Split a recorded argv_marker into ORDER-INDEPENDENT requirements.
+
+    The marker records the identifying tokens of the watcher invocation. It is
+    a record of WHICH tokens, never of the order they were typed in: flag order
+    and adjacency to the mode name carry no meaning, so matching on the rendered
+    string made a spelling decide a fact (GH-779). A wrapper, an interposed
+    --state-dir, or a name-trailing spelling are the same invocation.
+
+    Returns (script, bare_tokens, flag_pairs), or None when nothing identifying
+    was recorded. A flag keeps its value attached because THAT adjacency is
+    meaningful: `--project` means nothing without which project.
+    """
+    tokens = argv_marker.split()
+    if not tokens:
+        return None
+    script, rest = tokens[0], tokens[1:]
+    bare: list[str] = []
+    pairs: list[tuple[str, str]] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token.startswith("--") and "=" in token:
+            flag, value = token.split("=", 1)
+            pairs.append((flag, value))
+            index += 1
+        elif token.startswith("--") and index + 1 < len(rest):
+            pairs.append((token, rest[index + 1]))
+            index += 2
+        else:
+            bare.append(token)
+            index += 1
+    return script, bare, pairs
+
+
+def _flag_pair_present(live_tokens: list[str], flag: str, value: str) -> bool:
+    """True when the live argv supplies exactly this flag/value pair.
+
+    Values compare by EQUALITY, never prefix or substring: `--project alpha`
+    must not be satisfied by a process running `--project alpha-2` (GH-770
+    round 3). Both spellings of the same pair are accepted because both are
+    the same argv.
+    """
+    joined = f"{flag}={value}"
+    for index, token in enumerate(live_tokens):
+        if token == joined:
+            return True
+        if token == flag and index + 1 < len(live_tokens):
+            if live_tokens[index + 1] == value:
+                return True
+    return False
+
+
+def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | None]:
+    """Check every recorded token against the LIVE process argv, order-independently.
+
+    Ownership is matched here, from the running process, rather than taken from
+    the marker: the recorded `--session <id>` must be present in the live argv
+    for this to pass, which is what binds liveness and ownership in one
+    invocation (GH-770 round 5).
+    """
+    parsed = _identity_requirements(argv_marker)
+    if parsed is None:
+        return False, "recorded argv_marker is empty"
+    script, bare, pairs = parsed
+    live_tokens = command.split()
+    if not live_tokens:
+        return False, "live command line has no argv tokens"
+    # The marker records a bare script name while the live argv usually carries
+    # a path to it, so compare basenames rather than requiring the same spelling.
+    wanted_script = os.path.basename(script)
+    if not any(os.path.basename(token) == wanted_script for token in live_tokens):
+        return False, f"does not contain recorded script token {script!r}"
+    live_set = set(live_tokens)
+    for token in bare:
+        if token not in live_set:
+            return False, f"does not contain recorded token {token!r}"
+    for flag, value in pairs:
+        if not _flag_pair_present(live_tokens, flag, value):
+            return False, f"does not contain recorded {flag} {value!r}"
+    return True, None
+
+
 def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str | None]:
     """Return paired / gone-or-mismatched / unverifiable, and never raise."""
     try:
@@ -217,11 +299,9 @@ def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str
         command = result.stdout.strip()
         if not command:
             return None, f"ps returned no command line for pid {pid}"
-        if re.search(rf"{re.escape(argv_marker)}(?=\s|$)", command) is None:
-            return False, (
-                f"pid {pid} command line does not contain recorded argv_marker "
-                f"{argv_marker!r} at an argv-token boundary"
-            )
+        matched, mismatch = _argv_identity_matches(argv_marker, command)
+        if not matched:
+            return False, f"pid {pid} command line {mismatch}"
         return True, None
     except Exception as error:
         return None, f"liveness probe failed: {type(error).__name__}: {error}"
@@ -312,7 +392,9 @@ def evaluate_coverage(report, current_session_id):
     gate while the hook called the same marker foreign coverage.
 
     A FRESH marker is coverage only when its recorded pid is alive and that
-    process command line contains its recorded argv_marker. A legacy marker
+    process's argv supplies every token recorded in its argv_marker — checked
+    order-independently, so a wrapper or a differently-ordered spelling of the
+    same invocation verifies (GH-779). A legacy marker
     without those fields is not verifiable. A FRESH marker owned by a
     DIFFERENT session is not coverage — it is a
     predecessor's watcher still firing into this session. A FRESH marker whose
