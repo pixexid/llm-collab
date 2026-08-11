@@ -556,10 +556,18 @@ def validate_direct_app_policy(
                 "Direct-app legacy maintenance override requires "
                 "`direct_app_legacy_maintenance: true`."
             )
-        if _normalize_text(frontmatter.get("direct_app_legacy_maintenance_approved_by")) != "operator":
+        # GH-762 operator ruling 2026-08-11: formerly operator-only approvals are
+        # delegated to supervisor+orchestrator jointly. `supervisor` here asserts a
+        # recorded two-key concurrence with a dispositioned distinct-provider read
+        # (see docs/schema-reference.md at this field); that convention is process,
+        # not a third enum value.
+        if _normalize_text(
+            frontmatter.get("direct_app_legacy_maintenance_approved_by")
+        ) not in ("operator", "supervisor"):
             override_errors.append(
                 "Direct-app legacy maintenance override requires "
-                "`direct_app_legacy_maintenance_approved_by: operator`."
+                "`direct_app_legacy_maintenance_approved_by: operator` "
+                "or `supervisor`."
             )
         reason = frontmatter.get("direct_app_legacy_maintenance_reason")
         if not isinstance(reason, str) or not reason.strip():

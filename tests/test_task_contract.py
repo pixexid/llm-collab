@@ -1773,6 +1773,25 @@ class TaskContractDirectAppPolicyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(summary["legacy_maintenance_override"])
 
+    def test_supervisor_legacy_maintenance_override_is_accepted(self) -> None:
+        # GH-762 operator ruling 2026-08-11: supervisor approval asserts the
+        # recorded two-key concurrence; the validator accepts it alongside
+        # operator while an arbitrary agent stays rejected.
+        frontmatter = {
+            "project_id": "amiga",
+            "status": "in_progress",
+            "lane_type": "design-spec",
+            "related_paths": ["design/surface.md"],
+            "direct_app_legacy_maintenance": True,
+            "direct_app_legacy_maintenance_approved_by": "supervisor",
+            "direct_app_legacy_maintenance_reason": "Concurrence recorded on the task artifact.",
+        }
+
+        errors, summary = self.validate(frontmatter)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(summary["legacy_maintenance_override"])
+
     def test_each_incomplete_legacy_maintenance_override_fails_actionably(self) -> None:
         complete = {
             "project_id": "amiga",
@@ -1785,6 +1804,7 @@ class TaskContractDirectAppPolicyTest(unittest.TestCase):
         cases = (
             ("direct_app_legacy_maintenance", False),
             ("direct_app_legacy_maintenance_approved_by", None),
+            ("direct_app_legacy_maintenance_approved_by", "codex"),
             ("direct_app_legacy_maintenance_reason", ""),
         )
         for field, replacement in cases:
