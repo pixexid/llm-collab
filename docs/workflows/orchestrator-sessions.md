@@ -348,32 +348,106 @@ execution and verification.
 
 ## Model routing policy
 
+Authoring labels in this document are deliberately reduced and structural. An
+operational clause is only a top-level bullet or numbered step inside exactly
+`## Model routing policy` or `## bb-update procedure`. Use exactly three labels:
+`ENFORCED` when a named code path refuses or alerts,
+`CHECKED-CONVENTION` when practice has a runnable command that detects a
+violation, and `JUDGMENT` when compliance is not mechanically decidable, so it
+carries no command by design; inventing one for a `JUDGMENT` clause is the
+failure this scope avoids. Nothing outside these two sections carries any
+labeling implication. Extending the scope is a per-section deliberate
+follow-up, and a section that resists crisp classification is recorded as such
+rather than swept, as in Related GH-751.
+
+Run the checks below from the configured workspace root with
+`COLLAB_PROJECT_ID` set to the project being checked. For checks over newly
+recorded executions, set `BEFORE_TRIPLES` to a copy of that project's
+`thread-executed-triples.jsonl` made before the probe. For evaluation-row
+checks, set `BEFORE_EVAL` to a copy of `model-eval-log.jsonl` made before the
+update.
+
 Operator policy for orchestrator-selected work:
 
-- Route complex authoring to `k3` or `sol`. When a live `k3` attempt reports a
+- **JUDGMENT** Route complex authoring to `k3` or `sol`. When a live `k3` attempt reports a
   quota refusal, use `sol`, never `luna`, for that complex authoring lane.
-- Use `luna` as the daily driver for work within its measured boundary.
-- Request maximum reasoning effort for `luna` and `glm-5.2`. Contract v15's
+- **JUDGMENT** Use `luna` as the daily driver for work within its measured boundary.
+- **CHECKED-CONVENTION** Request maximum reasoning effort for `luna` and `glm-5.2`. Contract v15's
   hard exclusions still apply to every text-bearing assignment, so this effort
   setting does not authorize an excluded model; only new measurement and a
-  contract change can lift an exclusion.
-- Apply the current qualification and exclusion rules from
-  [`BB Worker Profiles`](bb-worker-profiles.md) and
-  [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree). Do not copy the
-  current qualified-set membership into a handoff or this policy. Its authority
-  is `AUTHORING_QUALIFIED_PROFILES` in `llm_collab/bb_bootstrap.py`; inspect that
-  value for the rule-enforced set and query the execution machine as the profile
-  workflow requires for live availability.
-- Treat quota as live provider state, never as a carried assertion. Establish it
+  contract change can lift an exclusion. Check:
+  `python3.11 -c 'import json,os; from pathlib import Path; d=Path(json.loads(Path("collab.config.json").read_text())["project_state_root"])/os.environ["COLLAB_PROJECT_ID"]; before={r.get("thread_id") for r in map(json.loads, Path(os.environ["BEFORE_TRIPLES"]).read_text().splitlines()) if r.get("status")=="resolved"}; rows=[r for r in map(json.loads, (d/"thread-executed-triples.jsonl").read_text().splitlines()) if r.get("status")=="resolved" and r.get("thread_id") not in before]; bad=[r for r in rows if r.get("model") in {"gpt-5.6-luna","zai/glm-5.2"} and r.get("reasoning_level") != "max"]; print(*(str(r.get("thread_id"))+": "+str(r.get("model"))+"/"+str(r.get("reasoning_level")) for r in bad), sep="\n") if bad else None; raise SystemExit(bool(bad))'`
+- **ENFORCED** Apply the hard model-exclusion rule. On the explicitly selected
+  path, `plan_spawn` in `llm_collab/spawn_gate.py`, reached through
+  `bin/bb_spawn.py`, refuses `excluded_model`; on the inbound bootstrap path,
+  the profile gate refuses `bb_bootstrap_profile_unavailable`. See
+  [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree) and
+  [`BB Worker Profiles`](bb-worker-profiles.md) for the path controls.
+  **JUDGMENT** On this section's explicitly selected path, choosing a qualified
+  profile is deliberately not gated on qualification, as [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree)
+  states. Choosing a qualified profile, and not copying
+  `AUTHORING_QUALIFIED_PROFILES` into a handoff or this policy, is orchestrator
+  judgment backed by the review controls; inspect that authority and query the
+  execution machine as the workflow requires. The inbound qualification refusal
+  named above is the separate enforced path.
+- **JUDGMENT** Treat quota as live provider state, never as a carried assertion. Establish it
   from the latest execution on the selected profile and inspect `output` and
   `log` for a provider quota or permission refusal before rerouting.
-- Key each model-evaluation row by the executed
+- **JUDGMENT** Key each model-evaluation row by the executed
   `(provider, model, reasoning_level)` triple read from the execution event, not
   requested argv or a declared default. The artifact definition and source are
   owned by
   [`bb-plugins/exec-tracking/README.md`](../../bb-plugins/exec-tracking/README.md).
-  Store the bb version observed for that execution with the row so comparisons
-  across CLI versions remain interpretable.
+  **CHECKED-CONVENTION** Store the bb version observed for that execution with
+  the row so comparisons across CLI versions remain interpretable. Check:
+  ```bash
+  python3.11 - <<'PY'
+  import json
+  import os
+  import subprocess
+  from pathlib import Path
+
+  config = json.loads(Path("collab.config.json").read_text())
+  project_id = os.environ["COLLAB_PROJECT_ID"]
+  project = next(
+      project
+      for project in json.loads(Path("projects.json").read_text())["projects"]
+      if project.get("id") == project_id
+  )
+  version = json.loads(
+      subprocess.run(
+          [*project["bb"]["executable"], "settings", "version", "--json"],
+          check=True,
+          capture_output=True,
+          text=True,
+          timeout=10,
+      ).stdout
+  )["currentVersion"]
+  state = Path(config["project_state_root"]) / project_id
+  before = {
+      row.get("thread_id")
+      for row in map(json.loads, Path(os.environ["BEFORE_EVAL"]).read_text().splitlines())
+      if row.get("thread_id")
+  }
+  all_rows = [
+      row for row in map(json.loads, (state / "model-eval-log.jsonl").read_text().splitlines())
+  ]
+  bad = [
+      row
+      for row in all_rows
+      if (
+          not isinstance(row.get("bb_version"), str)
+          or not row["bb_version"].strip()
+          or (
+              row.get("thread_id") not in before
+              and row.get("bb_version") != version
+          )
+      )
+  ]
+  print(*(str(row.get("thread_id") or row.get("lane")) + ": " + repr(row.get("bb_version")) for row in bad), sep="\n") if bad else None
+  raise SystemExit(bool(bad))
+  PY
+  ```
 
 This section states routing rules and checks. It intentionally asserts no
 current bb version, qualified-set membership, model availability, or quota
@@ -384,37 +458,89 @@ state.
 The exact pin is a safety control. Do not loosen it to make an unobserved bb
 release pass.
 
-1. Stop new BB lane starts and compare the installed version with
+1. **JUDGMENT** Stop new BB lane starts and **ENFORCED** compare the installed version with
    `PINNED_BB_VERSION`. If the probe itself fails, repair the probe before using
-   any quiet result.
-2. Read the four load-bearing CLI properties named at the top of
+   any quiet result; `orchestrator_watch.py heartbeat` and `session_gate.py`
+   refuse to treat a failed or mismatched probe as clean.
+2. **JUDGMENT** Read the four load-bearing CLI properties named at the top of
    `llm_collab/bb_client.py`. Re-observe **all four** against the live installed
    CLI before changing the pin; prior observations and release notes are not
    substitutes.
-3. Re-record `tests/fixtures/bb/settings_version.json` from the live configured
+3. **JUDGMENT** Re-record `tests/fixtures/bb/settings_version.json` from the live configured
    CLI's `settings version --json` output. Do not hand-edit a file whose purpose
    is to preserve a recording.
-4. Inspect every version-mismatch test before moving the pin. A wrong-version
+4. **CHECKED-CONVENTION** Inspect every version-mismatch test before moving the pin. A wrong-version
    literal must not equal the new pin; otherwise the test becomes a match while
-   claiming to prove refusal.
-5. Sweep `AGENTS.md`, `docs/`, fixtures, and tests for commands whose semantics
+   claiming to prove refusal. Check:
+   `pin="$(python3.11 -c 'import sys; sys.path.insert(0,"."); from llm_collab.bb_client import PINNED_BB_VERSION; print(PINNED_BB_VERSION)')"; hits="$( { rg -n --glob '*.py' -F "\"${pin}\"" tests || true; rg -n --glob '*.py' -F "'${pin}'" tests || true; } )"; if [ -n "$hits" ]; then printf '%s\n' "$hits"; exit 1; fi`
+5. **JUDGMENT** Sweep `AGENTS.md`, `docs/`, fixtures, and tests for commands whose semantics
    changed and version-stamped claims that must be re-verified. Update or record
    a disposition for each affected claim; never carry a live observation
    forward as an assertion about the new release.
-6. Author the pin, fixture, test, and necessary documentation changes in the
+6. **JUDGMENT** Author the pin, fixture, test, and necessary documentation changes in the
    orchestrator thread. This change cannot be delegated through the version gate
    it unblocks. Use the normal one-writer and PR workflow, including the required
    verification and first automatic review; this is not an exception to those
    gates.
-7. Run `"${bb_cmd[@]}" plugin reload exec-tracking` — the project's configured
+7. **JUDGMENT** Reload `exec-tracking` through the project's configured
    executable, never a bare `bb`, or a wrapper project reloads the PATH
    installation instead of the instance its spawns use, leaving the intended
-   plugin stale while the proof appears to run. Then launch one controlled probe and require
-   a new recorded row in the configured project's executed-triple artifact. A
-   running plugin does not follow a changed checkout, and a running status alone
-   does not prove recording.
-8. Record the observed bb version beside every evaluation row created during the
-   update or its qualification probes.
+   plugin stale while the proof appears to run. Then launch one controlled probe
+   and inspect the new recorded row in the configured project's executed-triple
+   artifact. A running plugin does not follow a changed checkout, and a running
+   status alone does not prove recording. No command here distinguishes a
+   reloaded plugin revision from a stale running plugin, so this step is
+   **JUDGMENT** by design.
+8. **CHECKED-CONVENTION** Record the observed bb version beside every evaluation row created during the
+   update or its qualification probes. Check with the same runnable command:
+   ```bash
+   python3.11 - <<'PY'
+   import json
+   import os
+   import subprocess
+   from pathlib import Path
+
+   config = json.loads(Path("collab.config.json").read_text())
+   project_id = os.environ["COLLAB_PROJECT_ID"]
+   project = next(
+       project
+       for project in json.loads(Path("projects.json").read_text())["projects"]
+       if project.get("id") == project_id
+   )
+   version = json.loads(
+       subprocess.run(
+           [*project["bb"]["executable"], "settings", "version", "--json"],
+           check=True,
+           capture_output=True,
+           text=True,
+           timeout=10,
+       ).stdout
+   )["currentVersion"]
+   state = Path(config["project_state_root"]) / project_id
+   before = {
+       row.get("thread_id")
+       for row in map(json.loads, Path(os.environ["BEFORE_EVAL"]).read_text().splitlines())
+       if row.get("thread_id")
+   }
+   all_rows = [
+       row for row in map(json.loads, (state / "model-eval-log.jsonl").read_text().splitlines())
+   ]
+   bad = [
+       row
+       for row in all_rows
+       if (
+           not isinstance(row.get("bb_version"), str)
+           or not row["bb_version"].strip()
+           or (
+               row.get("thread_id") not in before
+               and row.get("bb_version") != version
+           )
+       )
+   ]
+   print(*(str(row.get("thread_id") or row.get("lane")) + ": " + repr(row.get("bb_version")) for row in bad), sep="\n") if bad else None
+   raise SystemExit(bool(bad))
+   PY
+   ```
 
 The current pin is read from source, the installed version is read live, the
 qualified set is read from its code authority, model availability is queried on
