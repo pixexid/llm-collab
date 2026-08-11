@@ -558,6 +558,45 @@ class TlsForensicCaptureTest(unittest.TestCase):
             output.count("FAILED: TLS forensic output budget exhausted"),
         )
 
+    def test_overflowing_probe_exhausts_the_shared_budget(self) -> None:
+        """GH-757: a probe that trips BbResponseTooLarge spends the whole shared
+        budget; later probes must fail visibly, not run against an unshrunk
+        remainder."""
+        calls = []
+
+        def transport(_executable, *, max_response_chars):
+            def run(_argv, _timeout):
+                calls.append(max_response_chars)
+                raise watch.BbResponseTooLarge(
+                    "native stream exceeded 2 chars while reading"
+                )
+
+            return run
+
+        with mock.patch.object(
+            watch, "TLS_CAPTURE_MAX_RESPONSE_CHARS", 4
+        ), mock.patch.object(
+            watch.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"
+        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
+            output = watch.fetch_tls_evidence(("bb.example", 443), 1.0)
+
+        self.assertEqual(
+            [2],
+            calls,
+            "the overflowing probe must exhaust the shared budget: a second "
+            "transport call means a later probe ran against an unshrunk remainder",
+        )
+        for section in (
+            "OPENSSL S_CLIENT",
+            "SYSTEM DNS (A AND AAAA)",
+            "PUBLIC DNS 1.1.1.1 (A AND AAAA)",
+        ):
+            self.assertIn(f"=== {section} ===", output)
+        self.assertEqual(
+            3,
+            output.count("FAILED: TLS forensic output budget exhausted"),
+        )
+
     def test_fetch_timeout_writes_every_section_as_failed(self) -> None:
         def timed_out(_host, _timeout):
             raise TimeoutError("openssl chain fetch timed out")
