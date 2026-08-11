@@ -251,7 +251,13 @@ in the PR:
 2. **Who migrated it?**
 3. **Does a production migration path exist?**
 
-A green suite answers none of them. Wherever CI migrates its own test database,
+**Answering is not passing.** If the answer to (3) is no, the merge is **blocked**
+until a path exists, or until the risk is accepted in writing — naming who
+accepted it, what breaks if it is wrong, and the recovery. A PR that answers all
+three honestly and merges anyway with no path is the exact failure below; a gate
+that only required disclosure would permit it verbatim.
+
+A green suite answers none of the three. Wherever CI migrates its own test database,
 the suite validates the change against a schema **CI created** — not the one
 production has — so every writer passes and the merge ships code whose target
 schema does not exist where it lands. With auto-deploy-on-main and a migration
