@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,8 @@ def marker_report(status: str, session_id: str | None = None) -> list[dict]:
         for entry in report:
             entry["session_id"] = session_id
             entry["age_seconds"] = 5.0
+            entry["pid"] = os.getpid()
+            entry["argv_marker"] = Path(sys.executable).name
     return report
 
 
@@ -659,6 +662,38 @@ class WatcherGateCliTest(unittest.TestCase):
         self.assertIn("foreign", rendered)
         self.assertEqual(1, exit_code)
 
+    def test_writing_spawn_with_fresh_dead_pid_marker_refuses(self) -> None:
+        """Freshness alone cannot admit a delegated writer without watchers."""
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait(timeout=5)
+        report = marker_report("fresh", session_id="sess-current")
+        for entry in report:
+            entry["pid"] = process.pid
+            entry["argv_marker"] = (
+                f"orchestrator_watch.py {entry['name']} --project llm-collab"
+            )
+        plan = planned(assignment_kind="writing")
+        self.assertIsInstance(plan, SpawnPlan)
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+                bb_spawn, "resolve_project_repo_path", return_value=REPO
+            ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+                bb_spawn, "check_markers", return_value=report
+            ), mock.patch.object(
+                bb_spawn, "runtime_id_from_env", return_value="sess-current"
+            ), mock.patch.object(
+                bb_spawn, "project_state_dir", return_value=Path(temporary)
+            ), mock.patch.object(
+                bb_spawn, "_configured_client", return_value=self._running_client()
+            ) as client, mock.patch.object(
+                bb_spawn, "persist_assignment", return_value=Path(temporary) / "record.json"
+            ) as persist, mock.patch.object(bb_spawn, "_emit") as emit:
+                exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        client.assert_not_called()
+        persist.assert_not_called()
+        self.assertIn("owner_gone", emit.call_args.args[0])
+        self.assertEqual(1, exit_code)
+
     def test_writing_spawn_override_proceeds_and_records_the_override(self) -> None:
         plan = planned(assignment_kind="writing")
         self.assertIsInstance(plan, SpawnPlan)
@@ -684,6 +719,41 @@ class WatcherGateCliTest(unittest.TestCase):
         )
         self.assertEqual(
             [{"name": name, "status": "stale"} for name in WATCHER_NAMES],
+            record["watcher_gate"]["not_fresh"],
+        )
+        self.assertEqual(0, exit_code)
+
+    def test_allow_stale_watchers_override_also_covers_owner_gone(self) -> None:
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait(timeout=5)
+        report = marker_report("fresh", session_id="sess-current")
+        for entry in report:
+            entry["pid"] = process.pid
+            entry["argv_marker"] = (
+                f"orchestrator_watch.py {entry['name']} --project llm-collab"
+            )
+        plan = planned(assignment_kind="writing")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            bb_spawn, "get_project", return_value=REGISTRY
+        ), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(
+            bb_spawn, "plan_spawn", return_value=plan
+        ), mock.patch.object(
+            bb_spawn, "check_markers", return_value=report
+        ), mock.patch.object(
+            bb_spawn, "runtime_id_from_env", return_value="sess-current"
+        ), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path(temporary)
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=self._running_client()
+        ), mock.patch.object(bb_spawn, "_emit"):
+            exit_code = bb_spawn.main(WRITING_OVERRIDE_CLI_ARGS)
+            record = json.loads(
+                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text()
+            )
+        self.assertEqual(
+            [{"name": name, "status": "owner_gone"} for name in WATCHER_NAMES],
             record["watcher_gate"]["not_fresh"],
         )
         self.assertEqual(0, exit_code)

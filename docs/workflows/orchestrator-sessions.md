@@ -52,9 +52,10 @@ by the session-gate hook, which prints the handoff path for the project it
 resolved; a breadcrumb copy in the checkout would be a second thing to go stale.
 Its watcher markers live
 at `{project_state_root}/{project_id}/watchers/<name>.alive` and record the
-owning `session_id`, exact `project_id`, and `started_at`. The marker content and
-serialization are owned by the companion GH-722 implementation contract; this
-workflow consumes that ownership record and does not redefine its format.
+owning `session_id`, exact `project_id`, `started_at`, process `pid`, and the
+stable watcher-invocation `argv_marker`. The marker content and serialization
+are owned by the companion GH-722 implementation contract; this workflow
+consumes that ownership and liveness record and does not redefine its format.
 
 ## Standard watcher set
 

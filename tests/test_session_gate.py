@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -260,7 +261,14 @@ class MarkerOwnershipTest(unittest.TestCase):
     @staticmethod
     def _report(owner: str) -> list[dict]:
         return [
-            {"name": name, "status": "fresh", "age_seconds": 5.0, "session_id": owner}
+            {
+                "name": name,
+                "status": "fresh",
+                "age_seconds": 5.0,
+                "session_id": owner,
+                "pid": os.getpid(),
+                "argv_marker": Path(sys.executable).name,
+            }
             for name in WATCHER_NAMES
         ]
 
@@ -289,6 +297,152 @@ class MarkerOwnershipTest(unittest.TestCase):
         verdicts = evaluate_coverage(report, "sess-current")
         self.assertEqual(["stale"] * len(WATCHER_NAMES), [v["reason"] for v in verdicts])
 
+    def test_legacy_marker_without_pid_is_liveness_unverifiable(self) -> None:
+        report = self._report("sess-current")
+        for entry in report:
+            entry.pop("pid")
+            entry.pop("argv_marker")
+        verdicts = evaluate_coverage(report, "sess-current")
+        self.assertEqual(
+            ["liveness_unverifiable"] * len(WATCHER_NAMES),
+            [v["reason"] for v in verdicts],
+        )
+        self.assertFalse(any(v["acceptable"] for v in verdicts))
+
+
+class MarkerProcessLivenessTest(unittest.TestCase):
+    @staticmethod
+    def _report(pid: int, argv_marker: str) -> list[dict]:
+        return [{
+            "name": "worker-lifecycle",
+            "status": "fresh",
+            "age_seconds": 1.0,
+            "session_id": "sess-current",
+            "pid": pid,
+            "argv_marker": argv_marker,
+        }]
+
+    @staticmethod
+    def _live_watcher_process(
+        project_id="project-a",
+        session_id="sess-current",
+    ) -> tuple[subprocess.Popen, str]:
+        marker = (
+            f"orchestrator_watch.py worker-lifecycle --project {project_id} "
+            f"--session {session_id}"
+        )
+        process = subprocess.Popen([
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            "orchestrator_watch.py",
+            "worker-lifecycle",
+            "--project",
+            project_id,
+            "--session",
+            session_id,
+        ])
+        return process, marker
+
+    def test_live_pid_with_matching_argv_marker_is_covered(self) -> None:
+        process, marker = self._live_watcher_process()
+        try:
+            verdict = evaluate_coverage(
+                self._report(process.pid, marker), "sess-current"
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("covered", verdict["reason"])
+        self.assertTrue(verdict["acceptable"])
+
+    def test_process_probe_requests_unlimited_ps_output_width(self) -> None:
+        """Prevent platform-conditional COLUMNS truncation of ps command output."""
+        runner = mock.Mock(
+            return_value=mock.Mock(exit_code=0, stdout="recorded argv marker")
+        )
+        with mock.patch.object(
+            _watcher_liveness, "subprocess_transport", return_value=runner
+        ):
+            result = _watcher_liveness.probe_process_liveness(
+                os.getpid(), "recorded argv marker"
+            )
+        runner.assert_called_once_with(
+            ("-ww", "-p", str(os.getpid()), "-o", "command="),
+            _watcher_liveness.LIVENESS_PROBE_TIMEOUT_SECONDS,
+        )
+        self.assertEqual((True, None), result)
+
+    def test_live_recycled_pid_with_wrong_argv_marker_is_owner_gone(self) -> None:
+        process, _marker = self._live_watcher_process()
+        try:
+            verdict = evaluate_coverage(
+                self._report(
+                    process.pid,
+                    "orchestrator_watch.py heartbeat --project project-a "
+                    "--session sess-current",
+                ),
+                "sess-current",
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("owner_gone", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
+        self.assertIn("does not contain", verdict["detail"])
+
+    def test_project_id_prefix_on_same_argv_token_is_owner_gone(self) -> None:
+        process, _marker = self._live_watcher_process("alpha-2")
+        try:
+            verdict = evaluate_coverage(
+                self._report(
+                    process.pid,
+                    "orchestrator_watch.py worker-lifecycle --project alpha "
+                    "--session sess-current",
+                ),
+                "sess-current",
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("owner_gone", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
+
+    def test_same_project_mode_but_different_session_is_owner_gone(self) -> None:
+        process, _marker = self._live_watcher_process(session_id="sess-other")
+        try:
+            verdict = evaluate_coverage(
+                self._report(
+                    process.pid,
+                    "orchestrator_watch.py worker-lifecycle --project project-a "
+                    "--session sess-current",
+                ),
+                "sess-current",
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("owner_gone", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
+
+    def test_failed_or_slow_probe_is_liveness_unverifiable_not_an_exception(self) -> None:
+        with mock.patch.object(
+            _watcher_liveness,
+            "subprocess_transport",
+            side_effect=TimeoutError("probe deadline exceeded"),
+        ) as factory:
+            verdict = evaluate_coverage(
+                self._report(os.getpid(), Path(sys.executable).name),
+                "sess-current",
+            )[0]
+        factory.assert_called_once_with(
+            ("ps",),
+            max_response_chars=_watcher_liveness.LIVENESS_PROBE_MAX_RESPONSE_CHARS,
+        )
+        self.assertEqual("liveness_unverifiable", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
+        self.assertIn("probe deadline exceeded", verdict["detail"])
+
 
 class MarkerWriterTest(unittest.TestCase):
     """write_marker is the single documented writing shape (GH-726 S2)."""
@@ -314,6 +468,12 @@ class MarkerWriterTest(unittest.TestCase):
                 report = check_markers("project-a")
         self.assertEqual("sess-1", first["session_id"])
         self.assertEqual("project-a", first["project_id"])
+        self.assertEqual(os.getpid(), first["pid"])
+        self.assertEqual(
+            "orchestrator_watch.py worker-lifecycle --project project-a "
+            "--session sess-1",
+            first["argv_marker"],
+        )
         self.assertEqual(first["started_at"], second["started_at"])
         own = next(e for e in report if e["name"] == "worker-lifecycle")
         self.assertEqual("fresh", own["status"])
@@ -517,6 +677,8 @@ class SessionGateTest(unittest.TestCase):
                     "status": "fresh",
                     "age_seconds": 5.0,
                     "session_id": "sess-own",
+                    "pid": os.getpid(),
+                    "argv_marker": Path(sys.executable).name,
                 }
                 for name in WATCHER_NAMES
             ],
@@ -737,6 +899,8 @@ class SessionGateTest(unittest.TestCase):
                             "status": "fresh",
                             "age_seconds": 5.0,
                             "session_id": "sess-own",
+                            "pid": os.getpid(),
+                            "argv_marker": Path(sys.executable).name,
                         }
                         for name in WATCHER_NAMES
                     ]
@@ -838,6 +1002,25 @@ class SessionGateTest(unittest.TestCase):
         self.assertNotIn("FOREIGN", out)
         self.assertNotIn("SESSION SETUP INCOMPLETE", out)
 
+    def test_fresh_marker_with_dead_pid_is_a_visible_non_pass(self) -> None:
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait(timeout=5)
+        report = [{
+            "name": "worker-lifecycle",
+            "status": "fresh",
+            "age_seconds": 1.0,
+            "session_id": "sess-own",
+            "pid": process.pid,
+            "argv_marker": (
+                "orchestrator_watch.py worker-lifecycle "
+                f"--project {LLM_COLLAB_PROJECT}"
+            ),
+        }]
+        with mock.patch.object(session_gate, "check_markers", return_value=report):
+            checks = session_gate.watcher_checks(LLM_COLLAB_PROJECT, "sess-own")
+        self.assertEqual(session_gate.FAIL, checks[0][1])
+        self.assertIn("fresh marker owner is not live", checks[0][2])
+
     def test_fresh_marker_owned_by_a_different_session_alerts_naming_it(self) -> None:
         code, out = self._run(
             own_session_id="sess-current",
@@ -847,6 +1030,8 @@ class SessionGateTest(unittest.TestCase):
                     "status": "fresh",
                     "age_seconds": 5.0,
                     "session_id": "sess-predecessor",
+                    "pid": os.getpid(),
+                    "argv_marker": Path(sys.executable).name,
                 }
                 for name in WATCHER_NAMES
             ],

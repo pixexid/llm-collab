@@ -59,8 +59,8 @@ def parser() -> argparse.ArgumentParser:
         "--allow-stale-watchers",
         action="store_true",
         help=(
-            "Admit a writing spawn despite stale or absent orchestrator watcher "
-            "markers. The override is recorded in the assignment record."
+            "Admit a writing spawn despite unacceptable orchestrator watcher "
+            "coverage. The override is recorded in the assignment record."
         ),
     )
     isolation = result.add_mutually_exclusive_group()
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     watcher_gate: dict | None = None
     if args.assignment_kind == "writing":
         try:
-            # The shared verdict: freshness AND ownership, evaluated once in
+            # The shared verdict: freshness, process liveness, AND ownership, evaluated once in
             # _watcher_liveness. This gate acts on it; it does not re-derive a
             # subset. The session identity comes from the runtime environment
             # (the same helper bootstrap uses); where it cannot be established,
@@ -164,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
         if overdue and not args.allow_stale_watchers:
             _emit(
                 "⚠️  REFUSED: watcher_markers_not_fresh — orchestrator watcher "
-                "markers are stale, absent, or foreign-owned:\n"
+                "coverage is stale, absent, foreign-owned, owner-gone, or "
+                "unverifiable:\n"
                 f"{lines}\n"
                 "  A writing spawn admitted now runs without live watcher "
                 "coverage. Pass --allow-stale-watchers to override; the "
@@ -173,8 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if overdue:
             _emit(
-                "⚠️  WATCHER GATE OVERRIDE — proceeding with stale/absent/foreign "
-                "watcher markers (--allow-stale-watchers); this override is "
+                "⚠️  WATCHER GATE OVERRIDE — proceeding with unacceptable "
+                "watcher coverage (--allow-stale-watchers); this override is "
                 f"recorded in the assignment record:\n{lines}"
             )
             watcher_gate = {

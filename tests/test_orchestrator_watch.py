@@ -1153,6 +1153,15 @@ class PrTerminalWindowTest(unittest.TestCase):
 
 
 class MarkerRefreshTest(unittest.TestCase):
+    def test_watcher_is_the_only_marker_writing_entrypoint(self) -> None:
+        writers = sorted(
+            path.name
+            for path in (ROOT / "bin").glob("*.py")
+            if path.name != "_watcher_liveness.py"
+            and "write_marker(" in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(["orchestrator_watch.py"], writers)
+
     def test_pr_signature_forwards_the_cycle_deadline_to_snapshot(self) -> None:
         sample = signature()
         with mock.patch.object(

@@ -7,7 +7,8 @@ standard orchestrator watcher rewrites
 
 every cycle, with JSON content
 
-    {"session_id": "<owning session>", "project_id": "<project>", "started_at": "<UTC ISO-8601>"}
+    {"session_id": "<owning session>", "project_id": "<project>", "started_at": "<UTC ISO-8601>",
+     "pid": <watcher pid>, "argv_marker": "orchestrator_watch.py <name> --project <project> --session <session>"}
 
 Freshness is the mtime — never a timestamp inside the file, because a wedged
 loop that still rewrites its own content would then look alive. Ownership is
@@ -20,12 +21,14 @@ path or format rule is how these drift. The project id is the caller's explicit
 choice — there is deliberately no default, so a caller that forgets it fails
 rather than silently reading another project's markers (AGENTS.md → "Project
 Boundary"). The writing side is the single documented shape in write_marker();
-bin/orchestrator_watch.py and bin/touch_watcher_marker.py both call it.
+bin/orchestrator_watch.py calls it in-process.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -35,6 +38,7 @@ from _bounded_io import (  # noqa: E402
     read_regular_file_bounded_with_identity,
 )
 from _helpers import get_project, project_state_dir, write_file_durably
+from llm_collab.bb_client import subprocess_transport
 
 WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
 
@@ -60,6 +64,15 @@ UNREADABLE = "unreadable"
 COVERED = "covered"
 FOREIGN = "foreign"
 OWNER_UNKNOWN = "owner_unknown"
+OWNER_GONE = "owner_gone"
+LIVENESS_UNVERIFIABLE = "liveness_unverifiable"
+
+# A ps command line is tiny. The shared transport bounds both streams while
+# reading, kills the child on timeout/overflow, and never returns truncation as
+# a complete result. A failed probe is classified by evaluate_coverage rather
+# than escaping into either gate.
+LIVENESS_PROBE_TIMEOUT_SECONDS = 2.0
+LIVENESS_PROBE_MAX_RESPONSE_CHARS = 64 * 1024
 
 # Where the future-dated line is drawn. A watcher that atomically rewrites its
 # marker between our descriptor read and our clock sample yields a small
@@ -131,6 +144,8 @@ def write_marker(project_id, name, session_id):
         "session_id": session_id,
         "project_id": project_id,
         "started_at": started_at,
+        "pid": os.getpid(),
+        "argv_marker": f"orchestrator_watch.py {name} --project {project_id} --session {session_id}",
     }
     write_file_durably(marker, json.dumps(content, sort_keys=True) + "\n")
     return marker
@@ -160,7 +175,56 @@ def _parse_owner(data: bytes, project_id):
     started_at = content.get("started_at")
     if not isinstance(started_at, str) or not started_at:
         return None, "marker content has no started_at"
-    return {"session_id": session_id, "started_at": started_at}, None
+    owner = {"session_id": session_id, "started_at": started_at}
+    pid = content.get("pid")
+    argv_marker = content.get("argv_marker")
+    if pid is None and argv_marker is None:
+        return owner, None
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None, "marker content has no positive integer pid"
+    if not isinstance(argv_marker, str) or not argv_marker:
+        return None, "marker content has no argv_marker"
+    owner.update({"pid": pid, "argv_marker": argv_marker})
+    return owner, None
+
+
+def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str | None]:
+    """Return paired / gone-or-mismatched / unverifiable, and never raise."""
+    try:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False, f"pid {pid} is not running"
+        except OSError as error:
+            return None, f"pid {pid} could not be probed: {error}"
+
+        result = subprocess_transport(
+            ("ps",), max_response_chars=LIVENESS_PROBE_MAX_RESPONSE_CHARS
+        )(
+            ("-ww", "-p", str(pid), "-o", "command="),
+            LIVENESS_PROBE_TIMEOUT_SECONDS,
+        )
+        if result.exit_code != 0:
+            # The process may have exited between kill(0) and ps. Distinguish
+            # that ordinary race from a ps failure that could not answer.
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False, f"pid {pid} exited during the liveness probe"
+            except OSError as error:
+                return None, f"pid {pid} could not be re-probed: {error}"
+            return None, f"ps could not read pid {pid} (exit {result.exit_code})"
+        command = result.stdout.strip()
+        if not command:
+            return None, f"ps returned no command line for pid {pid}"
+        if re.search(rf"{re.escape(argv_marker)}(?=\s|$)", command) is None:
+            return False, (
+                f"pid {pid} command line does not contain recorded argv_marker "
+                f"{argv_marker!r} at an argv-token boundary"
+            )
+        return True, None
+    except Exception as error:
+        return None, f"liveness probe failed: {type(error).__name__}: {error}"
 
 
 def check_markers(project_id, now=None, stale_after=WATCHER_MARKER_STALE_AFTER_SECONDS):
@@ -247,30 +311,51 @@ def evaluate_coverage(report, current_session_id):
     subsets of one signal is how a fresh-but-foreign marker passed the spawn
     gate while the hook called the same marker foreign coverage.
 
-    A FRESH marker owned by a DIFFERENT session is not coverage — it is a
+    A FRESH marker is coverage only when its recorded pid is alive and that
+    process command line contains its recorded argv_marker. A legacy marker
+    without those fields is not verifiable. A FRESH marker owned by a
+    DIFFERENT session is not coverage — it is a
     predecessor's watcher still firing into this session. A FRESH marker whose
     owner cannot be compared because the caller has no session identity is not
     coverage either: unknown is never a pass (GH-726 I5).
 
     Each verdict: {name, acceptable, reason, ...marker fields}. reason is
-    COVERED / FOREIGN / OWNER_UNKNOWN for fresh markers, else the marker
-    status (stale / absent / unreadable).
+    COVERED / FOREIGN / OWNER_UNKNOWN / OWNER_GONE / LIVENESS_UNVERIFIABLE for
+    fresh markers, else the marker status (stale / absent / unreadable).
     """
     verdicts = []
     for entry in report:
         verdict = {"name": entry["name"], "acceptable": False}
-        for key in ("session_id", "age_seconds", "detail", "marker"):
+        for key in (
+            "session_id",
+            "age_seconds",
+            "detail",
+            "marker",
+            "pid",
+            "argv_marker",
+        ):
             if key in entry:
                 verdict[key] = entry[key]
         if entry["status"] != FRESH:
             verdict["reason"] = entry["status"]
-        elif current_session_id is None:
-            verdict["reason"] = OWNER_UNKNOWN
-        elif entry.get("session_id") == current_session_id:
-            verdict["acceptable"] = True
-            verdict["reason"] = COVERED
+        elif "pid" not in entry or "argv_marker" not in entry:
+            verdict["reason"] = LIVENESS_UNVERIFIABLE
+            verdict["detail"] = "fresh legacy marker has no pid/argv_marker"
         else:
-            verdict["reason"] = FOREIGN
+            live, detail = probe_process_liveness(entry["pid"], entry["argv_marker"])
+            if detail is not None:
+                verdict["detail"] = detail
+            if live is None:
+                verdict["reason"] = LIVENESS_UNVERIFIABLE
+            elif not live:
+                verdict["reason"] = OWNER_GONE
+            elif current_session_id is None:
+                verdict["reason"] = OWNER_UNKNOWN
+            elif entry.get("session_id") == current_session_id:
+                verdict["acceptable"] = True
+                verdict["reason"] = COVERED
+            else:
+                verdict["reason"] = FOREIGN
         verdicts.append(verdict)
     return verdicts
 
