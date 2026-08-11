@@ -245,6 +245,16 @@ re-derive it.
   property.
 - **Gate autolink safety.** Make the prohibited-pattern check exit nonzero before
   publication; a warning on its own line prints and proceeds.
+- **Tightening a definition invalidates its own prior citations, silently.**
+  Re-audit every *use* of a definition in the same pass that narrows it; nothing
+  flags the stale ones. A change that tightened `ENFORCED` to exclude alert-only
+  behaviour left, two sections below, an `ENFORCED` label whose cited evidence
+  was a watcher event and a session-gate line that prints a warning and returns
+  0 — alert-only, forbidden by the definition introduced in that same changeset.
+  The rule failed against itself inside the commit written to fix that class of
+  failure. Grep the label, term, or constant you just narrowed and re-check each
+  hit against the new wording before pushing; the citations that were true under
+  the old definition are exactly the ones nobody re-reads.
 - **Re-check once after merge.** The connector can re-pass an amended head
   asynchronously; inspect the complete reviewed artifact set and adjudicate any
   late finding under the canonical PR workflow.

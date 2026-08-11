@@ -45,6 +45,24 @@ workflows below.
 
 ### Recent contract changes
 
+**What earns a bump.** The test is *cached-worker behaviour*: would a session
+still running on the previous version keep doing something this change
+prohibits, or keep trusting something this change made false? If yes, bump —
+the marker is the only signal such a session will ever receive, because it will
+not re-read the file on its own.
+
+The test is **not** whether the change touches a permission or a gate. That
+framing has now produced the wrong answer twice: a change deleting four
+verification commands looked bump-free because it altered no permission, while
+a cached worker would have kept running those commands and acting on output
+already known to be false. Deleting a control, retiring a route, and
+invalidating a documented command all change behaviour without changing any
+permission surface.
+
+Conversely, wording, rationale, examples, tests, and relocating an
+implementation earn nothing on their own — a cached worker behaves identically
+before and after.
+
 Contract v24 (2026-08-11) deletes four verification commands from
 [`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md) that were
 proven to report the wrong answer, and records those clauses as
