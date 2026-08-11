@@ -1089,17 +1089,23 @@ def main():
 
     if not messages:
         if args.json_output:
-            if not repo_scope_refused and published_runtime is None:
+            if ordinary_read:
+                payload = {
+                    "messages": [],
+                    "total": total,
+                    "limit": applied_limit,
+                    "truncated": truncated,
+                }
+            elif not repo_scope_refused and published_runtime is None:
                 print("[]")
                 return
-            payload = {"messages": []}
+            else:
+                payload = {"messages": []}
             if repo_scope_refused:
                 payload["repo_scope_refused"] = repo_scope_refused
-            if published_runtime is None:
-                print(json.dumps(payload, indent=2))
-            else:
+            if published_runtime is not None:
                 payload["published_runtime"] = published_runtime
-                print(json.dumps(payload, indent=2))
+            print(json.dumps(payload, indent=2))
         else:
             if published_runtime is not None:
                 if published_runtime.get("published") is False:
@@ -1115,7 +1121,15 @@ def main():
                         f"{published_runtime['session']['runtime']['session_id']} "
                         f"for {published_runtime['session']['session_id']}\n"
                     )
-            print(f"[inbox] No {'messages' if args.show_all else 'unread messages'} for {args.me}.")
+            if ordinary_read:
+                population = "message(s)" if args.show_all else "unread message(s)"
+                print(f"[inbox] 0 {population} for {args.me} ({ordinary_scope}).")
+            else:
+                print(
+                    f"[inbox] No "
+                    f"{'messages' if args.show_all else 'unread messages'} "
+                    f"for {args.me}."
+                )
             for refused in repo_scope_refused:
                 print(
                     f"[inbox] Repo-scope refused {refused['path']}: {refused['reason']}",
@@ -1145,9 +1159,11 @@ def main():
                     continue
             selected.append(message)
         messages = selected
-        # `truncated` is true only when the cap left an otherwise displayable
-        # candidate out. Activation packets refused while filling the cap are
-        # already reported in activation_refused, so they do not count as cuts.
+        # `truncated` means entries beyond what was shown existed. An examined
+        # activation packet refused while filling the cap is already surfaced in
+        # activation_refused, so it does not count. An unexamined trailing entry
+        # does count regardless of eventual eligibility: learning that eligibility
+        # would require gating it, which can claim an activation lease in consume mode.
         truncated = total > len(messages) + len(refused_gates)
 
     # Only an all-refused scan (no valid packet anywhere to show or drain) keeps the
