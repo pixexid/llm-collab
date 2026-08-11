@@ -1216,6 +1216,25 @@ class TaskContractProductionSchemaGuardTest(unittest.TestCase):
             )
         self.assertFalse(supervisor_errors, supervisor_errors)
 
+        # Post-merge connector finding on PR #767: an unhashable frontmatter
+        # value (YAML list) must yield the validation error, never TypeError.
+        with patch.object(task_contract, "get_project", return_value=project):
+            unhashable_errors, _ = task_contract.validate_db_contract(
+                {
+                    **complete,
+                    "db_local_schema_only_exception_approved_by": ["supervisor"],
+                },
+                "",
+                stage="review",
+            )
+        self.assertTrue(
+            any(
+                "db_local_schema_only_exception_approved_by" in error
+                for error in unhashable_errors
+            ),
+            unhashable_errors,
+        )
+
         with patch.object(task_contract, "get_project", return_value=project):
             errors, _ = task_contract.validate_db_contract(
                 complete,
