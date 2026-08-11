@@ -43,6 +43,7 @@ sys.path.insert(0, str(ROOT / "tests"))  # GH-503: import the runtime-gate testk
 # Runner-session identity that must never leak into subprocess tests: each is
 # read by runtime_family_from_env() and would resolve a family a test left unset.
 STRIP_ENV = (
+    "BB_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_SESSION_ID",
     "GEMINI_SESSION_ID",

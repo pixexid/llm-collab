@@ -34,7 +34,7 @@ class VerifyCommandTest(unittest.TestCase):
 
     def test_strips_runner_identity_env(self):
         for var in (
-            "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+            "BB_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
             "LLM_COLLAB_READER_RUNTIME_FAMILY", "LLM_COLLAB_READER_RUNTIME_ID",
         ):
             self.assertIn(var, self.verify.STRIP_ENV)
@@ -42,9 +42,12 @@ class VerifyCommandTest(unittest.TestCase):
     def test_build_env_removes_leaked_session_and_disables_bytecode(self):
         import os
         os.environ["CLAUDE_CODE_SESSION_ID"] = "leak-should-be-stripped"
+        os.environ["BB_THREAD_ID"] = "thr_leak"
         self.addCleanup(os.environ.pop, "CLAUDE_CODE_SESSION_ID", None)
+        self.addCleanup(os.environ.pop, "BB_THREAD_ID", None)
         env = self.verify.build_env()
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
+        self.assertNotIn("BB_THREAD_ID", env)
         self.assertEqual("1", env["PYTHONDONTWRITEBYTECODE"])
 
     def test_diff_check_clean_tree_passes(self):

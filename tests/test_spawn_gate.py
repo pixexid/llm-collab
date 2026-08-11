@@ -758,31 +758,59 @@ class WatcherGateCliTest(unittest.TestCase):
         )
         self.assertEqual(0, exit_code)
 
-    def test_writing_spawn_with_fresh_markers_passes_silently(self) -> None:
-        plan = planned(assignment_kind="writing")
-        self.assertIsInstance(plan, SpawnPlan)
-        with tempfile.TemporaryDirectory() as temporary:
-            with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
-                bb_spawn, "resolve_project_repo_path", return_value=REPO
-            ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
-                bb_spawn, "check_markers",
-                return_value=marker_report("fresh", session_id="sess-test"),
-            ), mock.patch.object(
-                bb_spawn, "runtime_id_from_env", return_value="sess-test"
-            ), mock.patch.object(
-                bb_spawn, "project_state_dir", return_value=Path(temporary)
-            ), mock.patch.object(
-                bb_spawn, "_configured_client", return_value=self._running_client()
-            ), mock.patch.object(bb_spawn, "_emit") as emit:
-                exit_code = bb_spawn.main(WRITING_OVERRIDE_CLI_ARGS[:-1])
-            record = json.loads(
-                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
-                    encoding="utf-8"
+    def test_native_bb_owner_passes_fresh_markers_for_two_projects(self) -> None:
+        for project_id in ("llm-collab", "amiga"):
+            with self.subTest(project_id=project_id), tempfile.TemporaryDirectory() as temporary:
+                registry = {**REGISTRY, "id": project_id}
+                plan = planned(assignment_kind="writing", registry_entry=registry)
+                self.assertIsInstance(plan, SpawnPlan)
+                args = [project_id if value == "llm-collab" else value for value in WRITING_CLI_ARGS]
+                with mock.patch.dict(
+                    os.environ, {"BB_THREAD_ID": "thr_native123"}, clear=True
+                ), mock.patch.object(
+                    bb_spawn, "get_project", return_value=registry
+                ), mock.patch.object(
+                    bb_spawn, "resolve_project_repo_path", return_value=REPO
+                ), mock.patch.object(
+                    bb_spawn, "plan_spawn", return_value=plan
+                ) as planner, mock.patch.object(
+                    bb_spawn, "check_markers",
+                    return_value=marker_report("fresh", session_id="thr_native123"),
+                ) as markers, mock.patch.object(
+                    bb_spawn, "project_state_dir", return_value=Path(temporary)
+                ), mock.patch.object(
+                    bb_spawn, "_configured_client", return_value=self._running_client()
+                ), mock.patch.object(bb_spawn, "_emit") as emit:
+                    exit_code = bb_spawn.main(args)
+                record = json.loads(
+                    (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
+                        encoding="utf-8"
+                    )
                 )
-            )
-        emit.assert_not_called()
-        self.assertNotIn("watcher_gate", record)
-        self.assertEqual(0, exit_code)
+            self.assertEqual(project_id, planner.call_args.kwargs["registry_entry"]["id"])
+            markers.assert_called_once_with(project_id)
+            emit.assert_not_called()
+            self.assertNotIn("watcher_gate", record)
+            self.assertEqual(0, exit_code)
+
+    def test_unknown_native_caller_still_refuses_fresh_owned_markers(self) -> None:
+        plan = planned(assignment_kind="writing")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            bb_spawn, "get_project", return_value=REGISTRY
+        ), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(
+            bb_spawn, "plan_spawn", return_value=plan
+        ), mock.patch.object(
+            bb_spawn, "check_markers",
+            return_value=marker_report("fresh", session_id="thr_native123"),
+        ), mock.patch.object(bb_spawn, "_configured_client") as client, mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        client.assert_not_called()
+        self.assertIn("owner_unknown", emit.call_args.args[0])
+        self.assertEqual(1, exit_code)
 
     def test_read_only_spawn_never_reads_the_markers(self) -> None:
         plan = planned()

@@ -34,6 +34,7 @@ def write_json(path: Path, payload: dict) -> None:
 
 class ActivationLeaseTest(unittest.TestCase):
     READER_ENV_VARS = (
+        "BB_THREAD_ID",
         "LLM_COLLAB_READER_RUNTIME_ID",
         "LLM_COLLAB_READER_PID",
         "CLAUDE_CODE_SESSION_ID",
@@ -80,6 +81,52 @@ class ActivationLeaseTest(unittest.TestCase):
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         base = {k: v for k, v in os.environ.items() if k not in self.READER_ENV_VARS}
         return {**base, "LLM_COLLAB_UI_REFRESH": "0", **(extra or {})}
+
+    def test_native_bb_thread_id_is_the_runtime_id_without_a_synthetic_family(self) -> None:
+        with patch.dict(os.environ, {"BB_THREAD_ID": "thr_native123"}, clear=True):
+            self.assertIsNone(lease_lib.runtime_id_from_env())
+            self.assertEqual(
+                "thr_native123",
+                lease_lib.runtime_id_from_env(include_bb_thread=True),
+            )
+            self.assertIsNone(lease_lib.runtime_family_from_env())
+
+    def test_native_bb_identity_refuses_invalid_or_ambiguous_values(self) -> None:
+        cases = (
+            {"BB_THREAD_ID": ""},
+            {"BB_THREAD_ID": " thr_native123 "},
+            {"BB_THREAD_ID": "not-a-thread"},
+            {
+                "BB_THREAD_ID": "thr_native123",
+                "LLM_COLLAB_READER_RUNTIME_ID": "thr_injected",
+            },
+        )
+        for environment in cases:
+            with self.subTest(environment=environment), patch.dict(
+                os.environ, environment, clear=True
+            ):
+                self.assertIsNone(
+                    lease_lib.runtime_id_from_env(include_bb_thread=True)
+                )
+
+    def test_native_bb_presence_suppresses_stale_app_family(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "BB_THREAD_ID": "thr_native123",
+                "LLM_COLLAB_READER_RUNTIME_FAMILY": "codex_app",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(lease_lib.runtime_id_from_env())
+            self.assertIsNone(lease_lib.runtime_family_from_env())
+
+    def test_legacy_runtime_id_fallback_is_unchanged_without_native_identity(self) -> None:
+        with patch.dict(
+            os.environ, {"CODEX_SESSION_ID": " legacy-id "}, clear=True
+        ):
+            self.assertEqual("legacy-id", lease_lib.runtime_id_from_env())
+            self.assertEqual("codex_app", lease_lib.runtime_family_from_env())
 
     def run_cli(self, root: Path, *args: str, env: dict[str, str] | None = None) -> tuple[dict, int]:
         effective_env = {"CLAUDE_HOME": str(root / ".claude"), **(env or {})}

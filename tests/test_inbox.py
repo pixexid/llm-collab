@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 import inbox as inbox_lib
 import _helpers as helpers_lib
 import _session_autobridge as session_autobridge_lib
-from _activation_lease import RUNTIME_ID_ENV_VARS
+from _activation_lease import BB_THREAD_ID_ENV_VAR, RUNTIME_ID_ENV_VARS
 
 
 def write(path: Path, content: str) -> None:
@@ -525,7 +525,9 @@ class InboxMarkAllReadTest(unittest.TestCase):
     ) -> None:
         self.add_exact_session()
         secret = self.add_exact_message("secret")
-        cleared = {name: "" for name in RUNTIME_ID_ENV_VARS}
+        cleared = {
+            name: "" for name in RUNTIME_ID_ENV_VARS if name != BB_THREAD_ID_ENV_VAR
+        }
         cases = (
             ("exact_session_runtime_missing", cleared),
             (
@@ -535,7 +537,7 @@ class InboxMarkAllReadTest(unittest.TestCase):
         )
 
         for expected, env in cases:
-            with self.subTest(expected=expected):
+            with self.subTest(expected=expected), patch.dict(os.environ, {}, clear=True):
                 result = self.run_inbox(
                     "--project",
                     "amiga",
