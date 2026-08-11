@@ -444,6 +444,31 @@ class MarkerProcessLivenessTest(unittest.TestCase):
                 "orchestrator_watch.py", "worker-lifecycle",
                 "--project", "sess-current", "--session", "project-a",
             ],
+            # The mode name appears, but as a FLAG VALUE. The watcher's own
+            # parser would never read it as the mode, so neither may we.
+            "mode-name-only-as-a-flag-value": [
+                "orchestrator_watch.py", "heartbeat",
+                "--title", "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            # Ambiguous identity is not identity: there is no single answer to
+            # "which project is this process for".
+            "repeated-project-flag": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a", "--project", "other",
+                "--session", "sess-current",
+            ],
+            "repeated-session-flag-equals-form": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a",
+                "--session=sess-current", "--session=sess-other",
+            ],
+            # The script name present only as a flag value, same hole one level up.
+            "script-only-as-a-flag-value": [
+                "python3.11", "--log", "orchestrator_watch.py",
+                "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
         }
         for label, argv in rejected.items():
             with self.subTest(spelling=label):

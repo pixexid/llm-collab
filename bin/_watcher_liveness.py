@@ -222,6 +222,28 @@ def _identity_requirements(argv_marker: str):
     return script, bare, pairs
 
 
+def _positional_tokens(live_tokens: list[str]) -> set[str]:
+    """Tokens the live argv supplies POSITIONALLY, not as a flag or a flag's value.
+
+    Parsed the same way the watcher's own argv is: `--flag value` consumes two
+    tokens, `--flag=value` one. Anything left is a positional. This is what
+    stops a flag VALUE from impersonating a positional identity token.
+    """
+    positionals: set[str] = set()
+    index = 0
+    while index < len(live_tokens):
+        token = live_tokens[index]
+        if token.startswith("--") and "=" not in token:
+            index += 2
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        positionals.add(token)
+        index += 1
+    return positionals
+
+
 def _flag_pair_present(live_tokens: list[str], flag: str, value: str) -> bool:
     """True when the live argv supplies exactly this flag/value pair.
 
@@ -229,15 +251,25 @@ def _flag_pair_present(live_tokens: list[str], flag: str, value: str) -> bool:
     must not be satisfied by a process running `--project alpha-2` (GH-770
     round 3). Both spellings of the same pair are accepted because both are
     the same argv.
+
+    A REPEATED identifying flag fails closed. `--project a --project b` has no
+    single answer to "which project is this process for", and accepting it
+    because one occurrence matched would let an accident or an append satisfy
+    any marker. Ambiguous identity is not identity.
     """
-    joined = f"{flag}={value}"
-    for index, token in enumerate(live_tokens):
-        if token == joined:
-            return True
-        if token == flag and index + 1 < len(live_tokens):
-            if live_tokens[index + 1] == value:
-                return True
-    return False
+    joined_prefix = f"{flag}="
+    occurrences = [
+        index
+        for index, token in enumerate(live_tokens)
+        if token == flag or token.startswith(joined_prefix)
+    ]
+    if len(occurrences) != 1:
+        return False
+    index = occurrences[0]
+    token = live_tokens[index]
+    if token.startswith(joined_prefix):
+        return token == f"{flag}={value}"
+    return index + 1 < len(live_tokens) and live_tokens[index + 1] == value
 
 
 def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | None]:
@@ -247,6 +279,13 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     the marker: the recorded `--session <id>` must be present in the live argv
     for this to pass, which is what binds liveness and ownership in one
     invocation (GH-770 round 5).
+
+    Order-independent is NOT position-blind. A recorded positional (the script
+    and the watcher mode) must appear as a POSITIONAL in the live argv, never
+    merely somewhere in it. Membership alone would let an unrelated process
+    carrying `--title worker-lifecycle` satisfy the mode requirement while the
+    real watcher parser would read that token as a flag's value. The first
+    version of this matcher had exactly that hole.
     """
     parsed = _identity_requirements(argv_marker)
     if parsed is None:
@@ -255,18 +294,20 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     live_tokens = command.split()
     if not live_tokens:
         return False, "live command line has no argv tokens"
+    live_positionals = _positional_tokens(live_tokens)
     # The marker records a bare script name while the live argv usually carries
     # a path to it, so compare basenames rather than requiring the same spelling.
     wanted_script = os.path.basename(script)
-    if not any(os.path.basename(token) == wanted_script for token in live_tokens):
-        return False, f"does not contain recorded script token {script!r}"
-    live_set = set(live_tokens)
+    if not any(os.path.basename(token) == wanted_script for token in live_positionals):
+        return False, f"does not contain recorded script token {script!r} as a positional"
     for token in bare:
-        if token not in live_set:
-            return False, f"does not contain recorded token {token!r}"
+        if token not in live_positionals:
+            return False, f"does not contain recorded token {token!r} as a positional"
     for flag, value in pairs:
         if not _flag_pair_present(live_tokens, flag, value):
-            return False, f"does not contain recorded {flag} {value!r}"
+            return False, (
+                f"does not contain exactly one recorded {flag} with value {value!r}"
+            )
     return True, None
 
 
