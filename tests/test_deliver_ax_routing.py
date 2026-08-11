@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "bin"))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 import deliver
 import _helpers
+from _runtime_gate_testkit import gate_bypass_env
 
 
 class AxDoorbellRoutingTest(unittest.TestCase):
@@ -94,6 +99,128 @@ class AxDoorbellRoutingTest(unittest.TestCase):
         self.assertTrue(deliver.ACTIVATION_RUNTIME_INTEGRATED)
 
 
+
+
+class AxDoorbellPrintGuidanceTest(unittest.TestCase):
+    def _render_doorbell(self) -> str:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gh748-") as raw:
+            root = Path(raw)
+            chat_dir = root / "Chats" / "2026-08-10_gh748__CHAT-GH748"
+            chat_dir.mkdir(parents=True)
+            for agent in ("claude", "codex"):
+                (root / "agents" / agent).mkdir(parents=True)
+                (root / "agents" / agent / "inbox.json").write_text(
+                    json.dumps({"agent": agent, "unread": [], "read": []})
+                )
+            (root / "agents.json").write_text(
+                json.dumps(
+                    {
+                        "agents": [
+                            {
+                                "id": "claude",
+                                "display_name": "Claude",
+                                "activation": {
+                                    "type": "human_relay",
+                                    "watcher_enabled": False,
+                                },
+                            },
+                            {
+                                "id": "codex",
+                                "display_name": "Codex",
+                                "activation": {
+                                    "type": "cli_session",
+                                    "watcher_enabled": True,
+                                    "ax_app": "Codex",
+                                },
+                            },
+                        ]
+                    }
+                )
+            )
+            (root / "projects.json").write_text(
+                json.dumps(
+                    {
+                        "projects": [
+                            {
+                                "id": "test-project",
+                                "display_name": "Test project",
+                                "repos": {"app": "."},
+                            }
+                        ]
+                    }
+                )
+            )
+            (root / "collab.config.json").write_text(
+                json.dumps(
+                    {
+                        "workspace_name": "gh748-test",
+                        "schema_version": 2,
+                        "workspace_id": "ws_gh748",
+                        "projects_root": str(root),
+                        "project_state_root": str(root / "project-state"),
+                        "poll_interval_seconds": 15,
+                        "notifications_enabled": False,
+                    }
+                )
+            )
+            (chat_dir / "meta.json").write_text(
+                json.dumps({"chat_id": "CHAT-GH748", "project_id": "test-project"})
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "bin" / "deliver.py"),
+                    "--chat",
+                    "CHAT-GH748",
+                    "--from",
+                    "claude",
+                    "--to",
+                    "codex",
+                    "--project",
+                    "test-project",
+                    "--repo-targets",
+                    "app",
+                    "--title",
+                    "GH-748 print guidance",
+                    "--sender-session-id",
+                    "claude-session",
+                    "--skip-awareness-instruction",
+                    "--body-file",
+                    "-",
+                ],
+                cwd=root,
+                env={**os.environ, **gate_bypass_env(), "PYTHONDONTWRITEBYTECODE": "1"},
+                input="A GH-748 print-path probe.",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return result.stdout
+
+    def test_print_states_codex_app_condition_before_preserving_command(self) -> None:
+        output = self._render_doorbell()
+
+        self.assertIn("AX DOORBELL — CONDITIONAL FALLBACK", output)
+        self.assertNotIn("AX DOORBELL REQUIRED", output)
+        self.assertIn("For OpenAI-model interaction, use BB.", output)
+        self.assertIn("Codex-app-only tool that BB cannot reach", output)
+        self.assertIn(
+            "this printed command does not itself satisfy that condition", output
+        )
+        self.assertLess(
+            output.index("For OpenAI-model interaction, use BB."),
+            output.index("One-line prompt:"),
+        )
+        self.assertIn(
+            "VERIFIED proves only that a turn rendered in the lagging app UI; "
+            "it does not establish delivery to a working harness or a reply path.",
+            output,
+        )
+        self.assertIn("One-line prompt:", output)
+        self.assertIn('axsend-ensure ring --app "Codex"', output)
+        self.assertIn("--submit --verify --text", output)
+        self.assertIn("record the AX blocker in the mailbox", output)
 
 
 class AxAttendedRecoveryRoutingTest(unittest.TestCase):
