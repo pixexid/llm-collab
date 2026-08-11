@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -216,10 +217,10 @@ def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str
         command = result.stdout.strip()
         if not command:
             return None, f"ps returned no command line for pid {pid}"
-        if argv_marker not in command:
+        if re.search(rf"{re.escape(argv_marker)}(?=\s|$)", command) is None:
             return False, (
                 f"pid {pid} command line does not contain recorded argv_marker "
-                f"{argv_marker!r}"
+                f"{argv_marker!r} at an argv-token boundary"
             )
         return True, None
     except Exception as error:

@@ -323,8 +323,10 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         }]
 
     @staticmethod
-    def _live_watcher_process() -> tuple[subprocess.Popen, str]:
-        marker = "orchestrator_watch.py worker-lifecycle --project project-a"
+    def _live_watcher_process(
+        project_id="project-a",
+    ) -> tuple[subprocess.Popen, str]:
+        marker = f"orchestrator_watch.py worker-lifecycle --project {project_id}"
         process = subprocess.Popen([
             sys.executable,
             "-c",
@@ -332,7 +334,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             "orchestrator_watch.py",
             "worker-lifecycle",
             "--project",
-            "project-a",
+            project_id,
         ])
         return process, marker
 
@@ -381,6 +383,22 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         self.assertEqual("owner_gone", verdict["reason"])
         self.assertFalse(verdict["acceptable"])
         self.assertIn("does not contain", verdict["detail"])
+
+    def test_project_id_prefix_on_same_argv_token_is_owner_gone(self) -> None:
+        process, _marker = self._live_watcher_process("alpha-2")
+        try:
+            verdict = evaluate_coverage(
+                self._report(
+                    process.pid,
+                    "orchestrator_watch.py worker-lifecycle --project alpha",
+                ),
+                "sess-current",
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("owner_gone", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
 
     def test_failed_or_slow_probe_is_liveness_unverifiable_not_an_exception(self) -> None:
         with mock.patch.object(
