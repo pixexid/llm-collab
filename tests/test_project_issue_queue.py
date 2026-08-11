@@ -389,6 +389,98 @@ class ProjectIssueQueueNormalizeTest(unittest.TestCase):
         validate_policy.assert_not_called()
         persist.assert_called_once_with("amiga", payload)
 
+    def test_github_blocker_is_monotonic_across_local_transitions(self) -> None:
+        for task_status in ("open", "review"):
+            with self.subTest(task_status=task_status):
+                payload = {
+                    "project_id": "amiga",
+                    "completed_recently": [],
+                    "lanes": [
+                        {
+                            "order": 1,
+                            "issue": 756,
+                            "task_id": "TASK-E8C28D",
+                            "owner": "codex",
+                            "task_status": "blocked",
+                            "queue_state": "blocked",
+                            "depends_on": [],
+                            "blocked_by": [project_issue_queue.GITHUB_STATE_BLOCKER],
+                        }
+                    ],
+                }
+                with (
+                    patch.object(project_issue_queue, "queue_exists", return_value=True),
+                    patch.object(project_issue_queue, "load_queue", return_value=payload),
+                    patch.object(
+                        project_issue_queue,
+                        "find_task_by_id",
+                        return_value=TaskMirror(project_id="amiga", status=task_status),
+                    ),
+                    patch.object(
+                        project_issue_queue,
+                        "validate_direct_app_policy",
+                        return_value=([], {}),
+                    ),
+                    patch.object(project_issue_queue, "sync_markdown"),
+                ):
+                    project_issue_queue.mark_lane_transition(
+                        "amiga",
+                        "TASK-E8C28D",
+                        owner="codex",
+                        task_status=task_status,
+                    )
+
+                lane = payload["lanes"][0]
+                self.assertEqual(
+                    lane["queue_state"],
+                    "blocked",
+                    "local task-status transitions must not clear the GitHub-owned blocker",
+                )
+                self.assertIn(project_issue_queue.GITHUB_STATE_BLOCKER, lane["blocked_by"])
+                self.assertNotEqual(lane["queue_state"], "ready")
+
+    def test_lane_without_github_blocker_transitions_normally(self) -> None:
+        for task_status, expected_queue_state in (("open", "ready"), ("review", "review")):
+            with self.subTest(task_status=task_status):
+                payload = {
+                    "project_id": "amiga",
+                    "completed_recently": [],
+                    "lanes": [
+                        {
+                            "order": 1,
+                            "issue": 756,
+                            "task_id": "TASK-E8C28D",
+                            "owner": "codex",
+                            "task_status": "blocked",
+                            "queue_state": "blocked",
+                            "depends_on": [],
+                            "blocked_by": [],
+                        }
+                    ],
+                }
+                with (
+                    patch.object(project_issue_queue, "queue_exists", return_value=True),
+                    patch.object(project_issue_queue, "load_queue", return_value=payload),
+                    patch.object(
+                        project_issue_queue,
+                        "find_task_by_id",
+                        return_value=TaskMirror(project_id="amiga", status=task_status),
+                    ),
+                    patch.object(
+                        project_issue_queue,
+                        "validate_direct_app_policy",
+                        return_value=([], {}),
+                    ),
+                    patch.object(project_issue_queue, "sync_markdown"),
+                ):
+                    project_issue_queue.mark_lane_transition(
+                        "amiga",
+                        "TASK-E8C28D",
+                        owner="codex",
+                        task_status=task_status,
+                    )
+                self.assertEqual(payload["lanes"][0]["queue_state"], expected_queue_state)
+
     def test_mark_transition_refuses_invalid_queue_project_before_any_mutation(self) -> None:
         missing = object()
         for label, queue_project_id in (

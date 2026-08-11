@@ -44,6 +44,16 @@ class BacklogUnavailable(RuntimeError):
     pass
 
 
+class ExactIssuePopulationError(RuntimeError):
+    def __init__(self, reason: str, *, repository: str, issue_number: int) -> None:
+        self.reason = reason
+        self.repository = repository
+        self.issue_number = issue_number
+        super().__init__(
+            f"exact GitHub record GH-{issue_number} in {repository} is {reason}"
+        )
+
+
 class IssueStatePolicyError(ValueError):
     def __init__(self, violations: list[dict[str, Any]], *, total_examined: int) -> None:
         self.violations = violations
@@ -196,6 +206,24 @@ def exact_issue_policy(project_id: str, issue_number: int) -> tuple[str, IssuePo
     if not config.get("enabled"):
         return None
     raw_issue = load_github_issue(str(config["repo"]), issue_number)
+    if "pull_request" in raw_issue:
+        raise ExactIssuePopulationError(
+            "pull_request",
+            repository=str(config["repo"]),
+            issue_number=issue_number,
+        )
+    raw_state = raw_issue.get("state")
+    if raw_state == "closed":
+        raise ExactIssuePopulationError(
+            "issue_closed",
+            repository=str(config["repo"]),
+            issue_number=issue_number,
+        )
+    if raw_state != "open":
+        raise BacklogUnavailable(
+            f"GitHub returned invalid state for exact issue GH-{issue_number} "
+            f"in {config['repo']}: {raw_state!r}"
+        )
     issue = parse_backlog_issue(raw_issue)
     if issue is None or issue.number != issue_number:
         raise BacklogUnavailable(

@@ -43,6 +43,7 @@ QUEUE_FILE_NAME = "issue-queue.json"
 MARKDOWN_FILE_NAME = "issue-queue.md"
 HISTORY_DIR_NAME = "history"
 DIRECT_APP_BLOCKER_PREFIX = "ui_ux.direct_app_only: "
+GITHUB_STATE_BLOCKER = "github:state:blocked"
 ISSUE_RE = re.compile(r"\bGH[- #]+(\d+)\b", re.IGNORECASE)
 
 
@@ -687,7 +688,7 @@ def reconcile_queue(project_id: str) -> dict:
             and not bool(frontmatter.get("accepted_by"))
         )
         github_blockers = (
-            ["github:state:blocked"]
+            [GITHUB_STATE_BLOCKER]
             if issue.issue_state == "state:blocked"
             else []
         )
@@ -992,7 +993,7 @@ def normalize_lanes(
                 for error in managed_errors
             ],
         ]
-        if managed_errors:
+        if managed_errors or GITHUB_STATE_BLOCKER in lane["blocked_by"]:
             lane["queue_state"] = "blocked"
 
     unblock_satisfied_lanes(payload)

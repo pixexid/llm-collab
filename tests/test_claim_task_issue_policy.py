@@ -148,6 +148,27 @@ class ClaimTaskIssuePolicyTest(unittest.TestCase):
         self.assertIn('"attempts": 2', err)
         write.assert_not_called()
 
+    def test_closed_issue_and_pull_request_have_distinct_activation_refusals(self) -> None:
+        for reason in ("issue_closed", "pull_request"):
+            with self.subTest(reason=reason):
+                code, err, write, load = self.claim(
+                    unavailable=_backlog.ExactIssuePopulationError(
+                        reason,
+                        repository="pixexid/llm-collab",
+                        issue_number=756,
+                    )
+                )
+                self.assertEqual(code, 1)
+                self.assertIn(
+                    f'"reason": "{reason}"',
+                    err,
+                    "activation must distinguish closed issues and pull requests from policy and availability refusals",
+                )
+                self.assertNotIn('"reason": "issue_policy_refusal"', err)
+                self.assertNotIn('"reason": "github_unreachable"', err)
+                load.assert_not_called()
+                write.assert_not_called()
+
     def test_active_issue_passes_policy_gate_to_the_next_existing_gate(self) -> None:
         active = _backlog.classify_issue_labels(
             ("state:active",), _backlog.CONTRACT_REQUIRED_EXCLUDE_LABELS

@@ -477,6 +477,23 @@ def main():
         if issue_number is not None:
             try:
                 resolved_policy = _backlog.exact_issue_policy(project_id, issue_number)
+            except _backlog.ExactIssuePopulationError as error:
+                print(
+                    json.dumps(
+                        {
+                            "error": "GitHub record is not an open issue; refusing activation",
+                            "reason": error.reason,
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "project_id": project_id,
+                            "repository": error.repository,
+                            "issue": error.issue_number,
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             except _backlog.BacklogUnavailable as error:
                 print(
                     json.dumps(

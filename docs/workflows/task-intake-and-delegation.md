@@ -148,15 +148,19 @@ classified by implication.
 - **ENFORCED — state schema at execution boundaries.** An open issue must carry
   exactly one of `state:active`, `state:blocked`, or `state:parked`. Missing,
   multiple, and unknown `state:*` labels make reconciliation invalid and refuse
-  activation. `epic` is orthogonal and never substitutes for a state label.
+  activation. The exact activation check separately requires an open,
+  non-pull-request record before classifying its labels; closed issues and pull
+  request numbers produce distinct typed refusals. `epic` is orthogonal and
+  never substitutes for a state label.
 - **CHECKED-CONVENTION — proactive label hygiene.** Run
   `python3.11 bin/audit_issue_states.py --project "$COLLAB_PROJECT_ID"` at
   orchestrator succession and during the parked sweep. The queue and activation
   gates remain the safety controls if this audit is missed.
 - **ENFORCED — blocked state.** `state:blocked` adds
   `github:state:blocked` to queue blockers and refuses new activation. It never
-  clears a blocker owned by task or dependency evidence, and `state:active`
-  clears only the GitHub-owned blocker after fresh reconciliation.
+  clears a blocker owned by task or dependency evidence, remains blocked across
+  local task-status transitions, and `state:active` clears only the GitHub-owned
+  blocker after fresh reconciliation.
 - **JUDGMENT — parking quality and disposition.** The parked listing is review
   input. No command decides whether a trigger is meaningful or fired, or
   whether close-or-recommit is the right decision.

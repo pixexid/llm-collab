@@ -145,6 +145,50 @@ class BacklogConfigAndPolicyTest(unittest.TestCase):
             ["state:active", "state:blocked"],
         )
 
+    def test_exact_issue_policy_requires_open_non_pull_request_population(self) -> None:
+        records = {
+            "issue_closed": {
+                "number": 756,
+                "title": "Closed issue",
+                "state": "closed",
+                "labels": [{"name": "state:active"}],
+            },
+            "pull_request": {
+                "number": 756,
+                "title": "Open pull request",
+                "state": "open",
+                "labels": [{"name": "state:active"}],
+                "pull_request": {},
+            },
+        }
+        for expected_reason, record in records.items():
+            with self.subTest(reason=expected_reason):
+                with (
+                    patch.object(_backlog, "get_project", return_value=self.project()),
+                    patch.object(_backlog, "load_github_issue", return_value=record),
+                    self.assertRaises(
+                        _backlog.ExactIssuePopulationError,
+                        msg="exact issue population gate must reject closed issues and pull requests before classification",
+                    ) as raised,
+                ):
+                    _backlog.exact_issue_policy("amiga", 756)
+                self.assertEqual(raised.exception.reason, expected_reason)
+
+    def test_exact_issue_policy_keeps_open_issue_active(self) -> None:
+        record = {
+            "number": 756,
+            "title": "Open issue",
+            "state": "open",
+            "labels": [{"name": "state:active"}],
+        }
+        with (
+            patch.object(_backlog, "get_project", return_value=self.project()),
+            patch.object(_backlog, "load_github_issue", return_value=record),
+        ):
+            repository, policy = _backlog.exact_issue_policy("amiga", 756)
+        self.assertEqual(repository, "pixexid/amiga")
+        self.assertEqual(policy.classification, "active")
+
     def test_required_patterns_and_priority_preserve_existing_behavior(self) -> None:
         project = self.project(
             "amiga",
