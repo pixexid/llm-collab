@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 25 -->
+<!-- CONTRACT_VERSION: 26 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -69,6 +69,22 @@ criterion exists to correct. Review caught it. That is the strongest available
 argument that the test needed writing down rather than being left to inference.
 
 Related GH-771.
+
+Contract v26 (2026-08-11) adds a required pre-merge check for schema-dependent
+changes: name which database proved the change, who migrated it, and whether a
+production migration path exists. A cached v25 session fails to perform it, which
+is the third bump branch. The failure it prevents is not hypothetical — an amiga
+PR green on every check would have broken all production notification writes on
+merge, because CI had migrated its own test database and validated the code
+against a schema production does not have.
+
+Method note, recorded because the mistake repeated three times in one day: this
+change was proposed without a bump, again, and review caught it, again. The
+error each time was classifying by **section** rather than by **clause** — the
+entry sits in a list of lessons, so it read as a lesson, while its own words say
+"before merging … ask". A clause imposes an obligation if its text requires an
+action, regardless of the character of the section containing it. Apply the three
+branches to the sentence, not to its neighbourhood.
 
 **What earns a bump.** The test is *cached-worker behaviour*: would a session
 still running on the previous version
