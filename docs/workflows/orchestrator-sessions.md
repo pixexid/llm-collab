@@ -261,6 +261,19 @@ re-derive it.
   failure. Grep the label, term, or constant you just narrowed and re-check each
   hit against the new wording before pushing; the citations that were true under
   the old definition are exactly the ones nobody re-reads.
+- **CI green on a schema-dependent change is not deploy safety.** Wherever CI
+  migrates its own test database, the suite validates the change against a schema
+  **CI created** — not the one production has. Every writer passes, every check is
+  green, and the merge ships code whose target schema does not exist where it
+  lands. With auto-deploy-on-main and a migration runner scoped to local or CI
+  environments, there is no step between green and broken. An amiga PR that was
+  green everywhere would have broken all production notification writes on merge;
+  it was stopped by asking where the schema under test came from, not by any
+  check. The reusable question before merging a schema-dependent change: **which
+  database proved this, who migrated it, and does a production migration path
+  exist?** A green suite answers none of the three. This is the same
+  claim-versus-evidence shape as the entries above — CI proves the code matches a
+  schema, and it is read as the code being safe to deploy.
 - **Re-check once after merge.** The connector can re-pass an amended head
   asynchronously; inspect the complete reviewed artifact set and adjudicate any
   late finding under the canonical PR workflow.
