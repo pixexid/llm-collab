@@ -141,7 +141,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
         "repo": "owner/my-app",
         "project_number": 1,
         "backlog": {
-          "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+          "exclude_labels": ["epic", "state:parked", "type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
           "require_any_label": [],
           "priority_labels": ["priority:urgent", "priority:high"]
         }
@@ -176,7 +176,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `github.enabled` | bool | Whether GitHub integration is active |
 | `github.repo` | string | `owner/repo` format |
 | `github.project_number` | int | GitHub Projects board number |
-| `github.backlog.exclude_labels` | string[] | Open issue labels excluded from the executable backlog. Defaults include `type:epic`, terminal labels, and `status:deferred`. |
+| `github.backlog.exclude_labels` | string[] | Project-configured additional open-issue exclusion labels or patterns. Effective exclusions are the ordered union of this list and the non-removable contract floor (`epic`, `state:parked` at this contract version). Removing a floor label from configuration has no effect. Missing uses the configurable defaults before the floor is applied. |
 | `github.backlog.require_any_label` | string[] | Optional label or wildcard patterns that an open issue must match to be backlog-eligible. Empty means every non-excluded open issue is eligible. |
 | `github.backlog.priority_labels` | string[] | Optional ordered label list used as the primary queue sort key. The first matching entry wins; equal matches use issue number ascending, and unmatched issues follow all matches. Missing or empty preserves issue-number order. |
 | `release_gate_agent` | string | Required, never-defaulted enabled agent ID that must equal `claim_task.py --released-by` for every new `review -> done` transition. `scripts/init.py` requires an explicit selection from collected enabled agents for new projects; existing registries require a manual local rollout. Missing or empty fails closed and must be repaired in that task project's `projects.json` entry. This is workflow deterrence and attribution, not authentication. |
@@ -1573,6 +1573,8 @@ chat/session turnover.
       "issue": 101,
       "priority_label": null,
       "priority_rank": null,
+      "issue_state": "state:active",
+      "policy_reason": "state:active",
       "task_id": "TASK-READY1",
       "title": "first ready implementation lane",
       "owner": "worker",
@@ -1609,6 +1611,8 @@ chat/session turnover.
 | `issue` | int | GitHub issue number |
 | `priority_label` | string or null | Always emitted. The first configured `github.backlog.priority_labels` entry matching the issue, preserving the configured spelling; null when no entry matches or `priority_labels` is absent or empty. |
 | `priority_rank` | int or null | Always emitted. One-based position of `priority_label` in the configured list; null when `priority_label` is null. |
+| `issue_state` | string | Fresh recognized GitHub state label: `state:active` or `state:blocked`. Parked and epic issues do not produce lanes. |
+| `policy_reason` | string | Classifier result carried into the projection, such as `state:active` or `github:state:blocked`. |
 | `task_id` | string | Local task mirror id |
 | `title` | string | Short lane title |
 | `owner` | string | Assigned collaborator |
@@ -1643,6 +1647,10 @@ records why the work is parallel-safe.
 - the canonical queue path should remain stable even when no lanes remain
 - when the final lane completes, archive the last queue snapshot to `{project_state_root}/{project_id}/history/`
 - keep `{project_state_root}/{project_id}/issue-queue.json` and `.md` present, but treat `lanes: []` as valid only when `project_issue_queue.py validate` confirms the eligible GitHub backlog is also empty
+- when open issues have missing, multiple, or unknown `state:*` labels,
+  reconciliation writes `backlog: invalid`, an `invalid_issue_states` diagnostic
+  list, and no lanes; configuration or GitHub-read failures produce no projection
+  and cannot overwrite the prior queue
 - do not keep real project queue files as tracked files in this repo; only `projects/_example/` belongs in the public checkout
 
 ---

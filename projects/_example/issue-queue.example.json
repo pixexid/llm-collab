@@ -14,6 +14,8 @@
     {
       "order": 1,
       "issue": 101,
+      "issue_state": "state:active",
+      "policy_reason": "state:active",
       "task_id": "TASK-READY1",
       "title": "first ready implementation lane",
       "owner": "worker",
@@ -27,6 +29,8 @@
     {
       "order": 2,
       "issue": 102,
+      "issue_state": "state:active",
+      "policy_reason": "state:active",
       "task_id": "TASK-QUEUE2",
       "title": "second queued implementation lane",
       "owner": "worker",

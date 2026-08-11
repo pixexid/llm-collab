@@ -623,6 +623,8 @@ def collect_projects(
                 github["project_number"] = int(pn)
             github["backlog"] = {
                 "exclude_labels": [
+                    "epic",
+                    "state:parked",
                     "type:epic",
                     "wontfix",
                     "duplicate",
