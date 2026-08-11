@@ -8,7 +8,7 @@ standard orchestrator watcher rewrites
 every cycle, with JSON content
 
     {"session_id": "<owning session>", "project_id": "<project>", "started_at": "<UTC ISO-8601>",
-     "pid": <watcher pid>, "argv_marker": "orchestrator_watch.py <name> --project <project>"}
+     "pid": <watcher pid>, "argv_marker": "orchestrator_watch.py <name> --project <project> --session <session>"}
 
 Freshness is the mtime — never a timestamp inside the file, because a wedged
 loop that still rewrites its own content would then look alive. Ownership is
@@ -145,7 +145,7 @@ def write_marker(project_id, name, session_id):
         "project_id": project_id,
         "started_at": started_at,
         "pid": os.getpid(),
-        "argv_marker": f"orchestrator_watch.py {name} --project {project_id}",
+        "argv_marker": f"orchestrator_watch.py {name} --project {project_id} --session {session_id}",
     }
     write_file_durably(marker, json.dumps(content, sort_keys=True) + "\n")
     return marker

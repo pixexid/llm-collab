@@ -325,8 +325,12 @@ class MarkerProcessLivenessTest(unittest.TestCase):
     @staticmethod
     def _live_watcher_process(
         project_id="project-a",
+        session_id="sess-current",
     ) -> tuple[subprocess.Popen, str]:
-        marker = f"orchestrator_watch.py worker-lifecycle --project {project_id}"
+        marker = (
+            f"orchestrator_watch.py worker-lifecycle --project {project_id} "
+            f"--session {session_id}"
+        )
         process = subprocess.Popen([
             sys.executable,
             "-c",
@@ -335,6 +339,8 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             "worker-lifecycle",
             "--project",
             project_id,
+            "--session",
+            session_id,
         ])
         return process, marker
 
@@ -373,7 +379,8 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             verdict = evaluate_coverage(
                 self._report(
                     process.pid,
-                    "orchestrator_watch.py heartbeat --project project-a",
+                    "orchestrator_watch.py heartbeat --project project-a "
+                    "--session sess-current",
                 ),
                 "sess-current",
             )[0]
@@ -390,7 +397,25 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             verdict = evaluate_coverage(
                 self._report(
                     process.pid,
-                    "orchestrator_watch.py worker-lifecycle --project alpha",
+                    "orchestrator_watch.py worker-lifecycle --project alpha "
+                    "--session sess-current",
+                ),
+                "sess-current",
+            )[0]
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertEqual("owner_gone", verdict["reason"])
+        self.assertFalse(verdict["acceptable"])
+
+    def test_same_project_mode_but_different_session_is_owner_gone(self) -> None:
+        process, _marker = self._live_watcher_process(session_id="sess-other")
+        try:
+            verdict = evaluate_coverage(
+                self._report(
+                    process.pid,
+                    "orchestrator_watch.py worker-lifecycle --project project-a "
+                    "--session sess-current",
                 ),
                 "sess-current",
             )[0]
@@ -445,7 +470,8 @@ class MarkerWriterTest(unittest.TestCase):
         self.assertEqual("project-a", first["project_id"])
         self.assertEqual(os.getpid(), first["pid"])
         self.assertEqual(
-            "orchestrator_watch.py worker-lifecycle --project project-a",
+            "orchestrator_watch.py worker-lifecycle --project project-a "
+            "--session sess-1",
             first["argv_marker"],
         )
         self.assertEqual(first["started_at"], second["started_at"])
