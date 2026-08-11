@@ -352,32 +352,41 @@ execution and verification.
 Authoring labels in this document are deliberately reduced and structural. An
 operational clause is only a top-level bullet or numbered step inside exactly
 `## Model routing policy` or `## bb-update procedure`. Use exactly three labels:
-`ENFORCED` when a named code path refuses or alerts,
+`ENFORCED` when a named code path refuses the action, quarantines the input, or
+forces a safe state — an alert alone is **not** enforcement, because it reports
+the violation while leaving it possible;
 `CHECKED-CONVENTION` when practice has a runnable command that detects a
 violation, and `JUDGMENT` when compliance is not mechanically decidable, so it
 carries no command by design; inventing one for a `JUDGMENT` clause is the
-failure this scope avoids. Nothing outside these two sections carries any
+failure this scope avoids.
+
+A clause that is mechanically decidable but has **no tested checker yet** is
+none of the three. Record it as an `IMPLEMENTATION GAP` naming the work that
+would close it. Calling it `JUDGMENT` would assert an oracle gap that does not
+exist; calling it `CHECKED-CONVENTION` would credit a checker nobody wrote. Both
+are the same defect the vocabulary exists to prevent.
+
+A normative document may name a **stable invocation** of tested code; it must
+not carry the implementation. Embedded interpreters, JSONL parsing,
+snapshot-diffing, invented record identity, pagination and multi-stage pipelines
+belong in a tested script, where bounds and both-direction proofs can live. Nothing outside these two sections carries any
 labeling implication. Extending the scope is a per-section deliberate
 follow-up, and a section that resists crisp classification is recorded as such
 rather than swept, as in Related GH-751.
-
-Run the checks below from the configured workspace root with
-`COLLAB_PROJECT_ID` set to the project being checked. For checks over newly
-recorded executions, set `BEFORE_TRIPLES` to a copy of that project's
-`thread-executed-triples.jsonl` made before the probe. For evaluation-row
-checks, set `BEFORE_EVAL` to a copy of `model-eval-log.jsonl` made before the
-update.
 
 Operator policy for orchestrator-selected work:
 
 - **JUDGMENT** Route complex authoring to `k3` or `sol`. When a live `k3` attempt reports a
   quota refusal, use `sol`, never `luna`, for that complex authoring lane.
 - **JUDGMENT** Use `luna` as the daily driver for work within its measured boundary.
-- **CHECKED-CONVENTION** Request maximum reasoning effort for `luna` and `glm-5.2`. Contract v15's
+- **IMPLEMENTATION GAP** Request maximum reasoning effort for `luna` and `glm-5.2`. Contract v15's
   hard exclusions still apply to every text-bearing assignment, so this effort
   setting does not authorize an excluded model; only new measurement and a
-  contract change can lift an exclusion. Check:
-  `python3.11 -c 'import json,os; from pathlib import Path; d=Path(json.loads(Path("collab.config.json").read_text())["project_state_root"])/os.environ["COLLAB_PROJECT_ID"]; before={r.get("thread_id") for r in map(json.loads, Path(os.environ["BEFORE_TRIPLES"]).read_text().splitlines()) if r.get("status")=="resolved"}; rows=[r for r in map(json.loads, (d/"thread-executed-triples.jsonl").read_text().splitlines()) if r.get("status")=="resolved" and r.get("thread_id") not in before]; bad=[r for r in rows if r.get("model") in {"gpt-5.6-luna","zai/glm-5.2"} and r.get("reasoning_level") != "max"]; print(*(str(r.get("thread_id"))+": "+str(r.get("model"))+"/"+str(r.get("reasoning_level")) for r in bad), sep="\n") if bad else None; raise SystemExit(bool(bad))'`
+  contract change can lift an exclusion.
+  No tested checker exists for this today. The command removed from here
+  parsed JSONL, diffed a snapshot and invented record identity, and it
+  misclassified real rows; see
+  [GH-771](https://github.com/pixexid/llm-collab/issues/771).
 - **ENFORCED** Apply the hard model-exclusion rule. On the explicitly selected
   path, `plan_spawn` in `llm_collab/spawn_gate.py`, reached through
   `bin/bb_spawn.py`, refuses `excluded_model`; on the inbound bootstrap path,
@@ -399,56 +408,12 @@ Operator policy for orchestrator-selected work:
   requested argv or a declared default. The artifact definition and source are
   owned by
   [`bb-plugins/exec-tracking/README.md`](../../bb-plugins/exec-tracking/README.md).
-  **CHECKED-CONVENTION** Store the bb version observed for that execution with
-  the row so comparisons across CLI versions remain interpretable. Check:
-  ```bash
-  python3.11 - <<'PY'
-  import json
-  import os
-  import subprocess
-  from pathlib import Path
-
-  config = json.loads(Path("collab.config.json").read_text())
-  project_id = os.environ["COLLAB_PROJECT_ID"]
-  project = next(
-      project
-      for project in json.loads(Path("projects.json").read_text())["projects"]
-      if project.get("id") == project_id
-  )
-  version = json.loads(
-      subprocess.run(
-          [*project["bb"]["executable"], "settings", "version", "--json"],
-          check=True,
-          capture_output=True,
-          text=True,
-          timeout=10,
-      ).stdout
-  )["currentVersion"]
-  state = Path(config["project_state_root"]) / project_id
-  before = {
-      row.get("thread_id")
-      for row in map(json.loads, Path(os.environ["BEFORE_EVAL"]).read_text().splitlines())
-      if row.get("thread_id")
-  }
-  all_rows = [
-      row for row in map(json.loads, (state / "model-eval-log.jsonl").read_text().splitlines())
-  ]
-  bad = [
-      row
-      for row in all_rows
-      if (
-          not isinstance(row.get("bb_version"), str)
-          or not row["bb_version"].strip()
-          or (
-              row.get("thread_id") not in before
-              and row.get("bb_version") != version
-          )
-      )
-  ]
-  print(*(str(row.get("thread_id") or row.get("lane")) + ": " + repr(row.get("bb_version")) for row in bad), sep="\n") if bad else None
-  raise SystemExit(bool(bad))
-  PY
-  ```
+  **IMPLEMENTATION GAP** Store the bb version observed for that execution with
+  the row so comparisons across CLI versions remain interpretable.
+  No tested checker exists for this today. The command removed from here
+  parsed JSONL, diffed a snapshot and invented record identity, and it
+  misclassified real rows; see
+  [GH-771](https://github.com/pixexid/llm-collab/issues/771).
 
 This section states routing rules and checks. It intentionally asserts no
 current bb version, qualified-set membership, model availability, or quota
@@ -470,10 +435,13 @@ release pass.
 3. **JUDGMENT** Re-record `tests/fixtures/bb/settings_version.json` from the live configured
    CLI's `settings version --json` output. Do not hand-edit a file whose purpose
    is to preserve a recording.
-4. **CHECKED-CONVENTION** Inspect every version-mismatch test before moving the pin. A wrong-version
+4. **IMPLEMENTATION GAP** Inspect every version-mismatch test before moving the pin. A wrong-version
    literal must not equal the new pin; otherwise the test becomes a match while
-   claiming to prove refusal. Check:
-   `pin="$(python3.11 -c 'import sys; sys.path.insert(0,"."); from llm_collab.bb_client import PINNED_BB_VERSION; print(PINNED_BB_VERSION)')"; hits="$( { rg -n --glob '*.py' -F "\"${pin}\"" tests || true; rg -n --glob '*.py' -F "'${pin}'" tests || true; } )"; if [ -n "$hits" ]; then printf '%s\n' "$hits"; exit 1; fi`
+   claiming to prove refusal.
+   No tested checker exists for this today. The command removed from here
+   parsed JSONL, diffed a snapshot and invented record identity, and it
+   misclassified real rows; see
+   [GH-771](https://github.com/pixexid/llm-collab/issues/771).
 5. **JUDGMENT** Sweep `AGENTS.md`, `docs/`, fixtures, and tests for commands whose semantics
    changed and version-stamped claims that must be re-verified. Update or record
    a disposition for each affected claim; never carry a live observation
@@ -492,56 +460,12 @@ release pass.
    status alone does not prove recording. No command here distinguishes a
    reloaded plugin revision from a stale running plugin, so this step is
    **JUDGMENT** by design.
-8. **CHECKED-CONVENTION** Record the observed bb version beside every evaluation row created during the
-   update or its qualification probes. Check with the same runnable command:
-   ```bash
-   python3.11 - <<'PY'
-   import json
-   import os
-   import subprocess
-   from pathlib import Path
-
-   config = json.loads(Path("collab.config.json").read_text())
-   project_id = os.environ["COLLAB_PROJECT_ID"]
-   project = next(
-       project
-       for project in json.loads(Path("projects.json").read_text())["projects"]
-       if project.get("id") == project_id
-   )
-   version = json.loads(
-       subprocess.run(
-           [*project["bb"]["executable"], "settings", "version", "--json"],
-           check=True,
-           capture_output=True,
-           text=True,
-           timeout=10,
-       ).stdout
-   )["currentVersion"]
-   state = Path(config["project_state_root"]) / project_id
-   before = {
-       row.get("thread_id")
-       for row in map(json.loads, Path(os.environ["BEFORE_EVAL"]).read_text().splitlines())
-       if row.get("thread_id")
-   }
-   all_rows = [
-       row for row in map(json.loads, (state / "model-eval-log.jsonl").read_text().splitlines())
-   ]
-   bad = [
-       row
-       for row in all_rows
-       if (
-           not isinstance(row.get("bb_version"), str)
-           or not row["bb_version"].strip()
-           or (
-               row.get("thread_id") not in before
-               and row.get("bb_version") != version
-           )
-       )
-   ]
-   print(*(str(row.get("thread_id") or row.get("lane")) + ": " + repr(row.get("bb_version")) for row in bad), sep="\n") if bad else None
-   raise SystemExit(bool(bad))
-   PY
-   ```
+8. **IMPLEMENTATION GAP** Record the observed bb version beside every evaluation row created during the
+   update or its qualification probes.
+   No tested checker exists for this today. The command removed from here
+   parsed JSONL, diffed a snapshot and invented record identity, and it
+   misclassified real rows; see
+   [GH-771](https://github.com/pixexid/llm-collab/issues/771).
 
 The current pin is read from source, the installed version is read live, the
 qualified set is read from its code authority, model availability is queried on
