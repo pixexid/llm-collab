@@ -501,6 +501,25 @@ class MarkerProcessLivenessTest(unittest.TestCase):
                 self.assertEqual("owner_gone", verdict["reason"])
                 self.assertFalse(verdict["acceptable"])
 
+    def test_value_less_wrapper_option_does_not_hide_the_script(self) -> None:
+        """A known wrapper flag without a value leaves the script positional."""
+        marker = (
+            "orchestrator_watch.py worker-lifecycle "
+            "--project project-a --session sess-current"
+        )
+        matched, detail = _watcher_liveness._argv_identity_matches(
+            marker,
+            "env --ignore-environment /opt/runtime/bin/orchestrator_watch.py "
+            "worker-lifecycle --project project-a --session sess-current",
+        )
+        self.assertTrue(matched, detail)
+        matched, _detail = _watcher_liveness._argv_identity_matches(
+            marker,
+            "other-wrapper --ignore-environment orchestrator_watch.py "
+            "worker-lifecycle --project project-a --session sess-current",
+        )
+        self.assertFalse(matched)
+
     def test_process_probe_requests_unlimited_ps_output_width(self) -> None:
         """Prevent platform-conditional COLUMNS truncation of ps command output."""
         runner = mock.Mock(

@@ -73,6 +73,13 @@ LIVENESS_UNVERIFIABLE = "liveness_unverifiable"
 LIVENESS_PROBE_TIMEOUT_SECONDS = 2.0
 LIVENESS_PROBE_MAX_RESPONSE_CHARS = 64 * 1024
 
+# Wrapper options whose grammar leaves the following token positional. Keep
+# this deliberately narrow: treating an unknown option as value-less can turn
+# its value into a false script match.
+_VALUELESS_WRAPPER_FLAGS = {
+    "env": frozenset({"--ignore-environment"}),
+}
+
 # Where the future-dated line is drawn. A watcher that atomically rewrites its
 # marker between our descriptor read and our clock sample yields a small
 # NEGATIVE age — a benign race against a live watcher, and classifying it
@@ -222,7 +229,9 @@ def _identity_requirements(argv_marker: str):
     return script, bare, pairs
 
 
-def _positional_tokens(live_tokens: list[str]) -> set[str]:
+def _positional_tokens(
+    live_tokens: list[str], value_less_flags: frozenset[str] = frozenset()
+) -> set[str]:
     """Tokens the live argv supplies POSITIONALLY, not as a flag or a flag's value.
 
     Parsed the same way the watcher's own argv is: `--flag value` consumes two
@@ -236,6 +245,9 @@ def _positional_tokens(live_tokens: list[str]) -> set[str]:
         if token == "--":
             positionals.update(live_tokens[index + 1:])
             break
+        if token in value_less_flags:
+            index += 1
+            continue
         if token.startswith("--") and "=" not in token:
             index += 2
             continue
@@ -301,7 +313,10 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     live_tokens = command.split()
     if not live_tokens:
         return False, "live command line has no argv tokens"
-    live_positionals = _positional_tokens(live_tokens)
+    wrapper_flags = _VALUELESS_WRAPPER_FLAGS.get(
+        os.path.basename(live_tokens[0]), frozenset()
+    )
+    live_positionals = _positional_tokens(live_tokens, wrapper_flags)
     # The marker records a bare script name while the live argv usually carries
     # a path to it, so compare basenames rather than requiring the same spelling.
     wanted_script = os.path.basename(script)
