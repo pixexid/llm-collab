@@ -211,6 +211,12 @@ class ReleaseLifecycleGuidanceTest(unittest.TestCase):
         schema = paths[0].read_text()
         self.assertIn("db_local_schema_only_exception: dev-only-non-production", schema)
         self.assertIn("db_local_schema_only_exception_approved_by: operator", schema)
+        self.assertIn(
+            "or `supervisor`",
+            schema,
+            "GH-762: the guidance must name the supervisor alternative "
+            "alongside operator for the local-schema-only approver",
+        )
         self.assertIn("db/migrations/**", schema)
         self.assertIn("db/schema.sql", schema)
 

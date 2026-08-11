@@ -57,7 +57,11 @@ DB_IMPACT_VALUES = {"none", "local-schema-only", "shared-supabase-required"}
 DB_IMPACT_INVALID_REASON_PREFIX = "invalid explicit db_impact: "
 PRODUCTION_SCHEMA_GUARD_STAGES = {"assignment", "review", "pr", "done"}
 DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
-DB_LOCAL_SCHEMA_ONLY_APPROVER = "operator"
+# GH-762: supervisor acceptance is grounded in the operator grant of 2026-08-10
+# (docs/workflows/orchestrator-sessions.md, "Supervisor arrangement"): the
+# dev-only classification never reaches shared or production state, so it sits
+# outside the operator-only categories and follows the delegated authority.
+DB_LOCAL_SCHEMA_ONLY_APPROVERS = frozenset({"operator", "supervisor"})
 AMIGA_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 DIRECT_APP_ONLY_LANE_TOKENS = {
@@ -1296,11 +1300,12 @@ def validate_db_contract(
                 )
             if (
                 frontmatter.get("db_local_schema_only_exception_approved_by")
-                != DB_LOCAL_SCHEMA_ONLY_APPROVER
+                not in DB_LOCAL_SCHEMA_ONLY_APPROVERS
             ):
                 errors.append(
                     "Production local-schema-only exception requires "
-                    "`db_local_schema_only_exception_approved_by: operator`."
+                    "`db_local_schema_only_exception_approved_by: operator` "
+                    "or `supervisor`."
                 )
             exception_reason = frontmatter.get("db_local_schema_only_exception_reason")
             if not isinstance(exception_reason, str) or not exception_reason.strip():

@@ -533,13 +533,13 @@ release_evidence: null
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
 | `direct_app_legacy_maintenance` | bool | For a project with `ui_ux.direct_app_only: true`, the first of three mandatory fields for an explicitly approved active legacy-design maintenance exception. Must be strict `true`; incomplete overrides fail closed. |
-| `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator`. |
+| `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator` — deliberately operator-only after the GH-762 per-gate review: continuing active work on a legacy design surface is product direction, one of the five operator-only categories, so v22 supervisor authority does not extend here. |
 | `direct_app_legacy_maintenance_reason` | string or null | Third mandatory legacy-maintenance field. Must be a non-empty reason. |
 | `db_impact` | string | `none`, `local-schema-only`, or `shared-supabase-required`. `local-schema-only` means disposable development/test schema that will never be applied to a shared or production database. |
 | `db_schema_change_detected` | bool | Whether the task changes schema. With the project production-schema guard enabled, concrete `db/migrations/**` and exact `db/schema.sql` paths force this to `true`. |
 | `db_schema_change_detection` | string | `auto`, `manual_true`, or `manual_false`. Guarded concrete schema paths cannot be hidden by `manual_false`; body-only documentation matches can. |
 | `db_local_schema_only_exception` | string or null | For a guarded schema change classified `local-schema-only`, must equal `dev-only-non-production`. |
-| `db_local_schema_only_exception_approved_by` | string or null | For the guarded local-only exception, must equal `operator`. |
+| `db_local_schema_only_exception_approved_by` | string or null | For the guarded local-only exception, must equal `operator` or `supervisor` (supervisor authority per the operator grant of 2026-08-10; the classification is dev-only by definition, outside the operator-only categories). |
 | `db_local_schema_only_exception_reason` | string or null | For the guarded local-only exception, must be a non-empty, non-whitespace reason. |
 | `release_evidence` | object or null | Normalized closure record written only by a successful new `review -> done` transition. See below. |
 
@@ -586,7 +586,7 @@ exact task fields:
 
 ```yaml
 db_local_schema_only_exception: dev-only-non-production
-db_local_schema_only_exception_approved_by: operator
+db_local_schema_only_exception_approved_by: operator  # or supervisor (operator grant 2026-08-10)
 db_local_schema_only_exception_reason: "Why this schema is disposable and non-production"
 ```
 

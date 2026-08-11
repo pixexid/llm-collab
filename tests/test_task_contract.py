@@ -1202,6 +1202,20 @@ class TaskContractProductionSchemaGuardTest(unittest.TestCase):
                 )
             self.assertTrue(any(field in error for error in errors), errors)
 
+        # GH-762: supervisor approval is accepted per the operator grant of
+        # 2026-08-10; an arbitrary agent remains rejected (covered by the
+        # "codex" mutation above).
+        with patch.object(task_contract, "get_project", return_value=project):
+            supervisor_errors, _ = task_contract.validate_db_contract(
+                {
+                    **complete,
+                    "db_local_schema_only_exception_approved_by": "supervisor",
+                },
+                "",
+                stage="review",
+            )
+        self.assertFalse(supervisor_errors, supervisor_errors)
+
         with patch.object(task_contract, "get_project", return_value=project):
             errors, _ = task_contract.validate_db_contract(
                 complete,
