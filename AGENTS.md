@@ -62,10 +62,20 @@ argument that the test needed writing down rather than being left to inference.
 Related GH-771.
 
 **What earns a bump.** The test is *cached-worker behaviour*: would a session
-still running on the previous version keep doing something this change
-prohibits, or keep trusting something this change made false? If yes, bump —
-the marker is the only signal such a session will ever receive, because it will
-not re-read the file on its own.
+still running on the previous version
+
+- keep doing something this change **prohibits**,
+- keep trusting something this change made **false**, or
+- **fail to do** something this change newly **requires**?
+
+If any of the three, bump — the marker is the only signal such a session will
+ever receive, because it will not re-read the file on its own.
+
+Those three are meant to be exhaustive over what a worker does: a change either
+forbids an action, invalidates a belief, or imposes an obligation. A change that
+alters *how* an existing action must be performed is the first and third
+together. If a real change fits none of them and still alters behaviour, the
+list is wrong and should be corrected rather than worked around.
 
 The test is **not** whether the change touches a permission or a gate. That
 framing has now produced the wrong answer twice: a change deleting four
