@@ -170,7 +170,7 @@ def current_session_id(stdin) -> str | None:
 
 
 def watcher_checks(project_id: str, own_session_id: str | None) -> list[tuple[str, str, str]]:
-    """Render the shared coverage verdict (evaluate_coverage); never re-derive it.
+    """Render the shared freshness/liveness/ownership verdict; never re-derive it.
 
     A FRESH marker owned by a DIFFERENT session is the predecessor-watchers
     incident: the previous session's watchers were never stopped and are
@@ -202,6 +202,20 @@ def watcher_checks(project_id: str, own_session_id: str | None) -> list[tuple[st
                 UNKNOWN,
                 f"fresh marker owned by session {verdict.get('session_id')}; "
                 "current session identity unavailable, ownership unverified",
+            ))
+        elif reason == "owner_gone":
+            results.append((
+                check,
+                FAIL,
+                f"fresh marker owner is not live: {verdict.get('detail', '?')} — "
+                "restart this watcher before relying on coverage",
+            ))
+        elif reason == "liveness_unverifiable":
+            results.append((
+                check,
+                UNKNOWN,
+                f"fresh marker liveness unverifiable: {verdict.get('detail', '?')} — "
+                "restart this watcher before relying on coverage",
             ))
         elif reason == "unreadable":
             results.append((check, UNKNOWN, f"marker unreadable: {verdict.get('detail', '?')}"))
