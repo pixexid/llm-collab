@@ -177,8 +177,9 @@ Hard rule for shared-Supabase lanes:
 For a project with strict boolean `db.production_schema_guard: true`, review and
 PR validation also reject detected schema work classified as `none`.
 `local-schema-only` means disposable development/test schema that will never
-reach shared or production and requires the exact operator-approved
-`dev-only-non-production` exception plus a non-empty reason. Concrete
+reach shared or production and requires the exact approved
+`dev-only-non-production` exception (operator or supervisor approver) plus a
+non-empty reason. Concrete
 `db/migrations/**` and exact `db/schema.sql` paths force detection despite
 `manual_false`; prose-only documentation matches may still be overridden. The
 exception never waives the existing shared-database evidence above.

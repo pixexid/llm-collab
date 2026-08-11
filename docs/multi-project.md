@@ -184,7 +184,8 @@ default-off compatibility behavior; a present non-boolean fails closed. When
 enabled, schema changes cannot be classified as `none`, and
 `local-schema-only` means disposable development/test schema that will never be
 applied to a shared or production database. That exception requires the exact
-`dev-only-non-production` value, `operator` approver, and a non-empty reason.
+`dev-only-non-production` value, an `operator` or `supervisor` approver, and a
+non-empty reason.
 It never replaces the existing `shared-supabase-required` evidence. Resolution
 uses only the task's exact registered `project_id`; missing, empty, null,
 unknown, or foreign IDs never inherit another project's guard, ref, or tool

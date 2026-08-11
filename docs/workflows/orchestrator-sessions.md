@@ -335,6 +335,16 @@ execution and verification.
 - The supervisor is the mandatory handoff signal path, not a second queue or
   task store. Lane ownership, caps, activation, and terminal evidence remain in
   the linked canonical workflows.
+- **Formerly operator-only approval gates** (operator ruling, 2026-08-11): the
+  operator has delegated these to the supervisor and orchestrator jointly. Such
+  an approval is satisfied by recorded supervisor+orchestrator concurrence with
+  a **dispositioned distinct-provider read** — a written read from a
+  non-Anthropic model (routinely a read-only BB thread on `codex / gpt-5.6-sol`
+  at `high`; the heaviest calls may use a stronger external model), agreed with
+  or overruled with reasoning in the concurrence record. The read informs and
+  does not veto; a record that silently ignores it is incomplete. Reasoning and
+  revert path are written on the task or issue artifact. Operator approval
+  remains valid everywhere. Routine technical calls are unchanged.
 
 ## Model routing policy
 

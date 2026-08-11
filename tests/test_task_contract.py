@@ -1202,6 +1202,20 @@ class TaskContractProductionSchemaGuardTest(unittest.TestCase):
                 )
             self.assertTrue(any(field in error for error in errors), errors)
 
+        # GH-762: supervisor approval is accepted per the operator grant of
+        # 2026-08-10; an arbitrary agent remains rejected (covered by the
+        # "codex" mutation above).
+        with patch.object(task_contract, "get_project", return_value=project):
+            supervisor_errors, _ = task_contract.validate_db_contract(
+                {
+                    **complete,
+                    "db_local_schema_only_exception_approved_by": "supervisor",
+                },
+                "",
+                stage="review",
+            )
+        self.assertFalse(supervisor_errors, supervisor_errors)
+
         with patch.object(task_contract, "get_project", return_value=project):
             errors, _ = task_contract.validate_db_contract(
                 complete,
@@ -1759,6 +1773,25 @@ class TaskContractDirectAppPolicyTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(summary["legacy_maintenance_override"])
 
+    def test_supervisor_legacy_maintenance_override_is_accepted(self) -> None:
+        # GH-762 operator ruling 2026-08-11: supervisor approval asserts the
+        # recorded two-key concurrence; the validator accepts it alongside
+        # operator while an arbitrary agent stays rejected.
+        frontmatter = {
+            "project_id": "amiga",
+            "status": "in_progress",
+            "lane_type": "design-spec",
+            "related_paths": ["design/surface.md"],
+            "direct_app_legacy_maintenance": True,
+            "direct_app_legacy_maintenance_approved_by": "supervisor",
+            "direct_app_legacy_maintenance_reason": "Concurrence recorded on the task artifact.",
+        }
+
+        errors, summary = self.validate(frontmatter)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(summary["legacy_maintenance_override"])
+
     def test_each_incomplete_legacy_maintenance_override_fails_actionably(self) -> None:
         complete = {
             "project_id": "amiga",
@@ -1771,6 +1804,7 @@ class TaskContractDirectAppPolicyTest(unittest.TestCase):
         cases = (
             ("direct_app_legacy_maintenance", False),
             ("direct_app_legacy_maintenance_approved_by", None),
+            ("direct_app_legacy_maintenance_approved_by", "codex"),
             ("direct_app_legacy_maintenance_reason", ""),
         )
         for field, replacement in cases:

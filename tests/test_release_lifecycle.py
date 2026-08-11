@@ -211,6 +211,32 @@ class ReleaseLifecycleGuidanceTest(unittest.TestCase):
         schema = paths[0].read_text()
         self.assertIn("db_local_schema_only_exception: dev-only-non-production", schema)
         self.assertIn("db_local_schema_only_exception_approved_by: operator", schema)
+        self.assertIn(
+            "or `supervisor`",
+            schema,
+            "GH-762: the guidance must name the supervisor alternative "
+            "alongside operator for the local-schema-only approver",
+        )
+        supervisor_paths = (
+            REPO_ROOT / "docs" / "schema-reference.md",
+            REPO_ROOT / "docs" / "multi-project.md",
+            REPO_ROOT / "docs" / "workflows" / "review-and-handoff.md",
+        )
+        for path in supervisor_paths:
+            with self.subTest(path=path.name):
+                guidance = path.read_text()
+                self.assertNotIn(
+                    "operator-approved dev-only",
+                    guidance,
+                    "GH-762: no canonical guide may still teach the exception "
+                    "as operator-only",
+                )
+                self.assertRegex(
+                    guidance,
+                    r"operator.{0,40}supervisor",
+                    "GH-762: each canonical guide teaching the local-schema-only "
+                    "exception must name both valid approvers",
+                )
         self.assertIn("db/migrations/**", schema)
         self.assertIn("db/schema.sql", schema)
 

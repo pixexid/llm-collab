@@ -170,7 +170,7 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |
 | `ui_ux.required_design_skills` | string[] | Optional project-specific design-skill family list. If omitted, only the exact `amiga` project uses the legacy `[impeccable]` fallback; non-Amiga projects inherit no design-skill default. |
-| `db.production_schema_guard` | bool | Optional strict boolean. Auto-enabled when the project declares `db.shared_supabase_project_ref` (the shared project is the acceptance DB); set `true` to force it on, or `false` to opt a shared-Supabase project out. When enabled for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact operator-approved dev-only exception, and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
+| `db.production_schema_guard` | bool | Optional strict boolean. Auto-enabled when the project declares `db.shared_supabase_project_ref` (the shared project is the acceptance DB); set `true` to force it on, or `false` to opt a shared-Supabase project out. When enabled for the task's exact project, assignment/review/PR/done validation rejects schema-changing tasks classified as `none`, restricts `local-schema-only` to the exact approved dev-only exception (operator or supervisor approver), and treats concrete `db/migrations/**` or `db/schema.sql` paths as schema changes even after `manual_false`. A present non-boolean fails closed; projects never inherit another project's value. |
 | `db.shared_supabase_project_ref` | string | Optional shared Supabase project ref required by database-impact task contracts. Non-Amiga projects do not inherit Amiga's ref. |
 | `db.required_surfaces` | string[] | Optional project-specific CLI or MCP surfaces required by shared-database task contracts. |
 | `github.enabled` | bool | Whether GitHub integration is active |
@@ -533,13 +533,13 @@ release_evidence: null
 | `operator_visual_feedback_requested` | bool | Whether the operator was explicitly asked for visual review feedback |
 | `design_doc_update_decision` | string or null | Same-session DESIGN.md or linked UI-doc review/update decision |
 | `direct_app_legacy_maintenance` | bool | For a project with `ui_ux.direct_app_only: true`, the first of three mandatory fields for an explicitly approved active legacy-design maintenance exception. Must be strict `true`; incomplete overrides fail closed. |
-| `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator`. |
+| `direct_app_legacy_maintenance_approved_by` | string or null | Second mandatory legacy-maintenance field. Must equal `operator` or `supervisor`. This was product direction, a formerly operator-only category, so `supervisor` requires recorded supervisor+orchestrator concurrence with a dispositioned distinct-provider read (operator approval also valid) — reasoning and revert path written on the task or issue artifact (GH-762 operator ruling, 2026-08-11). |
 | `direct_app_legacy_maintenance_reason` | string or null | Third mandatory legacy-maintenance field. Must be a non-empty reason. |
 | `db_impact` | string | `none`, `local-schema-only`, or `shared-supabase-required`. `local-schema-only` means disposable development/test schema that will never be applied to a shared or production database. |
 | `db_schema_change_detected` | bool | Whether the task changes schema. With the project production-schema guard enabled, concrete `db/migrations/**` and exact `db/schema.sql` paths force this to `true`. |
 | `db_schema_change_detection` | string | `auto`, `manual_true`, or `manual_false`. Guarded concrete schema paths cannot be hidden by `manual_false`; body-only documentation matches can. |
 | `db_local_schema_only_exception` | string or null | For a guarded schema change classified `local-schema-only`, must equal `dev-only-non-production`. |
-| `db_local_schema_only_exception_approved_by` | string or null | For the guarded local-only exception, must equal `operator`. |
+| `db_local_schema_only_exception_approved_by` | string or null | For the guarded local-only exception, must equal `operator` or `supervisor` (supervisor authority per the operator grant of 2026-08-10; the classification is dev-only by definition, outside the operator-only categories). |
 | `db_local_schema_only_exception_reason` | string or null | For the guarded local-only exception, must be a non-empty, non-whitespace reason. |
 | `release_evidence` | object or null | Normalized closure record written only by a successful new `review -> done` transition. See below. |
 
@@ -586,7 +586,7 @@ exact task fields:
 
 ```yaml
 db_local_schema_only_exception: dev-only-non-production
-db_local_schema_only_exception_approved_by: operator
+db_local_schema_only_exception_approved_by: operator  # or supervisor (operator grant 2026-08-10)
 db_local_schema_only_exception_reason: "Why this schema is disposable and non-production"
 ```
 

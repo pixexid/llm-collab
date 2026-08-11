@@ -481,7 +481,8 @@ If the task's exact project enables strict boolean
 refuses schema work classified as `none`. `local-schema-only` is limited to
 disposable development/test schema that will never reach shared or production
 and requires `db_local_schema_only_exception: dev-only-non-production`,
-`db_local_schema_only_exception_approved_by: operator`, and a non-empty
+`db_local_schema_only_exception_approved_by: operator` (or `supervisor`,
+per the operator grant of 2026-08-10), and a non-empty
 `db_local_schema_only_exception_reason`. Concrete `db/migrations/**` and exact
 `db/schema.sql` paths cannot be hidden by `manual_false`; documentation-only
 body matches can. Missing/false guard values preserve existing behavior, while
