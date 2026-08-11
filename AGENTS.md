@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 24 -->
+<!-- CONTRACT_VERSION: 25 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,22 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v25 (2026-08-11) states the contract-version test itself and adds a
+required re-audit step. Both change what a worker does. A cached v24 session
+holds no statement of the criterion, so it keeps applying the wrong one — asking
+whether a change touches a permission surface rather than whether a cached
+worker keeps doing something now prohibited — and under-bumps its own changes,
+which propagates: a wrong test causes every later missed signal. It also will
+not re-audit the uses of a definition it narrows, so it can ship the
+rule-fails-against-itself defect this version records.
+
+Worth recording plainly: the change adding this criterion was itself first
+proposed without a bump, by the author of the criterion, on the reasoning the
+criterion exists to correct. Review caught it. That is the strongest available
+argument that the test needed writing down rather than being left to inference.
+
+Related GH-771.
 
 **What earns a bump.** The test is *cached-worker behaviour*: would a session
 still running on the previous version keep doing something this change
