@@ -1182,6 +1182,57 @@ class InboxMarkAllReadTest(unittest.TestCase):
             "bootstrap would report no unread messages while live packets wait",
         )
 
+    def test_ordinary_json_distinguishes_truncated_and_complete_populations(self) -> None:
+        for name in ("ONE", "TWO", "THREE"):
+            self.add_message(name, project_line="amiga")
+        self.add_message("OTHER", project_line="nuvyr")
+
+        partial_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2", "--json"
+        )
+        complete_result = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "3", "--json"
+        )
+
+        self.assertEqual(0, partial_result.returncode, partial_result.stderr)
+        self.assertEqual(0, complete_result.returncode, complete_result.stderr)
+        partial = json.loads(partial_result.stdout)
+        complete = json.loads(complete_result.stdout)
+        self.assertEqual(
+            {"total": 3, "limit": 2, "truncated": True},
+            {key: partial[key] for key in ("total", "limit", "truncated")},
+        )
+        self.assertEqual(2, len(partial["messages"]))
+        self.assertEqual(
+            {"total": 3, "limit": 3, "truncated": False},
+            {key: complete[key] for key in ("total", "limit", "truncated")},
+        )
+        self.assertEqual(complete["total"], len(complete["messages"]))
+        self.assertNotEqual(partial["truncated"], complete["truncated"])
+
+    def test_ordinary_text_names_scope_population_and_applied_cap(self) -> None:
+        for name in ("ONE", "TWO", "THREE"):
+            self.add_message(name, project_line="amiga")
+
+        partial = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "2"
+        )
+        complete = self.run_inbox(
+            "--project", "amiga", "--peek", "--limit", "3"
+        )
+
+        self.assertEqual(0, partial.returncode, partial.stderr)
+        self.assertIn(
+            "[inbox] showing 2 of 3 unread message(s) for codex "
+            "(project amiga, --limit 2)",
+            partial.stdout,
+        )
+        self.assertEqual(0, complete.returncode, complete.stderr)
+        self.assertIn(
+            "[inbox] 3 unread message(s) for codex (project amiga)",
+            complete.stdout,
+        )
+
     def test_limited_unread_scan_refuses_oversized_index(self) -> None:
         paths = [
             f"Chats/scan/{index}.md"
@@ -1832,6 +1883,12 @@ class InboxMarkAllReadTest(unittest.TestCase):
         self.assertEqual(
             [refused],
             [entry["path"] for entry in payload.get("activation_refused", [])],
+        )
+        self.assertEqual(2, payload["total"])
+        self.assertEqual(1, payload["limit"])
+        self.assertFalse(
+            payload["truncated"],
+            "a refused-and-skipped activation packet is not a cap cut",
         )
         inbox = self.load_inbox()
         self.assertEqual([valid], inbox["read"])

@@ -1076,6 +1076,17 @@ def main():
     )
     repo_scope_refused.extend(filtered_repo_scope)
 
+    ordinary_read = not exact_requested and not args.packet
+    total = len(messages)
+    applied_limit = args.limit if ordinary_read else None
+    truncated = False
+    scope_parts = [f"project {args.project}" if args.project else "all projects"]
+    if args.chat:
+        scope_parts.append(f"chat {args.chat}")
+    if args.repo_target:
+        scope_parts.append(f"repo {', '.join(args.repo_target)}")
+    ordinary_scope = ", ".join(scope_parts)
+
     if not messages:
         if args.json_output:
             if not repo_scope_refused and published_runtime is None:
@@ -1134,15 +1145,29 @@ def main():
                     continue
             selected.append(message)
         messages = selected
+        # `truncated` is true only when the cap left an otherwise displayable
+        # candidate out. Activation packets refused while filling the cap are
+        # already reported in activation_refused, so they do not count as cuts.
+        truncated = total > len(messages) + len(refused_gates)
 
     # Only an all-refused scan (no valid packet anywhere to show or drain) keeps the
     # exit-75 failure; a mixed batch shows/drains the valid packets and exits 0.
     shown_paths = [m["path"] for m in messages if not m.get("read")]
     if refused_gates and not shown_paths:
         if args.json_output:
+            payload = {
+                "activation_refused": refused_gates,
+                "messages": messages,
+            }
+            if ordinary_read:
+                payload.update(
+                    total=total,
+                    limit=applied_limit,
+                    truncated=truncated,
+                )
             print(
                 json.dumps(
-                    {"activation_refused": refused_gates, "messages": messages},
+                    payload,
                     indent=2,
                     sort_keys=True,
                 )
@@ -1158,6 +1183,12 @@ def main():
 
     if args.json_output:
         payload: dict[str, object] = {"messages": messages}
+        if ordinary_read:
+            payload.update(
+                total=total,
+                limit=applied_limit,
+                truncated=truncated,
+            )
         if refused_gates:
             payload["activation_refused"] = refused_gates
         if repo_scope_refused:
@@ -1180,7 +1211,16 @@ def main():
                     f"{published_runtime['session']['runtime']['session_id']} "
                     f"for {published_runtime['session']['session_id']}\n"
                 )
-        print(f"\n[inbox] {len(messages)} {'message(s)' if args.show_all else 'unread message(s)'} for {args.me}\n")
+        population = "message(s)" if args.show_all else "unread message(s)"
+        if ordinary_read and truncated:
+            print(
+                f"\n[inbox] showing {len(messages)} of {total} {population} for "
+                f"{args.me} ({ordinary_scope}, --limit {applied_limit})\n"
+            )
+        elif ordinary_read:
+            print(f"\n[inbox] {total} {population} for {args.me} ({ordinary_scope})\n")
+        else:
+            print(f"\n[inbox] {len(messages)} {population} for {args.me}\n")
         for i, msg in enumerate(messages):
             print(format_message(msg, i))
         if refused_gates:
