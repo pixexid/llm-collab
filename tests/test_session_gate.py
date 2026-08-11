@@ -399,6 +399,16 @@ class MarkerProcessLivenessTest(unittest.TestCase):
                 "orchestrator_watch.py", "worker-lifecycle",
                 "--project=project-a", "--session=sess-current",
             ],
+            "option-terminator": [
+                "orchestrator_watch.py",
+                "--project", "project-a", "--session", "sess-current",
+                "--", "worker-lifecycle",
+            ],
+            "wrapper-and-watcher-option-terminators": [
+                "env", "--", "/opt/runtime/bin/orchestrator_watch.py",
+                "--project", "project-a", "--session", "sess-current",
+                "--", "worker-lifecycle",
+            ],
         }
         for label, argv in spellings.items():
             with self.subTest(spelling=label):
@@ -467,6 +477,12 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             "script-only-as-a-flag-value": [
                 "python3.11", "--log", "orchestrator_watch.py",
                 "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            # argparse stops recognizing options after `--`; those tokens
+            # cannot satisfy the marker's identifying flag pairs.
+            "identifying-flags-after-option-terminator": [
+                "orchestrator_watch.py", "worker-lifecycle", "--",
                 "--project", "project-a", "--session", "sess-current",
             ],
         }

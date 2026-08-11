@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 26 -->
+<!-- CONTRACT_VERSION: 27 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,13 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v27 (2026-08-11) removes the mandatory leading-positional watcher
+spelling. Watcher liveness now matches argument order independently while
+preserving positional and flag roles, including argparse's `--` option
+terminator. A cached v26 worker keeps treating supported name-trailing
+invocations as invalid, so this invalidated belief earns the bump. Related
+GH-779.
 
 Contract v25 (2026-08-11) states the contract-version test itself and adds a
 required re-audit step. Both change what a worker does. A cached v24 session

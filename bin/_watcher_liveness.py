@@ -233,6 +233,9 @@ def _positional_tokens(live_tokens: list[str]) -> set[str]:
     index = 0
     while index < len(live_tokens):
         token = live_tokens[index]
+        if token == "--":
+            positionals.update(live_tokens[index + 1:])
+            break
         if token.startswith("--") and "=" not in token:
             index += 2
             continue
@@ -257,6 +260,10 @@ def _flag_pair_present(live_tokens: list[str], flag: str, value: str) -> bool:
     because one occurrence matched would let an accident or an append satisfy
     any marker. Ambiguous identity is not identity.
     """
+    try:
+        live_tokens = live_tokens[:live_tokens.index("--")]
+    except ValueError:
+        pass
     joined_prefix = f"{flag}="
     occurrences = [
         index
@@ -298,13 +305,23 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     # The marker records a bare script name while the live argv usually carries
     # a path to it, so compare basenames rather than requiring the same spelling.
     wanted_script = os.path.basename(script)
-    if not any(os.path.basename(token) == wanted_script for token in live_positionals):
+    script_index = next(
+        (
+            index
+            for index, token in enumerate(live_tokens)
+            if token in live_positionals and os.path.basename(token) == wanted_script
+        ),
+        None,
+    )
+    if script_index is None:
         return False, f"does not contain recorded script token {script!r} as a positional"
+    watcher_tokens = live_tokens[script_index + 1:]
+    watcher_positionals = _positional_tokens(watcher_tokens)
     for token in bare:
-        if token not in live_positionals:
+        if token not in watcher_positionals:
             return False, f"does not contain recorded token {token!r} as a positional"
     for flag, value in pairs:
-        if not _flag_pair_present(live_tokens, flag, value):
+        if not _flag_pair_present(watcher_tokens, flag, value):
             return False, (
                 f"does not contain exactly one recorded {flag} with value {value!r}"
             )
