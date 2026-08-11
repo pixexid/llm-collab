@@ -1104,12 +1104,23 @@ def main():
         ax_app = ax_doorbell_app(recipient_agent)
         border = "━" * 60
         print(f"\n{border}")
-        print("🔔 AX DOORBELL REQUIRED")
+        print("🔔 AX DOORBELL — CONDITIONAL FALLBACK")
         print(border)
         print()
         print(
-            f"Ring {recipient_display} ({args.recipient}) with axsend; "
-            "do not ask the operator to relay."
+            "For OpenAI-model interaction, use BB. Run the command below ONLY if this "
+            "task needs a Codex-app-only tool that BB cannot reach; this printed "
+            "command does not itself satisfy that condition."
+        )
+        print()
+        print(
+            "VERIFIED proves only that a turn rendered in the lagging app UI; it does "
+            "not establish delivery to a working harness or a reply path."
+        )
+        print()
+        print(
+            f"When that condition is met, this is the conditional axsend fallback for "
+            f"{recipient_display} ({args.recipient}); do not ask the operator to relay."
         )
         print()
         print("One-line prompt:")

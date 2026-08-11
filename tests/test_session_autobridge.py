@@ -8228,7 +8228,7 @@ class SessionAutobridgeTest(unittest.TestCase):
                 self.assertEqual("ax_doorbell", result_payload["routing_mode"])
                 self.assertIsNone(result_payload["resolved_target_session_id"])
                 self.assertIn(f"[from {sender_id}]", result_payload["ax_doorbell_prompt"])
-                self.assertIn("AX DOORBELL REQUIRED", deliver_result.stdout)
+                self.assertIn("AX DOORBELL — CONDITIONAL FALLBACK", deliver_result.stdout)
                 self.assertIn('axsend-ensure ring --app "Codex"', deliver_result.stdout)
                 delivered = sorted(chat_dir.glob("*_to-codex_*.md"))[-1]
                 frontmatter, _ = parse_frontmatter(delivered.read_text())
