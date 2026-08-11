@@ -269,11 +269,11 @@ re-derive it.
   environments, there is no step between green and broken. An amiga PR that was
   green everywhere would have broken all production notification writes on merge;
   it was stopped by asking where the schema under test came from, not by any
-  check. The reusable question before merging a schema-dependent change: **which
-  database proved this, who migrated it, and does a production migration path
-  exist?** A green suite answers none of the three. This is the same
-  claim-versus-evidence shape as the entries above — CI proves the code matches a
-  schema, and it is read as the code being safe to deploy.
+  check. This is the same claim-versus-evidence shape as the entries above — CI
+  proves the code matches a schema, and it is read as the code being safe to
+  deploy. **The gate itself lives in
+  [`Commit, Push, And PR Workflow`](commit-push-prs.md), which owns merge
+  obligations; this entry is the rationale, not a second policy home.**
 - **Re-check once after merge.** The connector can re-pass an amended head
   asynchronously; inspect the complete reviewed artifact set and adjudicate any
   late finding under the canonical PR workflow.
