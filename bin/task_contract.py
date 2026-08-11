@@ -61,7 +61,9 @@ DB_LOCAL_SCHEMA_ONLY_EXCEPTION = "dev-only-non-production"
 # (docs/workflows/orchestrator-sessions.md, "Supervisor arrangement"): the
 # dev-only classification never reaches shared or production state, so it sits
 # outside the operator-only categories and follows the delegated authority.
-DB_LOCAL_SCHEMA_ONLY_APPROVERS = frozenset({"operator", "supervisor"})
+# Tuple, not a set: membership must use equality so a malformed frontmatter
+# value (a list, a mapping) yields the validation error, not TypeError.
+DB_LOCAL_SCHEMA_ONLY_APPROVERS = ("operator", "supervisor")
 AMIGA_DESIGN_SKILLS = ["impeccable"]
 DESIGN_THINKING_DISPOSITIONS = {"shipped", "deferred", "out_of_scope"}
 DIRECT_APP_ONLY_LANE_TOKENS = {
