@@ -242,6 +242,34 @@ Every PR waits for that first pass before merge. Consume everything in
 [the reviewed artifact set](#reviewed-artifact-set); silence and elapsed time are
 never a substitute for the bot's terminal result.
 
+## Schema-dependent changes: name the database that proved it
+
+Before merging a change that depends on database schema, answer three questions
+in the PR:
+
+1. **Which database proved this?**
+2. **Who migrated it?**
+3. **Does a production migration path exist?**
+
+**Answering is not passing.** If the answer to (3) is no, the merge is **blocked**
+until a path exists, or until the risk is accepted in writing — naming who
+accepted it, what breaks if it is wrong, and the recovery. A PR that answers all
+three honestly and merges anyway with no path is the exact failure below; a gate
+that only required disclosure would permit it verbatim.
+
+A green suite answers none of the three. Wherever CI migrates its own test database,
+the suite validates the change against a schema **CI created** — not the one
+production has — so every writer passes and the merge ships code whose target
+schema does not exist where it lands. With auto-deploy-on-main and a migration
+runner scoped to local or CI environments, there is no step between green and
+broken.
+
+This is not hypothetical: an amiga PR green on every check would have broken all
+production notification writes on merge, and was stopped by asking where the
+schema under test came from. Rationale and the trap entry live in
+[`Orchestrator Sessions`](orchestrator-sessions.md#verification-traps); this
+section is the gate.
+
 ## Local verify gate
 
 `bin/verify.py` is the **required local gate** — the suite is not run on PRs by CI.
