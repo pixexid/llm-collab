@@ -558,9 +558,13 @@ def fetch_tls_evidence(endpoint: tuple[str, int] | None, timeout_seconds: float)
                 executable, max_response_chars=remaining_chars // 2
             )(argv, remaining())
         except BbResponseTooLarge as error:
+            # GH-757: an overflowing probe spends the whole shared budget, so a
+            # later probe cannot run against an unshrunk remainder.
+            remaining_chars = 0
             raise RuntimeError("TLS forensic output budget exhausted") from error
         used = len(result.stdout) + len(result.stderr)
         if used > remaining_chars:
+            remaining_chars = 0
             raise RuntimeError("TLS forensic output budget exhausted")
         remaining_chars -= used
         return result
