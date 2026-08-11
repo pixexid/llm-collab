@@ -21,7 +21,7 @@ path or format rule is how these drift. The project id is the caller's explicit
 choice — there is deliberately no default, so a caller that forgets it fails
 rather than silently reading another project's markers (AGENTS.md → "Project
 Boundary"). The writing side is the single documented shape in write_marker();
-bin/orchestrator_watch.py and bin/touch_watcher_marker.py both call it.
+bin/orchestrator_watch.py calls it in-process.
 """
 
 from __future__ import annotations
