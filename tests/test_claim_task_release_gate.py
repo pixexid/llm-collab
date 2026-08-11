@@ -697,6 +697,18 @@ class CoordinationLaneClaimGuardTest(unittest.TestCase):
         "blocked_by": [],
     }
 
+    def setUp(self):
+        active = claim_task._backlog.IssuePolicy(
+            "active", "state:active", "state:active", ("state:active",)
+        )
+        self.issue_policy = patch.object(
+            claim_task._backlog,
+            "exact_issue_policy",
+            return_value=("pixexid/llm-collab", active),
+        )
+        self.issue_policy.start()
+        self.addCleanup(self.issue_policy.stop)
+
     def _claim(self, lane, extra_argv=(), mirror_lane_type="coordination"):
         """mirror_lane_type is explicit because the MIRROR is the authority: a
         test that varies only the cached lane cannot say which source the guard

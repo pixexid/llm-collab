@@ -26,6 +26,7 @@ import argparse
 import json
 
 sys.path.insert(0, str(Path(__file__).parent))
+import _backlog
 import project_issue_queue as issue_queue
 from _helpers import (
     ROOT,
@@ -466,6 +467,74 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+
+    # Issue policy is current GitHub authority, so it is deliberately outside
+    # the cached-lane block and before --allow-queue-override. The override
+    # changes ordering only; it cannot turn excluded, malformed, or blocked
+    # issue-linked work into executable work.
+    if project_id and args.status == "in_progress":
+        issue_number = issue_queue.extract_issue_number(fm, task_file)
+        if issue_number is not None:
+            try:
+                resolved_policy = _backlog.exact_issue_policy(project_id, issue_number)
+            except _backlog.BacklogUnavailable as error:
+                print(
+                    json.dumps(
+                        {
+                            "error": "GitHub issue authority unavailable; refusing activation",
+                            "reason": "github_unreachable",
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "project_id": project_id,
+                            "issue": issue_number,
+                            "attempts": _backlog.GH_EXACT_ISSUE_ATTEMPTS,
+                            "detail": str(error),
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            except ValueError as error:
+                print(
+                    json.dumps(
+                        {
+                            "error": "issue policy configuration invalid; refusing activation",
+                            "reason": "issue_policy_configuration",
+                            "task_id": fm.get("task_id", args.task),
+                            "target_status": args.status,
+                            "project_id": project_id,
+                            "issue": issue_number,
+                            "detail": str(error),
+                        },
+                        indent=2,
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if resolved_policy is not None:
+                repository, policy = resolved_policy
+                if policy.classification != "active":
+                    print(
+                        json.dumps(
+                            {
+                                "error": "GitHub issue policy refuses activation",
+                                "reason": "issue_policy_refusal",
+                                "task_id": fm.get("task_id", args.task),
+                                "target_status": args.status,
+                                "project_id": project_id,
+                                "repository": repository,
+                                "issue": issue_number,
+                                "classification": policy.classification,
+                                "policy_reason": policy.reason,
+                                "issue_state": policy.issue_state,
+                                "state_labels": list(policy.state_labels),
+                            },
+                            indent=2,
+                        ),
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
     if project_id and args.status == "in_progress" and issue_queue.queue_exists(project_id):
         payload = issue_queue.load_queue(project_id)

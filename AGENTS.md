@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 22 -->
+<!-- CONTRACT_VERSION: 23 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,15 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v23 (2026-08-11) enforces the GitHub issue-state model at both queue
+reconciliation and exact-issue task activation. The non-removable exclusion
+floor is `epic` plus `state:parked`; missing, multiple, or unknown `state:*`
+labels fail closed; and `state:blocked` is a monotonic veto that cannot be
+bypassed with the queue-order override. GitHub authority reads are complete and
+bounded, and an unavailable exact-issue check refuses activation after one
+bounded retry. This changes what a cached v22 worker may activate, so the
+version signal makes the new permission boundary visible. Related GH-756.
 
 Contract v22 (2026-08-10) makes the singleton supervisor the decision-maker on
 the operator's behalf outside the exact operator-only boundary in

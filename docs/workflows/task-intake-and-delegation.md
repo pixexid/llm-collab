@@ -136,6 +136,31 @@ remaining issue-sized lanes.
 - do not hand-edit queue state to clear blockers or materialize lanes unless repairing a reconcile failure with an explicit note
 - if `claim_task.py --status in_progress` targets a queued lane that is not `ready`, the transition should fail unless an explicit queue-override flag is used
 
+### Issue state labels
+
+The `ENFORCED`, `CHECKED-CONVENTION`, and `JUDGMENT` classifications below
+apply only to this subsection; no prose elsewhere in this document is
+classified by implication.
+
+- **ENFORCED — queue eligibility.** `epic` and `state:parked` are a
+  non-removable exclusion floor at reconciliation and exact-issue activation.
+  Project configuration may add exclusions but cannot remove the floor.
+- **ENFORCED — state schema at execution boundaries.** An open issue must carry
+  exactly one of `state:active`, `state:blocked`, or `state:parked`. Missing,
+  multiple, and unknown `state:*` labels make reconciliation invalid and refuse
+  activation. `epic` is orthogonal and never substitutes for a state label.
+- **CHECKED-CONVENTION — proactive label hygiene.** Run
+  `python3.11 bin/audit_issue_states.py --project "$COLLAB_PROJECT_ID"` at
+  orchestrator succession and during the parked sweep. The queue and activation
+  gates remain the safety controls if this audit is missed.
+- **ENFORCED — blocked state.** `state:blocked` adds
+  `github:state:blocked` to queue blockers and refuses new activation. It never
+  clears a blocker owned by task or dependency evidence, and `state:active`
+  clears only the GitHub-owned blocker after fresh reconciliation.
+- **JUDGMENT — parking quality and disposition.** The parked listing is review
+  input. No command decides whether a trigger is meaningful or fired, or
+  whether close-or-recommit is the right decision.
+
 ## Autonomous queue loop
 
 When the operator gives standing instructions to keep processing tasks, the

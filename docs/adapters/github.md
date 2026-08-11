@@ -16,7 +16,16 @@ In `projects.json`:
     "repo": "owner/my-app",
     "project_number": 1,
     "backlog": {
-      "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+      "exclude_labels": [
+        "epic",
+        "state:parked",
+        "type:epic",
+        "wontfix",
+        "duplicate",
+        "invalid",
+        "question",
+        "status:deferred"
+      ],
       "require_any_label": [],
       "priority_labels": ["priority:urgent", "priority:high"]
     }
@@ -32,7 +41,7 @@ In `projects.json`:
 
 ## Backlog eligibility
 
-For GitHub-backed projects, open GitHub issues are the source of truth for whether work remains. The backlog resolver includes every open issue except labels listed in `github.backlog.exclude_labels`. By default, epics, terminal issue labels, and `status:deferred` are excluded.
+For GitHub-backed projects, open GitHub issues are the source of truth for whether work remains. The effective exclusion set is the ordered union of the repository contract floor and the project's configured `github.backlog.exclude_labels`. The contract floor currently contains the live labels `epic` and `state:parked`; project configuration may add exclusions but cannot remove these. Removing either from configuration therefore has no effect on queue eligibility. The legacy aliases `type:epic` and `status:deferred` remain configurable defaults for compatibility with other projects; they are not the live llm-collab labels.
 
 `github.backlog.require_any_label` can narrow the backlog with exact labels or wildcard patterns such as `area:*`. Keep it empty unless label hygiene is strong enough that unlabeled issues should not become executable work.
 

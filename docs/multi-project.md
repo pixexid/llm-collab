@@ -131,7 +131,7 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
         "repo": "owner/my-app",
         "project_number": 1,
         "backlog": {
-          "exclude_labels": ["type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
+          "exclude_labels": ["epic", "state:parked", "type:epic", "wontfix", "duplicate", "invalid", "question", "status:deferred"],
           "require_any_label": [],
           "priority_labels": ["priority:urgent", "priority:high"]
         }
@@ -152,6 +152,11 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
   ]
 }
 ```
+
+`exclude_labels` is additive to the contract-required floor; it is not a
+complete replacement for it. See
+[GitHub adapter backlog eligibility](adapters/github.md#backlog-eligibility) for
+canonical behavior.
 
 Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
 

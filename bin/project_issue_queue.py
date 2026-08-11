@@ -404,6 +404,9 @@ def backlog_consistency_errors(project_id: str, payload: dict) -> tuple[list[str
     except _backlog.BacklogUnavailable as exc:
         errors.append(f"GitHub backlog state unknown for {project_id}: {exc}")
         return errors, warnings
+    except _backlog.IssueStatePolicyError as exc:
+        errors.append(f"GitHub issue state policy invalid for {project_id}: {exc}")
+        return errors, warnings
     except ValueError as exc:
         errors.append(str(exc))
         return errors, warnings
@@ -413,6 +416,22 @@ def backlog_consistency_errors(project_id: str, payload: dict) -> tuple[list[str
         for lane in payload.get("lanes", [])
         if isinstance(lane, dict) and isinstance(lane.get("issue"), int)
     }
+    eligible_by_number = {issue.number: issue for issue in eligible}
+    for lane in payload.get("lanes", []):
+        if not isinstance(lane, dict):
+            continue
+        issue = eligible_by_number.get(lane.get("issue"))
+        if issue is not None and lane.get("issue_state") != issue.issue_state:
+            errors.append(
+                f"queue/GitHub issue_state drift for GH-{issue.number}: "
+                f"queue {lane.get('issue_state')!r} vs GitHub {issue.issue_state!r}"
+            )
+    stale = sorted(issue for issue in queued_issues if issue not in eligible_by_number)
+    if stale:
+        errors.append(
+            "queue/backlog drift: queued issue(s) are no longer open eligible work: "
+            + ", ".join(f"GH-{issue}" for issue in stale)
+        )
     missing = [issue for issue in eligible if issue.number not in queued_issues]
     if missing:
         formatted = ", ".join(f"GH-{issue.number}" for issue in missing)
@@ -550,6 +569,8 @@ def reconciliation_input_hash(project_id: str, issues: list[_backlog.BacklogIssu
                     "labels": issue.labels,
                     "priority_label": issue.priority_label,
                     "priority_rank": issue.priority_rank,
+                    "issue_state": issue.issue_state,
+                    "policy_reason": issue.policy_reason,
                 }
                 for issue in issues
             ],
@@ -563,10 +584,39 @@ def reconciliation_input_hash(project_id: str, issues: list[_backlog.BacklogIssu
 def reconcile_queue(project_id: str) -> dict:
     try:
         eligible_issues = _backlog.eligible_open_issues(project_id)
+    except _backlog.IssueStatePolicyError as exc:
+        violations = exc.violations
+        projection = {
+            "project_id": project_id,
+            "generated_by": "project_issue_queue.py reconcile",
+            "generated_utc": utc_iso(),
+            "input_hash": hashlib.sha256(
+                json.dumps(violations, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "backlog": "invalid",
+            "source": "github_issues",
+            "invalid_issue_states": violations,
+            "lanes": [],
+        }
+        return {
+            "ok": False,
+            "backlog": "invalid",
+            "project_id": project_id,
+            "invalid_issue_states": violations,
+            "projection": projection,
+        }
     except _backlog.BacklogUnavailable as exc:
         return {
             "ok": False,
             "backlog": "unknown",
+            "project_id": project_id,
+            "reason": str(exc),
+            "projection": None,
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "backlog": "configuration_error",
             "project_id": project_id,
             "reason": str(exc),
             "projection": None,
@@ -592,6 +642,7 @@ def reconcile_queue(project_id: str) -> dict:
     needs_materialization: list[dict] = []
     duplicate_mirrors: list[dict] = []
     invalid_lanes: list[dict] = []
+    state_mismatches: list[dict] = []
     completed_recently = previous_payload.get("completed_recently", [])
     if not isinstance(completed_recently, list):
         completed_recently = []
@@ -635,7 +686,23 @@ def reconcile_queue(project_id: str) -> dict:
             and bool(frontmatter.get("refined_by"))
             and not bool(frontmatter.get("accepted_by"))
         )
-        if direct_app_errors:
+        github_blockers = (
+            ["github:state:blocked"]
+            if issue.issue_state == "state:blocked"
+            else []
+        )
+        if github_blockers and task_status_value in {"in_progress", "review"}:
+            state_mismatches.append(
+                {
+                    "issue": issue.number,
+                    "task_id": mirror["task_id"],
+                    "issue_state": issue.issue_state,
+                    "task_status": task_status_value,
+                }
+            )
+        if github_blockers:
+            queue_state = "blocked"
+        elif direct_app_errors:
             queue_state = "blocked"
         elif task_status_value == "in_progress":
             queue_state = "active"
@@ -652,6 +719,8 @@ def reconcile_queue(project_id: str) -> dict:
                 "issue": issue.number,
                 "priority_label": issue.priority_label,
                 "priority_rank": issue.priority_rank,
+                "issue_state": issue.issue_state,
+                "policy_reason": issue.policy_reason,
                 "task_id": mirror["task_id"],
                 "owner": str(frontmatter.get("owner") or "unassigned"),
                 "task_status": task_status_value,
@@ -660,6 +729,7 @@ def reconcile_queue(project_id: str) -> dict:
                 "lane_type": frontmatter.get("lane_type"),
                 "depends_on": depends_on,
                 "blocked_by": [
+                    *github_blockers,
                     *blockers,
                     *[
                         f"{DIRECT_APP_BLOCKER_PREFIX}{error}"
@@ -685,6 +755,7 @@ def reconcile_queue(project_id: str) -> dict:
         "needs_materialization": needs_materialization,
         "duplicate_mirrors": duplicate_mirrors,
         "invalid_lanes": invalid_lanes,
+        "state_mismatches": state_mismatches,
         "completed_recently": completed_recently[-10:],
         "lanes": lanes,
     }
@@ -694,12 +765,18 @@ def reconcile_queue(project_id: str) -> dict:
         task_frontmatters=projection_frontmatters,
     )
     return {
-        "ok": not needs_materialization and not duplicate_mirrors and not invalid_lanes,
+        "ok": (
+            not needs_materialization
+            and not duplicate_mirrors
+            and not invalid_lanes
+            and not state_mismatches
+        ),
         "backlog": "known",
         "project_id": project_id,
         "needs_materialization": needs_materialization,
         "duplicate_mirrors": duplicate_mirrors,
         "invalid_lanes": invalid_lanes,
+        "state_mismatches": state_mismatches,
         "projection": projection,
     }
 
@@ -1034,11 +1111,15 @@ def main() -> int:
 
     if args.command == "reconcile":
         result = reconcile_queue(args.project)
-        if result.get("backlog") == "unknown":
+        if result.get("projection") is None:
             if args.json_output:
                 print(json.dumps(result, indent=2))
             else:
-                print(f"[error] GitHub backlog state unknown for {args.project}: {result.get('reason')}", file=sys.stderr)
+                print(
+                    f"[error] GitHub backlog state {result.get('backlog')} for "
+                    f"{args.project}: {result.get('reason')}",
+                    file=sys.stderr,
+                )
             return 1
         projection = result["projection"]
         if args.write:
@@ -1060,6 +1141,16 @@ def main() -> int:
             if result.get("invalid_lanes"):
                 issues = ", ".join(f"GH-{item['issue']}" for item in result["invalid_lanes"])
                 print(f"direct-app policy violations: {issues}")
+            if result.get("invalid_issue_states"):
+                issues = ", ".join(
+                    f"GH-{item['issue']}" for item in result["invalid_issue_states"]
+                )
+                print(f"invalid issue states: {issues}")
+            if result.get("state_mismatches"):
+                issues = ", ".join(
+                    f"GH-{item['issue']}" for item in result["state_mismatches"]
+                )
+                print(f"issue/task state mismatches: {issues}")
         return 0 if result.get("ok") else 1
 
     payload = load_queue(args.project)

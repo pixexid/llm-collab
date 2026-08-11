@@ -290,6 +290,10 @@ For GitHub-backed projects:
 - `project_issue_queue.py reconcile` refreshes that projection;
 - `project_issue_queue.py validate` checks task mirrors, ordering, dependencies,
   and GitHub backlog consistency;
+- `audit_issue_states.py --project <project>` proactively reports missing,
+  multiple, or unknown issue-state labels across the complete open population;
+- `epic` and `state:parked` are excluded, while `state:blocked` adds a queue
+  blocker without clearing task or dependency blockers;
 - new design work uses design `lane_type` values in the issue queue;
 - `design-queue.json` is retained only for legacy migration and bridge metadata.
 
@@ -378,6 +382,7 @@ Prefix collaboration commands with `bin/llm-collab`:
 | `claim_task.py --task <task> --owner <id> --status <status>` | Apply gated ownership/status transitions |
 | `task_contract.py sync/validate ...` | Sync and validate UI/UX and database task contracts |
 | `project_issue_queue.py reconcile/validate --project <project>` | Refresh or validate a GitHub-backed execution queue |
+| `audit_issue_states.py --project <project>` | Audit the complete open-issue state-label population |
 | `worktree_ctl.py create/list/preflight/...` | Manage isolated implementation worktrees |
 | `pm2_watchers.py status/logs/stop ...` | Inspect or stop optional PM2 apps; enable them through the [PM2 Log Rotation workflow](docs/workflows/pm2-log-rotation.md) |
 | `autonomous_loop.py start/update/show/clear --project <project>` | Record persistent queue-runner state |
