@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 26 -->
+<!-- CONTRACT_VERSION: 27 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -45,6 +45,13 @@ workflows below.
 
 ### Recent contract changes
 
+Contract v27 (2026-08-11) removes the mandatory leading-positional watcher
+spelling. Watcher liveness now matches argument order independently while
+preserving positional and flag roles, including argparse's `--` option
+terminator. A cached v26 worker keeps treating supported name-trailing
+invocations as invalid, so this invalidated belief earns the bump. Related
+GH-779.
+
 Contract v25 (2026-08-11) states the contract-version test itself and adds a
 required re-audit step. Both change what a worker does. A cached v24 session
 holds no statement of the criterion, so it keeps applying the wrong one — asking
@@ -53,15 +60,6 @@ worker keeps doing something now prohibited — and under-bumps its own changes,
 which propagates: a wrong test causes every later missed signal. It also will
 not re-audit the uses of a definition it narrows, so it can ship the
 rule-fails-against-itself defect this version records.
-
-It also makes one invocation spelling mandatory: start a watcher with the mode
-name as the **leading positional**, because the liveness marker records an
-ordered `argv_marker` and a name-trailing spelling cannot match its own process,
-which fails closed and blocks writing spawns. That obligation is stated here
-because a worker arriving from v24 is directed to this section and nowhere else.
-[GH-779](https://github.com/pixexid/llm-collab/issues/779) removes the
-constraint by making the match order-independent, and this paragraph goes with
-it.
 
 Worth recording plainly: the change adding this criterion was itself first
 proposed without a bump, by the author of the criterion, on the reasoning the

@@ -356,6 +356,170 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         self.assertEqual("covered", verdict["reason"])
         self.assertTrue(verdict["acceptable"])
 
+    def test_reordered_and_wrapped_spellings_of_one_invocation_are_covered(self) -> None:
+        """GH-779: the marker records WHICH tokens, not the order they were typed.
+
+        write_marker always renders the canonical name-first string, so it is
+        the LIVE spelling that varies. Every argv below is the same invocation
+        as that marker.
+
+        Measured against the pre-fix code rather than assumed: three of these
+        five failed — name-trailing, interposed-flag and equals-form — each
+        leaving a watcher permanently unverifiable while it kept firing events.
+        The other two already passed, because a substring search still matches
+        when the ordering happens to be name-first. `wrapper-and-path` is
+        therefore a regression guard, not a defect proof: it fails if the
+        script-token comparison stops tolerating a path-qualified argv.
+        """
+        marker = (
+            "orchestrator_watch.py worker-lifecycle "
+            "--project project-a --session sess-current"
+        )
+        spellings = {
+            "name-first": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            "name-trailing": [
+                "orchestrator_watch.py",
+                "--project", "project-a", "--session", "sess-current",
+                "worker-lifecycle",
+            ],
+            "interposed-flag": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--state-dir", "/tmp/owatch-x",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            "wrapper-and-path": [
+                "llm-collab", "/opt/runtime/bin/orchestrator_watch.py",
+                "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            "equals-form": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project=project-a", "--session=sess-current",
+            ],
+            "option-terminator": [
+                "orchestrator_watch.py",
+                "--project", "project-a", "--session", "sess-current",
+                "--", "worker-lifecycle",
+            ],
+            "wrapper-and-watcher-option-terminators": [
+                "env", "--", "/opt/runtime/bin/orchestrator_watch.py",
+                "--project", "project-a", "--session", "sess-current",
+                "--", "worker-lifecycle",
+            ],
+        }
+        for label, argv in spellings.items():
+            with self.subTest(spelling=label):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)", *argv]
+                )
+                try:
+                    verdict = evaluate_coverage(
+                        self._report(process.pid, marker), "sess-current"
+                    )[0]
+                finally:
+                    process.terminate()
+                    process.wait(timeout=5)
+                self.assertEqual("covered", verdict["reason"], verdict.get("detail"))
+                self.assertTrue(verdict["acceptable"])
+
+    def test_reordering_does_not_loosen_matching_into_a_false_accept(self) -> None:
+        """The obvious wrong fix is to loosen until everything passes.
+
+        Each argv below shares tokens with the marker and must still fail: a
+        different mode, a project id that merely shares a prefix, a foreign
+        session, and a flag value that appears in the argv but not as THIS
+        flag's value.
+        """
+        marker = (
+            "orchestrator_watch.py worker-lifecycle "
+            "--project project-a --session sess-current"
+        )
+        rejected = {
+            "different-mode": [
+                "orchestrator_watch.py", "--project", "project-a",
+                "--session", "sess-current", "heartbeat",
+            ],
+            "project-prefix": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a-2", "--session", "sess-current",
+            ],
+            "foreign-session": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-other",
+            ],
+            "value-present-but-not-as-this-flag": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "sess-current", "--session", "project-a",
+            ],
+            # The mode name appears, but as a FLAG VALUE. The watcher's own
+            # parser would never read it as the mode, so neither may we.
+            "mode-name-only-as-a-flag-value": [
+                "orchestrator_watch.py", "heartbeat",
+                "--title", "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            # Ambiguous identity is not identity: there is no single answer to
+            # "which project is this process for".
+            "repeated-project-flag": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a", "--project", "other",
+                "--session", "sess-current",
+            ],
+            "repeated-session-flag-equals-form": [
+                "orchestrator_watch.py", "worker-lifecycle",
+                "--project", "project-a",
+                "--session=sess-current", "--session=sess-other",
+            ],
+            # The script name present only as a flag value, same hole one level up.
+            "script-only-as-a-flag-value": [
+                "python3.11", "--log", "orchestrator_watch.py",
+                "worker-lifecycle",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+            # argparse stops recognizing options after `--`; those tokens
+            # cannot satisfy the marker's identifying flag pairs.
+            "identifying-flags-after-option-terminator": [
+                "orchestrator_watch.py", "worker-lifecycle", "--",
+                "--project", "project-a", "--session", "sess-current",
+            ],
+        }
+        for label, argv in rejected.items():
+            with self.subTest(spelling=label):
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)", *argv]
+                )
+                try:
+                    verdict = evaluate_coverage(
+                        self._report(process.pid, marker), "sess-current"
+                    )[0]
+                finally:
+                    process.terminate()
+                    process.wait(timeout=5)
+                self.assertEqual("owner_gone", verdict["reason"])
+                self.assertFalse(verdict["acceptable"])
+
+    def test_value_less_wrapper_option_does_not_hide_the_script(self) -> None:
+        """A known wrapper flag without a value leaves the script positional."""
+        marker = (
+            "orchestrator_watch.py worker-lifecycle "
+            "--project project-a --session sess-current"
+        )
+        matched, detail = _watcher_liveness._argv_identity_matches(
+            marker,
+            "env --ignore-environment /opt/runtime/bin/orchestrator_watch.py "
+            "worker-lifecycle --project project-a --session sess-current",
+        )
+        self.assertTrue(matched, detail)
+        matched, _detail = _watcher_liveness._argv_identity_matches(
+            marker,
+            "other-wrapper --ignore-environment orchestrator_watch.py "
+            "worker-lifecycle --project project-a --session sess-current",
+        )
+        self.assertFalse(matched)
+
     def test_process_probe_requests_unlimited_ps_output_width(self) -> None:
         """Prevent platform-conditional COLUMNS truncation of ps command output."""
         runner = mock.Mock(

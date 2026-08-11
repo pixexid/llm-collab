@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from datetime import datetime, timezone
 
@@ -73,6 +72,13 @@ LIVENESS_UNVERIFIABLE = "liveness_unverifiable"
 # than escaping into either gate.
 LIVENESS_PROBE_TIMEOUT_SECONDS = 2.0
 LIVENESS_PROBE_MAX_RESPONSE_CHARS = 64 * 1024
+
+# Wrapper options whose grammar leaves the following token positional. Keep
+# this deliberately narrow: treating an unknown option as value-less can turn
+# its value into a false script match.
+_VALUELESS_WRAPPER_FLAGS = {
+    "env": frozenset({"--ignore-environment"}),
+}
 
 # Where the future-dated line is drawn. A watcher that atomically rewrites its
 # marker between our descriptor read and our clock sample yields a small
@@ -188,6 +194,155 @@ def _parse_owner(data: bytes, project_id):
     return owner, None
 
 
+def _identity_requirements(argv_marker: str):
+    """Split a recorded argv_marker into ORDER-INDEPENDENT requirements.
+
+    The marker records the identifying tokens of the watcher invocation. It is
+    a record of WHICH tokens, never of the order they were typed in: flag order
+    and adjacency to the mode name carry no meaning, so matching on the rendered
+    string made a spelling decide a fact (GH-779). A wrapper, an interposed
+    --state-dir, or a name-trailing spelling are the same invocation.
+
+    Returns (script, bare_tokens, flag_pairs), or None when nothing identifying
+    was recorded. A flag keeps its value attached because THAT adjacency is
+    meaningful: `--project` means nothing without which project.
+    """
+    tokens = argv_marker.split()
+    if not tokens:
+        return None
+    script, rest = tokens[0], tokens[1:]
+    bare: list[str] = []
+    pairs: list[tuple[str, str]] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token.startswith("--") and "=" in token:
+            flag, value = token.split("=", 1)
+            pairs.append((flag, value))
+            index += 1
+        elif token.startswith("--") and index + 1 < len(rest):
+            pairs.append((token, rest[index + 1]))
+            index += 2
+        else:
+            bare.append(token)
+            index += 1
+    return script, bare, pairs
+
+
+def _positional_tokens(
+    live_tokens: list[str], value_less_flags: frozenset[str] = frozenset()
+) -> set[str]:
+    """Tokens the live argv supplies POSITIONALLY, not as a flag or a flag's value.
+
+    Parsed the same way the watcher's own argv is: `--flag value` consumes two
+    tokens, `--flag=value` one. Anything left is a positional. This is what
+    stops a flag VALUE from impersonating a positional identity token.
+    """
+    positionals: set[str] = set()
+    index = 0
+    while index < len(live_tokens):
+        token = live_tokens[index]
+        if token == "--":
+            positionals.update(live_tokens[index + 1:])
+            break
+        if token in value_less_flags:
+            index += 1
+            continue
+        if token.startswith("--") and "=" not in token:
+            index += 2
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        positionals.add(token)
+        index += 1
+    return positionals
+
+
+def _flag_pair_present(live_tokens: list[str], flag: str, value: str) -> bool:
+    """True when the live argv supplies exactly this flag/value pair.
+
+    Values compare by EQUALITY, never prefix or substring: `--project alpha`
+    must not be satisfied by a process running `--project alpha-2` (GH-770
+    round 3). Both spellings of the same pair are accepted because both are
+    the same argv.
+
+    A REPEATED identifying flag fails closed. `--project a --project b` has no
+    single answer to "which project is this process for", and accepting it
+    because one occurrence matched would let an accident or an append satisfy
+    any marker. Ambiguous identity is not identity.
+    """
+    try:
+        live_tokens = live_tokens[:live_tokens.index("--")]
+    except ValueError:
+        pass
+    joined_prefix = f"{flag}="
+    occurrences = [
+        index
+        for index, token in enumerate(live_tokens)
+        if token == flag or token.startswith(joined_prefix)
+    ]
+    if len(occurrences) != 1:
+        return False
+    index = occurrences[0]
+    token = live_tokens[index]
+    if token.startswith(joined_prefix):
+        return token == f"{flag}={value}"
+    return index + 1 < len(live_tokens) and live_tokens[index + 1] == value
+
+
+def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | None]:
+    """Check every recorded token against the LIVE process argv, order-independently.
+
+    Ownership is matched here, from the running process, rather than taken from
+    the marker: the recorded `--session <id>` must be present in the live argv
+    for this to pass, which is what binds liveness and ownership in one
+    invocation (GH-770 round 5).
+
+    Order-independent is NOT position-blind. A recorded positional (the script
+    and the watcher mode) must appear as a POSITIONAL in the live argv, never
+    merely somewhere in it. Membership alone would let an unrelated process
+    carrying `--title worker-lifecycle` satisfy the mode requirement while the
+    real watcher parser would read that token as a flag's value. The first
+    version of this matcher had exactly that hole.
+    """
+    parsed = _identity_requirements(argv_marker)
+    if parsed is None:
+        return False, "recorded argv_marker is empty"
+    script, bare, pairs = parsed
+    live_tokens = command.split()
+    if not live_tokens:
+        return False, "live command line has no argv tokens"
+    wrapper_flags = _VALUELESS_WRAPPER_FLAGS.get(
+        os.path.basename(live_tokens[0]), frozenset()
+    )
+    live_positionals = _positional_tokens(live_tokens, wrapper_flags)
+    # The marker records a bare script name while the live argv usually carries
+    # a path to it, so compare basenames rather than requiring the same spelling.
+    wanted_script = os.path.basename(script)
+    script_index = next(
+        (
+            index
+            for index, token in enumerate(live_tokens)
+            if token in live_positionals and os.path.basename(token) == wanted_script
+        ),
+        None,
+    )
+    if script_index is None:
+        return False, f"does not contain recorded script token {script!r} as a positional"
+    watcher_tokens = live_tokens[script_index + 1:]
+    watcher_positionals = _positional_tokens(watcher_tokens)
+    for token in bare:
+        if token not in watcher_positionals:
+            return False, f"does not contain recorded token {token!r} as a positional"
+    for flag, value in pairs:
+        if not _flag_pair_present(watcher_tokens, flag, value):
+            return False, (
+                f"does not contain exactly one recorded {flag} with value {value!r}"
+            )
+    return True, None
+
+
 def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str | None]:
     """Return paired / gone-or-mismatched / unverifiable, and never raise."""
     try:
@@ -217,11 +372,9 @@ def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str
         command = result.stdout.strip()
         if not command:
             return None, f"ps returned no command line for pid {pid}"
-        if re.search(rf"{re.escape(argv_marker)}(?=\s|$)", command) is None:
-            return False, (
-                f"pid {pid} command line does not contain recorded argv_marker "
-                f"{argv_marker!r} at an argv-token boundary"
-            )
+        matched, mismatch = _argv_identity_matches(argv_marker, command)
+        if not matched:
+            return False, f"pid {pid} command line {mismatch}"
         return True, None
     except Exception as error:
         return None, f"liveness probe failed: {type(error).__name__}: {error}"
@@ -312,7 +465,9 @@ def evaluate_coverage(report, current_session_id):
     gate while the hook called the same marker foreign coverage.
 
     A FRESH marker is coverage only when its recorded pid is alive and that
-    process command line contains its recorded argv_marker. A legacy marker
+    process's argv supplies every token recorded in its argv_marker — checked
+    order-independently, so a wrapper or a differently-ordered spelling of the
+    same invocation verifies (GH-779). A legacy marker
     without those fields is not verifiable. A FRESH marker owned by a
     DIFFERENT session is not coverage — it is a
     predecessor's watcher still firing into this session. A FRESH marker whose
