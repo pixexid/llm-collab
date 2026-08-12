@@ -83,6 +83,8 @@ REFUSAL_PROFILE_MISMATCH = "bb_profile_mismatch"
 REFUSAL_IDENTITY_MISMATCH = "bb_identity_mismatch"
 REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
+_MISSING = object()
+
 
 class BbExecutableRefused(ValueError):
     """The project has no explicitly configured bb.executable; refused.
@@ -93,11 +95,12 @@ class BbExecutableRefused(ValueError):
 
 
 class BbProjectIdRefused(ValueError):
-    """The raw ``bb.project_id`` is empty, non-text, or padded."""
+    """A raw BB project-id registry value is missing, malformed, or padded."""
 
-    def __init__(self, value: object) -> None:
-        super().__init__("bb.project_id must be non-empty unpadded text")
+    def __init__(self, value: object, field: str = "bb.project_id") -> None:
+        super().__init__(f"{field} must be non-empty unpadded text")
         self.value = value
+        self.field = field
         self.raw_nonempty = isinstance(value, str) and bool(value)
         self.trimmed_nonempty = isinstance(value, str) and bool(value.strip())
 
@@ -105,16 +108,29 @@ class BbProjectIdRefused(ValueError):
 def bb_project_id_from_project(
     project: Mapping[str, Any] | None,
     fallback_project_id: str,
+    repo_target: str | None = None,
 ) -> str:
-    """Return raw ``bb.project_id``, rejecting padding without normalizing it."""
+    """Return the raw BB project for one repo target, without normalization."""
     bb = project.get("bb") if isinstance(project, Mapping) else None
-    value = (
-        bb.get("project_id", fallback_project_id)
-        if isinstance(bb, Mapping)
-        else fallback_project_id
-    )
+    project_ids = bb.get("project_ids", _MISSING) if isinstance(bb, Mapping) else _MISSING
+    if project_ids is not _MISSING:
+        if not isinstance(project_ids, Mapping):
+            raise BbProjectIdRefused(project_ids, "bb.project_ids")
+        if repo_target is None:
+            raise BbProjectIdRefused(None, "bb.project_ids repo target")
+        value = project_ids.get(repo_target, _MISSING)
+        field = f"bb.project_ids[{repo_target!r}]"
+        if value is _MISSING:
+            raise BbProjectIdRefused(None, field)
+    else:
+        value = (
+            bb.get("project_id", fallback_project_id)
+            if isinstance(bb, Mapping)
+            else fallback_project_id
+        )
+        field = "bb.project_id"
     if not isinstance(value, str) or not value or value != value.strip():
-        raise BbProjectIdRefused(value)
+        raise BbProjectIdRefused(value, field)
     return value
 
 

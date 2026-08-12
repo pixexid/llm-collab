@@ -60,6 +60,89 @@ class BbWatcherBootstrapTest(unittest.TestCase):
         packet["frontmatter"] = {**packet["frontmatter"], "repo_targets": repo_targets}
         return packet
 
+    def test_start_inputs_selects_amiga_app_docs_and_legacy_project(self) -> None:
+        bb = {
+            "enabled": True,
+            "executable": ["/opt/bb"],
+            "endpoint_id": "endpoint_bb",
+            "runtime_instance_id": "runtime_bb",
+            "runtime_home": "/tmp/runtime-bb",
+        }
+        mapped = {
+            "id": "amiga",
+            "bb": {
+                **bb,
+                "project_id": "proj_eber9t9n2f",
+                "project_ids": {
+                    "app": "proj_eber9t9n2f",
+                    "docs": "proj_2qjntdfb4v",
+                },
+            },
+        }
+        legacy = {"id": "llm-collab", "bb": {**bb, "project_id": "proj_collab"}}
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-inputs-") as raw, patch.object(
+            watch_inbox, "resolve_project_repo_path", return_value=Path(raw)
+        ):
+            self.assertEqual(
+                "proj_eber9t9n2f",
+                watch_inbox._bb_start_inputs("amiga", mapped, "app")["native_project_id"],
+            )
+            self.assertEqual(
+                "proj_2qjntdfb4v",
+                watch_inbox._bb_start_inputs("amiga", mapped, "docs")["native_project_id"],
+            )
+            self.assertEqual(
+                "proj_collab",
+                watch_inbox._bb_start_inputs("llm-collab", legacy, "app")[
+                    "native_project_id"
+                ],
+            )
+
+    def test_bad_repo_mapping_refuses_before_task_bearing_start(self) -> None:
+        bb = {
+            "enabled": True,
+            "executable": ["/opt/bb"],
+            "endpoint_id": "endpoint_bb",
+            "runtime_instance_id": "runtime_bb",
+            "runtime_home": "/tmp/runtime-bb",
+        }
+        cases = (
+            ({"app": "proj_eber9t9n2f"}, "bb.project_ids['docs']"),
+            ({"docs": " proj_2qjntdfb4v "}, "bb.project_ids['docs']"),
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="bb-inputs-") as raw:
+            for project_ids, expected_detail in cases:
+                project = {"id": "amiga", "bb": {**bb, "project_ids": project_ids}}
+                packet = self.scoped_packet(["docs"])
+                packet["frontmatter"]["project_id"] = "amiga"
+                events: list[dict] = []
+                with self.subTest(project_ids=project_ids), patch.object(
+                    watch_inbox, "bb_bootstrap_enabled", return_value=True
+                ), patch.object(
+                    watch_inbox, "get_project", return_value=project
+                ), patch.object(
+                    watch_inbox, "_bb_existing_session_ids", return_value=[]
+                ), patch.object(
+                    watch_inbox, "_bb_binding_state", return_value=None
+                ), patch.object(
+                    watch_inbox, "resolve_project_repo_path", return_value=Path(raw)
+                ), patch.object(
+                    watch_inbox, "execute_bb_bootstrap_plan"
+                ) as execute, patch.object(
+                    watch_inbox, "emit", side_effect=lambda event, _json: events.append(event)
+                ):
+                    consumed = watch_inbox._bootstrap_bb_before_dispatch(
+                        "glmpi",
+                        False,
+                        project_id="amiga",
+                        repo_targets=["docs"],
+                        messages={"Chats/project/first.md": packet},
+                    )
+                execute.assert_not_called()
+                self.assertEqual([], consumed)
+                self.assertEqual("bb_bootstrap_failed", events[-1]["event"])
+                self.assertIn(expected_detail, events[-1]["detail"])
+
     def test_bb_bootstrap_aborts_before_launch_when_unread_scan_exceeds_cap(self) -> None:
         error = InboxScanLimitExceeded("over cap")
         with patch.object(

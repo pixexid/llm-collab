@@ -134,7 +134,7 @@ def require_event_delivery(emit: Callable[[str], object], line: str) -> None:
 @dataclass(frozen=True)
 class WatcherConfig:
     bb_executable: tuple[str, ...]
-    bb_project_id: str
+    bb_project_ids: tuple[str, ...]
     github_repo: str
     timeout_seconds: float
 
@@ -152,13 +152,24 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
         executable = bb_executable_from_project(project)
     except BbExecutableRefused as error:
         raise ProbeError(str(error)) from error
+    repos = project.get("repos")
+    repo_targets = (
+        sorted(key for key in repos if isinstance(key, str) and key)
+        if isinstance(repos, Mapping)
+        else []
+    )
+    if not repo_targets:
+        raise ProbeError(f"project {project_id!r} has no repositories")
     try:
-        bb_project_id = bb_project_id_from_project(project, project_id)
+        bb_project_ids = tuple(dict.fromkeys(
+            bb_project_id_from_project(project, project_id, target)
+            for target in repo_targets
+        ))
     except BbProjectIdRefused as error:
         if not error.raw_nonempty:
-            raise ProbeError("bb.project_id must be non-empty text") from error
+            raise ProbeError(f"{error.field} must be non-empty text") from error
         raise ProbeError(
-            f"bb.project_id {error.value!r} has surrounding whitespace; "
+            f"{error.field} {error.value!r} has surrounding whitespace; "
             "refusing (match raw, reject padded)"
         ) from error
     github = project.get("github")
@@ -170,7 +181,7 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
         raise ProbeError("bb.timeout_seconds must be positive")
     return WatcherConfig(
         bb_executable=tuple(executable),
-        bb_project_id=bb_project_id,
+        bb_project_ids=bb_project_ids,
         github_repo=repo if isinstance(repo, str) else "",
         timeout_seconds=float(timeout),
     )
@@ -363,6 +374,39 @@ def thread_rows(payload) -> list[dict]:
     return rows
 
 
+def project_thread_rows(
+    config: WatcherConfig,
+    *,
+    include_hidden: bool,
+    call: Callable[[Sequence[str], Sequence[str], float], object],
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> list[dict]:
+    """Return one complete aggregate or raise before exposing a partial sample."""
+    rows: list[dict] = []
+    remaining_chars = MAX_RESPONSE_CHARS
+    for project_id in config.bb_project_ids:
+        argv = ["thread", "list", "--project", project_id]
+        if include_hidden:
+            argv.append("--include-hidden")
+        argv.append("--json")
+        payload = call(
+            config.bb_executable,
+            tuple(argv),
+            min(config.timeout_seconds, remaining_cycle_seconds(deadline, monotonic)),
+        )
+        project_rows = thread_rows(payload)
+        response_chars = len(json.dumps(payload, separators=(",", ":")))
+        if response_chars > remaining_chars:
+            raise ProbeError(
+                f"bb thread list aggregate exceeds {MAX_RESPONSE_CHARS} chars"
+            )
+        remaining_chars -= response_chars
+        rows.extend(project_rows)
+        remaining_cycle_seconds(deadline, monotonic)
+    return rows
+
+
 def open_numbers(
     kind: str,
     repo: str,
@@ -416,22 +460,12 @@ def worker_cycle(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
     deadline = cycle_deadline(deadline, monotonic)
-    rows = thread_rows(
-        call(
-            config.bb_executable,
-            (
-                "thread",
-                "list",
-                "--project",
-                config.bb_project_id,
-                "--include-hidden",
-                "--json",
-            ),
-            min(
-                config.timeout_seconds,
-                remaining_cycle_seconds(deadline, monotonic),
-            ),
-        )
+    rows = project_thread_rows(
+        config,
+        include_hidden=True,
+        call=call,
+        deadline=deadline,
+        monotonic=monotonic,
     )
     updated = dict(statuses)
     for row in rows:
@@ -575,17 +609,13 @@ def heartbeat_cycle(
             "procedure before starting lanes"
         )
     try:
-        rows = thread_rows(
-            call(
-                config.bb_executable,
-                ("thread", "list", "--project", config.bb_project_id, "--json"),
-                min(
-                    config.timeout_seconds,
-                    remaining_cycle_seconds(deadline, monotonic),
-                ),
-            )
+        rows = project_thread_rows(
+            config,
+            include_hidden=False,
+            call=call,
+            deadline=deadline,
+            monotonic=monotonic,
         )
-        remaining_cycle_seconds(deadline, monotonic)
         workers = sum(
             row["status"] in {"active", "starting"} and row.get("archivedAt") is None
             for row in rows

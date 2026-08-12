@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 28 -->
+<!-- CONTRACT_VERSION: 29 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,14 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v29 (2026-08-11) makes exact repository-target BB placement visible
+to every sanctioned spawn path and requires project-level worker observation
+to aggregate every configured native placement before reporting a cycle. A
+cached v28 worker trusts the former singular `bb.project_id` placement and can
+start or observe a multi-repository assignment in the wrong native project, so
+the invalidated belief and newly required complete aggregate need the version
+signal. Related GH-796.
 
 Contract v28 (2026-08-11) adds the manual BB-native orchestrator cutover
 runbook to Required Reading and freezes the role-thread brief. An orchestrator

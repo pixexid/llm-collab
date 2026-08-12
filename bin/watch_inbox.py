@@ -88,6 +88,7 @@ from llm_collab.bb_client import (
     BbEventPage,
     BbTransportTimeout,
     bb_executable_from_project,
+    bb_project_id_from_project,
 )
 from llm_collab.ledger import LedgerPaths, LedgerStore
 
@@ -645,9 +646,7 @@ def _bb_start_inputs(
     session_source = bb.get("session_source")
     if session_source is not None and (not isinstance(session_source, str) or not session_source):
         raise ValueError("bb.session_source must be text when provided")
-    native_project_id = bb.get("project_id", project_id)
-    if not isinstance(native_project_id, str) or not native_project_id:
-        raise ValueError("bb.project_id must be text when provided")
+    native_project_id = bb_project_id_from_project(project, project_id, repo_id)
     return {
         "native_project_id": native_project_id,
         "endpoint_id": required_text("endpoint_id"),

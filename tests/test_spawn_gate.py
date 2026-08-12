@@ -54,6 +54,19 @@ REGISTRY = {
         "timeout_seconds": 17.0,
     },
 }
+AMIGA_REGISTRY = {
+    **REGISTRY,
+    "id": "amiga",
+    "repos": {"app": Path("/registered/amiga"), "docs": Path("/registered/docs")},
+    "bb": {
+        **REGISTRY["bb"],
+        "project_id": "proj_eber9t9n2f",
+        "project_ids": {
+            "app": "proj_eber9t9n2f",
+            "docs": "proj_2qjntdfb4v",
+        },
+    },
+}
 PROFILE = BbProfile("codex", "gpt-5.6-luna", "medium")
 CLI_ARGS = [
     "--assignment-kind", "read-only",
@@ -134,6 +147,42 @@ def planned(*, transport=None, **overrides):
 
 
 class PreflightRefusalTest(unittest.TestCase):
+    def test_amiga_repo_target_selects_matching_native_project(self) -> None:
+        for target, expected in (
+            ("app", "proj_eber9t9n2f"),
+            ("docs", "proj_2qjntdfb4v"),
+        ):
+            with self.subTest(target=target):
+                outcome = planned(registry_entry=AMIGA_REGISTRY, repo_target=target)
+                self.assertIsInstance(outcome, SpawnPlan)
+                self.assertEqual(expected, outcome.native_project_id)
+                self.assertEqual(AMIGA_REGISTRY["repos"][target], outcome.repo_path)
+
+    def test_mapping_defects_refuse_before_git(self) -> None:
+        cases = (
+            ([], "app"),
+            ({"app": "proj_eber9t9n2f"}, "docs"),
+            ({"app": " padded ", "docs": "proj_2qjntdfb4v"}, "app"),
+        )
+        for project_ids, target in cases:
+            transport = GitTransport()
+            registry = {
+                **AMIGA_REGISTRY,
+                "bb": {**AMIGA_REGISTRY["bb"], "project_ids": project_ids},
+            }
+            with self.subTest(project_ids=project_ids, target=target):
+                outcome = planned(
+                    registry_entry=registry, repo_target=target, transport=transport
+                )
+                self.assertIsInstance(outcome, GateRefusal)
+                self.assertEqual("registry_bb_project_invalid", outcome.reason)
+                self.assertEqual([], transport.calls)
+
+    def test_single_repo_legacy_project_id_behavior_is_unchanged(self) -> None:
+        outcome = planned(registry_entry=REGISTRY, repo_target=None)
+        self.assertIsInstance(outcome, SpawnPlan)
+        self.assertEqual("proj_llm_collab", outcome.native_project_id)
+
     def test_missing_triple_refuses(self) -> None:
         for field in ("provider", "model", "reasoning_level"):
             with self.subTest(field=field):

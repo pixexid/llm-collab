@@ -62,10 +62,11 @@ Load-bearing design points (unchanged from the recorder's first slice):
 - **Records, never gates.** A ``thread.created`` handler is fire-and-forget with
   no veto hook (GH-630 probe). Enforcement stays at our CLI call sites.
 
-- **Exact identifiers, never normalized.** The thread's native bb project id is
-  matched RAW against every registered project's ``bb.project_id``. A padded
-  ``bb.project_id`` is REJECTED, never stripped, so the recorder and
-  ``spawn_gate`` enforce the same scope (GH-695 P2-D).
+- **Repo-target-aware native ownership.** The thread's native bb project id may
+  match any placement resolved from a registered project's exact repo-target
+  mappings, with the single ``bb.project_id`` fallback when the mapping is
+  absent. The shared resolver owns validation; see the canonical
+  `BB mapping schema <../docs/multi-project.md#registering-projects>`_.
 
 - **Project-scoped, registry-bound, and every loaded row is scope-checked.** The
   thread's bb project (``--thread-project``) must exactly identify one registered
@@ -208,22 +209,33 @@ def _reject_nul(label: str, value: str) -> str:
     return value
 
 
-def _resolve_native_bb_project(entry: object) -> str:
-    """The bb project this llm-collab project spawns under (the scope for --thread-project).
+def _resolve_native_bb_projects(entry: object) -> tuple[str, ...]:
+    """All BB projects this collab project can spawn under.
 
     The shared bb-client seam matches RAW and rejects padding; this caller keeps
     the recorder's existing ``SystemExit`` refusal messages (GH-695 P2-D)."""
     if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]:
         raise SystemExit("registered project has no valid id; refusing to record")
+    repos = entry.get("repos")
+    targets: list[str | None] = (
+        sorted(key for key in repos if isinstance(key, str) and key)
+        if isinstance(repos, dict)
+        else [None]
+    )
+    if not targets:
+        targets = [None]
     try:
-        return bb_project_id_from_project(entry, entry["id"])
+        return tuple(dict.fromkeys(
+            bb_project_id_from_project(entry, entry["id"], target)
+            for target in targets
+        ))
     except BbProjectIdRefused as error:
         if not error.trimmed_nonempty:
             raise SystemExit(
-                f"project {entry['id']!r} has no valid bb.project_id; refusing to record"
+                f"project {entry['id']!r} has no valid {error.field}; refusing to record"
             ) from error
         raise SystemExit(
-            f"project {entry['id']!r} bb.project_id {error.value!r} has surrounding whitespace; "
+            f"project {entry['id']!r} {error.field} {error.value!r} has surrounding whitespace; "
             "refusing to record (match raw, reject padded — GH-695 P2-D)"
         ) from error
 
@@ -245,8 +257,7 @@ def _resolve_thread_project(thread_project: str) -> str | None:
             raise SystemExit(
                 f"project {entry.get('id')!r} bb block is malformed; refusing to record"
             )
-        native = _resolve_native_bb_project(entry)
-        if thread_project == native:
+        if thread_project in _resolve_native_bb_projects(entry):
             matches.append(entry["id"])
 
     if not matches:

@@ -66,8 +66,10 @@ Start all three watchers at the beginning of every BB orchestrator session as
 persistent `Monitor` calls from the repository checkout. Substitute the exact
 collaboration project, current orchestrator session ID, and `$SD` session
 scratchpad. The script resolves the project's configured `bb.executable`,
-`bb.project_id`, and `github.repo`; no watcher may substitute a PATH-default
-BB or a checkout-default GitHub repository.
+`github.repo`, and the deduplicated native BB projects for every registered
+repository target through the shared project-ID resolver. Every worker cycle
+requires the complete aggregate; no watcher may substitute a PATH-default BB,
+a checkout-default GitHub repository, or a partial native-project result.
 
 The watchers report changes; they do not decide that work is complete.
 
