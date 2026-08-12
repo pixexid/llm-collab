@@ -580,8 +580,10 @@ built and the orchestrator waits for work it never assigned.
   what you meant, and never report a worker "on <task>" when you only asked it
   about <task>.
 - **Idle is not completion.** A BB thread becomes idle whenever its turn ends.
-  Inspect the named deliverable and terminal action before treating the
-  assignment as finished.
+  Every worker and reviewer instead pushes one `DONE|BLOCKED` tell to the exact
+  orchestrator thread with summary, exact head, and evidence. Inspect the named
+  deliverable and terminal action once after that report or an abnormal watcher
+  event before treating the assignment as finished; never poll live workers.
 - **Disposition belongs where the gate reads it.** A worker adjudicating a
   review finding posts the outcome on the exact review thread or gate artifact.
   A BB result or mailbox packet alone does not close that discussion.
@@ -598,17 +600,19 @@ built and the orchestrator waits for work it never assigned.
   pause — don't guess in order to stay "frozen."
 - **Silence is never a valid state.** If you are blocked, finished, or cannot
   proceed, say so in a durable packet.
-  For a BB worker, the equivalent report belongs in its BB result rather than
-  an llm-collab packet.
+  For a BB worker, the equivalent is one direct terminal `DONE|BLOCKED` BB tell
+  to the exact orchestrator thread rather than an llm-collab packet.
 - **Finish both promised outcomes.** Do not end the turn until the delegated
   deliverable and terminal action are both done. Acknowledgement, partial work,
   or an idle turn is not a substitute.
 
-**Liveness (re-driving only works on a live worker)**
+**Liveness (event-driven for BB workers)**
 
-- **For a BB worker, inspect before re-driving.** Read its thread, output, log,
-  and artifact through BB. `idle` says only that the current turn ended; it does
-  not say why or prove completion.
+- **For a BB worker, do not poll.** Normal completion pushes its terminal tell;
+  the worker-lifecycle watcher points only on `error`, `stopping`, or
+  disappearance of a previously active worker. After either event, read bounded
+  evidence once and inspect the artifact before deciding whether to re-drive.
+  Normal `idle`, liveness, marker refresh, and unchanged state remain silent.
 - **Confirm the worker is alive before treating silence as waiting.** A worker
   with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
   turn awaiting its next wake. For OpenAI-model interaction that wake is through
@@ -650,6 +654,10 @@ built and the orchestrator waits for work it never assigned.
 - verification commands
 - handoff format (files changed, commands run, verification result, blocker/ready)
 - terminal action
+- exact terminal `bb thread tell <orchestrator-thread>` format carrying
+  `DONE|BLOCKED`, summary, exact head, and evidence
+- implementation publication boundary: worker commits and pushes; orchestrator
+  verifies the pushed head and opens the PR
 - the exact instruction not to end the turn until the deliverable and terminal
   action are both done
 - for review findings, the exact gate artifact where the disposition must be posted

@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 29 -->
+<!-- CONTRACT_VERSION: 30 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,18 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v30 (2026-08-11) replaces live-worker polling with direct terminal
+`DONE|BLOCKED` tells to the exact orchestrator thread and narrows watcher tells
+to abnormal worker lifecycle, complete PR artifact-timeline changes, and
+deployed-version drift. Routine idle transitions, marker refreshes, liveness
+lines, and unchanged baselines remain silent. It also requires explicit
+provider, model, and reasoning flags on the sanctioned spawn path, reserves
+Fable for the supervisor, and admits Claude Code workers only at exact
+`claude-code / claude-opus-5 / medium` after execution-event proof. A cached v29
+orchestrator would keep polling live workers and a cached spawner could inherit
+remembered defaults or admit a now-forbidden Claude profile, so the version
+signal is required. Related GH-801.
 
 Contract v29 (2026-08-11) makes exact repository-target BB placement visible
 to every sanctioned spawn path and requires project-level worker observation

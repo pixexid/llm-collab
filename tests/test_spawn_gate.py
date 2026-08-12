@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -209,6 +211,46 @@ class PreflightRefusalTest(unittest.TestCase):
             with self.subTest(assignment_kind=assignment_kind):
                 outcome = planned(assignment_kind=assignment_kind)
                 self.assertIsInstance(outcome, SpawnPlan)
+
+    def test_fable_refuses_every_worker_assignment_before_git(self) -> None:
+        for assignment_kind in ("read-only", "writing"):
+            transport = GitTransport()
+            with self.subTest(assignment_kind=assignment_kind):
+                outcome = planned(
+                    assignment_kind=assignment_kind,
+                    provider="claude-code",
+                    model="claude-fable-5",
+                    reasoning_level="xhigh",
+                    transport=transport,
+                )
+                self.assertIsInstance(outcome, GateRefusal)
+                self.assertEqual("supervisor_only_profile", outcome.reason)
+                self.assertEqual([], transport.calls)
+
+    def test_only_explicit_opus_medium_claude_profile_is_admitted(self) -> None:
+        admitted = planned(
+            provider="claude-code",
+            model="claude-opus-5",
+            reasoning_level="medium",
+        )
+        self.assertIsInstance(admitted, SpawnPlan)
+
+        for model, reasoning_level in (
+            ("claude-opus-5", "high"),
+            ("claude-opus-5[1m]", "medium"),
+            ("claude-sonnet-5", "medium"),
+        ):
+            transport = GitTransport()
+            with self.subTest(model=model, reasoning_level=reasoning_level):
+                outcome = planned(
+                    provider="claude-code",
+                    model=model,
+                    reasoning_level=reasoning_level,
+                    transport=transport,
+                )
+                self.assertIsInstance(outcome, GateRefusal)
+                self.assertEqual("unsupported_claude_profile", outcome.reason)
+                self.assertEqual([], transport.calls)
 
     def test_missing_worktree_isolation_refuses(self) -> None:
         outcome = planned(environment=None)
@@ -469,6 +511,19 @@ class CliPhaseTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("--assignment-kind", result.stdout)
+
+    def test_profile_flags_are_required_before_any_task_or_registry_read(self) -> None:
+        for flag in ("--provider", "--model", "--reasoning-level"):
+            index = CLI_ARGS.index(flag)
+            argv = CLI_ARGS[:index] + CLI_ARGS[index + 2 :]
+            with self.subTest(flag=flag), mock.patch.object(
+                bb_spawn, "get_project"
+            ) as get_project, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                SystemExit
+            ) as raised:
+                bb_spawn.main(argv)
+            self.assertEqual(2, raised.exception.code)
+            get_project.assert_not_called()
 
     def test_new_worktree_refuses_before_planning_or_spawning_anything(self) -> None:
         """The refusal must land before the non-idempotent call, not after it.
@@ -881,6 +936,58 @@ class WatcherGateCliTest(unittest.TestCase):
         markers.assert_not_called()
         evaluate.assert_not_called()
         self.assertEqual(0, exit_code)
+
+
+class Gh801WorkflowContractTests(unittest.TestCase):
+    def test_frozen_role_brief_is_profile_proven_then_task_bearing(self) -> None:
+        text = (ROOT / "docs/workflows/bb-native-cutover-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(text.split())
+        profile_only = normalized.index("profile-only first turn")
+        execution_proof = normalized.index("exact event proof", profile_only)
+        task_bearing = normalized.index("first task-bearing turn", execution_proof)
+        frozen = text[text.index("## Frozen role-thread brief") :]
+        frozen_normalized = " ".join(frozen.split())
+        self.assertLess(profile_only, execution_proof)
+        self.assertLess(execution_proof, task_bearing)
+        self.assertEqual(
+            7,
+            sum(
+                frozen.count(f"\n## {heading}\n")
+                for heading in (
+                    "TASK", "EXPECTED OUTCOME", "REQUIRED SKILLS",
+                    "REQUIRED TOOLS", "MUST DO", "MUST NOT DO", "CONTEXT",
+                )
+            ),
+        )
+        for forbidden in ("bb thread wait", "thread show", "thread output"):
+            self.assertNotIn(forbidden, frozen_normalized)
+        for required in (
+            "DONE|BLOCKED",
+            "Workers commit and push only",
+            "Fable only for the supervisor",
+            "Luna MAX",
+            "GLM-5.2 MAX",
+            "Kimi K3 high",
+            "Sol high only for the hardest work",
+            "Opus medium",
+            "Amiga focused on customer-facing SEO output",
+        ):
+            self.assertIn(required, frozen_normalized)
+
+    def test_canonical_worker_docs_require_direct_terminal_reports(self) -> None:
+        for relative in (
+            "docs/workflows/orchestrator-sessions.md",
+            "docs/workflows/bb-native-cutover-runbook.md",
+            "docs/workflows/task-intake-and-delegation.md",
+            "docs/workflows/bb-workers.md",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                normalized = " ".join(text.split())
+                self.assertIn("DONE|BLOCKED", normalized)
+                self.assertIn("exact orchestrator thread", normalized)
 
 
 if __name__ == "__main__":

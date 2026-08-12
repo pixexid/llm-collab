@@ -73,16 +73,23 @@ a checkout-default GitHub repository, or a partial native-project result.
 
 The watchers report changes; they do not decide that work is complete.
 
-- A worker leaving `active` means **go look**. `idle` never means finished:
-  read both `thread output` and `thread log`, then inspect the promised artifact
-  and terminal action. `output` can be stale while a turn is active, and a
-  wedged active lane produces no transition event. `bb thread output` returns the
-  last *final* output; when a provider quota-death kills a worker mid-turn, that
-  is the previous turn's report — complete, clean, and successful-looking — while
-  the current turn produced nothing. Thread status is `error`, not `idle`. Read
-  `bb thread log` alongside `output`, and treat the branch head as the truth
-  about what landed; this matters even when the worker pushed its commit before
-  it could post its dispositions.
+- Every worker and reviewer brief ends with one direct terminal tell to the
+  exact orchestrator thread,
+  `bb thread tell <orchestrator-thread>`, carrying `DONE|BLOCKED`, summary, exact
+  head, and evidence. The orchestrator does not poll `wait`, `show`, or `output`
+  on a live worker. It performs one bounded evidence read only after that exact
+  terminal tell or a watcher abnormal pointer.
+- Worker lifecycle tells are abnormal-only: entry into `error` or `stopping`,
+  or disappearance of a previously active tracked worker. Normal `idle`,
+  routine liveness, marker refresh, and unchanged baselines are silent. An
+  abnormal pointer says **go inspect**; it is not completion evidence. A stale
+  final output can predate the failed turn, so verify the exact branch head and
+  promised artifact before deciding the lane.
+- PR/review/check tells cover any complete artifact-timeline change. The
+  deployed-version watcher tells only on drift. Identical accepted or ambiguous
+  semantic events coalesce until recovery or a different state re-arms them.
+  A confirmed tell failure is fatal for that cycle and advances neither watcher
+  baseline, marker, nor dedupe state.
 - A startable issue excludes work blocked on an external actor, parked by a
   decision, and epics. A drained queue produces a status line, not permission to
   invent work. Queue and lane activation remain owned by

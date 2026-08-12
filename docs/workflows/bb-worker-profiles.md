@@ -69,8 +69,10 @@ malformed activation marker refuses as the distinct
 The explicitly selected path is deliberately not gated on qualification. Its
 `plan_spawn` seam in `llm_collab/spawn_gate.py`, reached through
 `bin/bb_spawn.py`, enforces the Contract v15 hard model exclusions and the
-isolation, exact base-SHA, registry, and scope checks, and nothing about
-qualification. This is a decision, not an oversight: an orchestrator decided
+isolation, exact base-SHA, registry, and scope checks. It also refuses every
+non-supervisor Fable spawn and every Claude Code worker/reviewer triple except
+exact `claude-code / claude-opus-5 / medium`. This is a decision, not an
+oversight: an orchestrator decided
 both to start the specific lane and which exact provider, model, and reasoning
 level it runs on, and that lane's output passes through the review controls in
 [`commit-push-prs.md`](commit-push-prs.md). The native `bb thread spawn` command
@@ -84,6 +86,13 @@ from a declared default. The qualified set is defined by
 states the rule and the check without treating a runtime value as authority.
 There is no per-packet profile selection on the inbound path. `pi` is a
 multi-vendor provider, so its model IDs retain their vendor prefix.
+
+Every sanctioned spawn therefore supplies all three CLI flags explicitly. Its
+first turn is profile-only and contains no task content. Only after the BB
+execution record proves the exact triple may the orchestrator send the frozen
+task-bearing brief to that same thread. Requested flags, project defaults,
+profile names, chips, and worker self-reports are not execution evidence. Query
+the live provider catalog at activation time; do not copy it into policy.
 
 ## Routing tiers
 
@@ -146,40 +155,3 @@ grant a lane without those markers. Work-type → profile routing and authoring
 evaluation remain Phase 2; an explicitly selected writing lane through
 `bin/bb_spawn.py` operates under the orchestrator review controls in
 [`bb-workers.md`](bb-workers.md), not a claimed property of the model.
-
-## Named profile candidates
-
-Only non-excluded issue-approved Phase 2 names remain candidates. A live catalog
-match proves availability, not capability.
-
-| Profile revision | Frozen candidate triple | Current status |
-|---|---|---|
-| `manager-opus-v1` | `claude-code / claude-opus-5[1m] / medium` | Unmeasured; evaluation only. Do not use as a gate or authority owner. |
-| `architect-fable-v1` | `claude-code / claude-fable-5 / xhigh` | Unmeasured; evaluation only. |
-| `engineer-sol-v1` | `codex / gpt-5.6-sol / high` | Unmeasured; no implementation assignment yet. |
-| `utility-luna-v1` | `codex / gpt-5.6-luna / medium` | Model measured for read-only analysis; reasoning-level-specific and authoring behavior unmeasured. |
-| `research-kimi-v1` | `pi / kimi-coding/k3 / high` | Exact profile qualified for authoring; other reasoning levels remain unmeasured and unavailable. |
-
-## Live catalog snapshot
-
-Observed on 2026-08-07. Everything not identified as measured above is
-**unmeasured**.
-
-- `codex`: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
-  `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`
-- `claude-code`: `claude-fable-5`, `claude-opus-5[1m]`,
-  `claude-opus-4-8[1m]`, `claude-opus-4-7[1m]`, `claude-sonnet-5`,
-  `claude-haiku-4-5-20251001`
-- `pi`: `kimi-coding/k3`, `kimi-coding/kimi-for-coding`,
-  `kimi-coding/kimi-for-coding-highspeed`, `kimi-coding/k3-256k`,
-  `openai-codex/gpt-5.3-codex-spark`, `openai-codex/gpt-5.4`,
-  `openai-codex/gpt-5.4-mini`, `openai-codex/gpt-5.5`,
-  `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.6-sol`,
-  `openai-codex/gpt-5.6-terra`, `zai/glm-4.5-air`, `zai/glm-4.7`,
-  `zai/glm-5-turbo`, `zai/glm-5.1`, `zai/glm-5.2`,
-  `zai/glm-5v-turbo`, `zai/glm-5.2-highspeed`,
-  `meta/muse-spark-1.2-contributor`
-- `acp-cursor`: provider available, no selectable models returned
-
-Re-query before every activation. This snapshot documents the decision evidence;
-it is not entitlement authority.

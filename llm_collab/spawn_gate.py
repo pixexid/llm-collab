@@ -32,6 +32,8 @@ _EXCLUDED_MODELS = frozenset({
     ("pi", "meta/muse-spark-1.2-contributor"),
     ("pi", "zai/glm-5.2"),
 })
+_ALLOWED_CLAUDE_PROFILE = ("claude-code", "claude-opus-5", "medium")
+_FABLE_MODEL = "claude-fable-5"
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,22 @@ def plan_spawn(
         )
     if assignment_kind not in {"read-only", "writing"}:
         return GateRefusal("invalid_assignment_kind", f"unknown assignment kind {assignment_kind!r}")
+    if provider == "claude-code" and model == _FABLE_MODEL:
+        return GateRefusal(
+            "supervisor_only_profile",
+            "claude-code / claude-fable-5 is supervisor-only and cannot run "
+            f"a {assignment_kind} worker or reviewer assignment",
+        )
+    if provider == "claude-code" and (
+        provider,
+        model,
+        reasoning_level,
+    ) != _ALLOWED_CLAUDE_PROFILE:
+        return GateRefusal(
+            "unsupported_claude_profile",
+            "Claude Code worker and reviewer assignments require explicit "
+            "claude-code / claude-opus-5 / medium",
+        )
     if (provider, model) in _EXCLUDED_MODELS:
         return GateRefusal(
             "excluded_model",
