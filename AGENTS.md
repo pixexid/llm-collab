@@ -52,7 +52,7 @@ deployed-version drift. Routine idle transitions, marker refreshes, liveness
 lines, and unchanged baselines remain silent. It also requires explicit
 provider, model, and reasoning flags on the sanctioned spawn path, reserves
 Fable for the supervisor, and admits Claude Code workers only at exact
-`claude-code / claude-opus-5 / medium` after execution-event proof. A cached v29
+`claude-code / claude-opus-5[1m] / medium` after execution-event proof. A cached v29
 orchestrator would keep polling live workers and a cached spawner could inherit
 remembered defaults or admit a now-forbidden Claude profile, so the version
 signal is required. Related GH-801.

@@ -32,7 +32,7 @@ _EXCLUDED_MODELS = frozenset({
     ("pi", "meta/muse-spark-1.2-contributor"),
     ("pi", "zai/glm-5.2"),
 })
-_ALLOWED_CLAUDE_PROFILE = ("claude-code", "claude-opus-5", "medium")
+_ALLOWED_CLAUDE_PROFILE = ("claude-code", "claude-opus-5[1m]", "medium")
 _FABLE_MODEL = "claude-fable-5"
 
 
@@ -148,7 +148,7 @@ def plan_spawn(
         return GateRefusal(
             "unsupported_claude_profile",
             "Claude Code worker and reviewer assignments require explicit "
-            "claude-code / claude-opus-5 / medium",
+            "claude-code / claude-opus-5[1m] / medium",
         )
     if (provider, model) in _EXCLUDED_MODELS:
         return GateRefusal(

@@ -41,6 +41,13 @@ from llm_collab.spawn_gate import (  # noqa: E402
     plan_spawn,
 )
 
+PROFILE_ONLY_PROMPT = (
+    "PROFILE-ONLY FIRST TURN. Do not inspect task content or modify files. "
+    "Report pwd, branch, HEAD, merge-base, git status --short "
+    "--untracked-files=all, and executed provider/model/reasoning from the BB "
+    "execution record; then end the turn."
+)
+
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -53,7 +60,6 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--base-sha", required=True)
     result.add_argument("--permission-mode")
     result.add_argument("--title")
-    result.add_argument("--prompt", required=True)
     result.add_argument("--json", action="store_true")
     result.add_argument(
         "--allow-stale-watchers",
@@ -122,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         reasoning_level=args.reasoning_level,
         permission_mode=args.permission_mode,
         title=args.title,
-        prompt=args.prompt,
+        prompt=PROFILE_ONLY_PROMPT,
     )
     if isinstance(plan, GateRefusal):
         _emit(f"REFUSED: {plan.reason}: {plan.detail}")

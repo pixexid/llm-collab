@@ -350,7 +350,7 @@ class ProfileTest(unittest.TestCase):
         outcome = spawn(
             client,
             profile=BbProfile(
-                provider="claude-code", model="claude-opus-5", reasoning_level="high"
+                provider="claude-code", model="claude-opus-5[1m]", reasoning_level="high"
             ),
         )
         self.assertIsInstance(outcome, BbRefusal)

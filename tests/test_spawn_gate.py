@@ -79,7 +79,6 @@ CLI_ARGS = [
     "--reasoning-level", PROFILE.reasoning_level,
     "--base-sha", SHA,
     "--environment", "env_expected",
-    "--prompt", "audit",
 ]
 
 # The CLI's entire coverage used to run through `--new-environment worktree`, the
@@ -230,14 +229,14 @@ class PreflightRefusalTest(unittest.TestCase):
     def test_only_explicit_opus_medium_claude_profile_is_admitted(self) -> None:
         admitted = planned(
             provider="claude-code",
-            model="claude-opus-5",
+            model="claude-opus-5[1m]",
             reasoning_level="medium",
         )
         self.assertIsInstance(admitted, SpawnPlan)
 
         for model, reasoning_level in (
-            ("claude-opus-5", "high"),
-            ("claude-opus-5[1m]", "medium"),
+            ("claude-opus-5[1m]", "high"),
+            ("claude-opus-5", "medium"),
             ("claude-sonnet-5", "medium"),
         ):
             transport = GitTransport()
@@ -511,6 +510,7 @@ class CliPhaseTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("--assignment-kind", result.stdout)
+        self.assertNotIn("--prompt", result.stdout)
 
     def test_profile_flags_are_required_before_any_task_or_registry_read(self) -> None:
         for flag in ("--provider", "--model", "--reasoning-level"):
@@ -524,6 +524,57 @@ class CliPhaseTest(unittest.TestCase):
                 bb_spawn.main(argv)
             self.assertEqual(2, raised.exception.code)
             get_project.assert_not_called()
+
+    def test_caller_task_prompt_is_rejected_before_registry_or_spawn(self) -> None:
+        sentinel = "TASK_SENTINEL_MUST_NOT_REACH_FIRST_TURN"
+        client = mock.Mock()
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(
+            bb_spawn, "get_project"
+        ) as get_project, mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), self.assertRaises(SystemExit) as raised:
+            bb_spawn.main([*CLI_ARGS, "--prompt", sentinel])
+        self.assertEqual(2, raised.exception.code)
+        get_project.assert_not_called()
+        client.spawn.assert_not_called()
+        client.send.assert_not_called()
+
+    def test_launcher_injects_profile_only_prompt_and_never_delivers_task(self) -> None:
+        sentinel = "TASK_SENTINEL_MUST_NOT_REACH_FIRST_TURN"
+        client = mock.Mock()
+        client.spawn.return_value = BbThread(
+            "thr_worker1", "proj_llm_collab", "env_expected", "codex", "starting"
+        )
+
+        def profile_only_plan(**values):
+            self.assertEqual(bb_spawn.PROFILE_ONLY_PROMPT, values["prompt"])
+            self.assertNotIn(sentinel, values["prompt"])
+            return planned(prompt=values["prompt"])
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            bb_spawn, "get_project", return_value=REGISTRY
+        ), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(
+            bb_spawn, "plan_spawn", side_effect=profile_only_plan
+        ), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path(temporary)
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), mock.patch("builtins.print"):
+            self.assertEqual(0, bb_spawn.main(CLI_ARGS))
+            record = json.loads(
+                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(
+            bb_spawn.PROFILE_ONLY_PROMPT,
+            client.spawn.call_args.kwargs["prompt"],
+        )
+        self.assertEqual(bb_spawn.PROFILE_ONLY_PROMPT, record["prompt"])
+        client.send.assert_not_called()
 
     def test_new_worktree_refuses_before_planning_or_spawning_anything(self) -> None:
         """The refusal must land before the non-idempotent call, not after it.
@@ -625,8 +676,6 @@ class CliPhaseTest(unittest.TestCase):
         self.assertIn("native_thread_id=thr_worker1", emit.call_args.args[0])
 
     def test_configured_bb_executable_timeout_and_native_project_are_used(self) -> None:
-        plan = planned()
-        self.assertIsInstance(plan, SpawnPlan)
         transport, calls = bb_transport()
         timeouts = []
 
@@ -636,7 +685,11 @@ class CliPhaseTest(unittest.TestCase):
 
         with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
             bb_spawn, "resolve_project_repo_path", return_value=REPO
-        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+        ), mock.patch.object(
+            bb_spawn,
+            "plan_spawn",
+            side_effect=lambda **values: planned(prompt=values["prompt"]),
+        ), mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
         ), mock.patch(
             "llm_collab.bb_client.subprocess_transport",
@@ -650,6 +703,18 @@ class CliPhaseTest(unittest.TestCase):
         self.assertEqual(
             "proj_llm_collab", spawn_argv[spawn_argv.index("--project") + 1]
         )
+        self.assertEqual(
+            bb_spawn.PROFILE_ONLY_PROMPT,
+            spawn_argv[spawn_argv.index("--prompt") + 1],
+        )
+        spawn_index = next(
+            index for index, call in enumerate(calls) if call[:2] == ["thread", "spawn"]
+        )
+        evidence_index = next(
+            index for index, call in enumerate(calls) if call[:2] == ["thread", "log"]
+        )
+        self.assertLess(spawn_index, evidence_index)
+        self.assertFalse(any(call[:2] == ["thread", "tell"] for call in calls))
         self.assertTrue(timeouts)
         self.assertEqual({17.0}, set(timeouts))
 
@@ -988,6 +1053,37 @@ class Gh801WorkflowContractTests(unittest.TestCase):
                 normalized = " ".join(text.split())
                 self.assertIn("DONE|BLOCKED", normalized)
                 self.assertIn("exact orchestrator thread", normalized)
+
+    def test_canonical_launchers_expose_no_caller_prompt(self) -> None:
+        workers = (ROOT / "docs/workflows/bb-workers.md").read_text(encoding="utf-8")
+        workers_command = workers[
+            workers.index("python3.11 bin/bb_spawn.py") :
+            workers.index("The assignment goes through the script")
+        ]
+        cutover = (ROOT / "docs/workflows/bb-native-cutover-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        cutover_command = cutover[
+            cutover.index("<runtime_root>/bin/llm-collab bb_spawn.py \\") :
+            cutover.index("`--allow-stale-watchers` is recorded")
+        ]
+        self.assertNotIn("--prompt", workers_command)
+        self.assertNotIn("--prompt", cutover_command)
+        self.assertIn(
+            "injects the task-free profile-only first prompt", " ".join(workers.split())
+        )
+        self.assertIn("accepts no caller prompt", " ".join(cutover.split()))
+
+    def test_canonical_claude_coordinate_is_the_live_suffixed_id(self) -> None:
+        for relative in (
+            "AGENTS.md",
+            "docs/workflows/bb-worker-profiles.md",
+            "docs/workflows/bb-workers.md",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("claude-opus-5[1m] / medium", text)
+                self.assertNotIn("claude-opus-5 / medium", text)
 
 
 if __name__ == "__main__":

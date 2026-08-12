@@ -71,15 +71,15 @@ verified worktree.
      --reasoning-level <reasoning_level> \
      --permission-mode full \
      --title "Candidate orchestrator:<project_id> epoch <epoch>" \
-     --prompt "PROFILE-ONLY FIRST TURN. Do not inspect task content or modify files. Report pwd, branch, HEAD, merge-base, git status --short --untracked-files=all, and the executed provider/model/reasoning from the BB execution record; then end the turn." \
      --json
    ```
 
    `--allow-stale-watchers` is recorded in this assignment and authorizes only
    this succession-gap spawn; it authorizes no other spawn against stale,
    absent, foreign-owned, or unverifiable watcher coverage. The candidate's
-   initial turn may load and verify context but must not claim authority or
-   start protected work.
+   launcher injects the task-free profile-only prompt; it accepts no caller
+   prompt. The candidate's initial turn may load and verify context but must not
+   claim authority or start protected work.
 4. Require `<runtime_root>/bin/llm-collab bb_spawn.py` to return the same
    verified environment ID, then archive the provisioning thread immediately
    through the procedure in

@@ -162,14 +162,14 @@ python3.11 bin/bb_spawn.py \
   --reasoning-level high \
   --permission-mode full \
   --title "<writing task title>" \
-  --prompt "PROFILE-ONLY FIRST TURN. Do not inspect task content or modify files. Report pwd, branch, HEAD, merge-base, git status --short --untracked-files=all, and executed provider/model/reasoning from the BB execution record; then end the turn." \
   --json
 ```
 
 The assignment goes through the script, not the native command: that is what
-applies the spawn gate and writes the assignment record. Write the delegation to
-a file. After the execution event proves the exact triple, deliver that file as
-the first task-bearing turn with `"${bb_cmd[@]}" thread tell <thread-id>
+applies the spawn gate, injects the task-free profile-only first prompt, and
+writes the assignment record. It does not accept a caller prompt. Write the
+delegation to a file. After the execution event proves the exact triple, deliver
+that file as the first task-bearing turn with `"${bb_cmd[@]}" thread tell <thread-id>
 "$(cat <file>)" --mode steer`. Shell interpolation eats backticks, and a prompt
 that arrives with a hole in it still reports success, so prefer BB's file or
 attachment surface when the brief contains shell syntax.
@@ -178,7 +178,7 @@ defaults are never assignment authority. The first attached turn is
 profile-only and receives no task content. Send the task-bearing frozen brief
 only after the BB execution event proves the exact requested triple. For Claude
 Code workers and reviewers, the only admitted triple is exact
-`claude-code / claude-opus-5 / medium`; Fable is supervisor-only.
+`claude-code / claude-opus-5[1m] / medium`; Fable is supervisor-only.
 
 The probe must be idle before that spawn and must receive no further messages.
 After the writer successfully returns the same environment ID, archive the

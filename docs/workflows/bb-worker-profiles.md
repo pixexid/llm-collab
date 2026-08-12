@@ -71,7 +71,7 @@ The explicitly selected path is deliberately not gated on qualification. Its
 `bin/bb_spawn.py`, enforces the Contract v15 hard model exclusions and the
 isolation, exact base-SHA, registry, and scope checks. It also refuses every
 non-supervisor Fable spawn and every Claude Code worker/reviewer triple except
-exact `claude-code / claude-opus-5 / medium`. This is a decision, not an
+exact `claude-code / claude-opus-5[1m] / medium`. This is a decision, not an
 oversight: an orchestrator decided
 both to start the specific lane and which exact provider, model, and reasoning
 level it runs on, and that lane's output passes through the review controls in
