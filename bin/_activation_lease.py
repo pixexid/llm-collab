@@ -593,12 +593,15 @@ def _claim_grant_lock(identity_or_project: object) -> _BlockingLock:
     return _BlockingLock(directory / _GRANT_LOCK_NAME)
 
 
+BB_THREAD_ID_ENV_VAR = "BB_THREAD_ID"
 RUNTIME_ID_ENV_VARS = (
+    BB_THREAD_ID_ENV_VAR,
     "LLM_COLLAB_READER_RUNTIME_ID",
     "CODEX_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
     "GEMINI_SESSION_ID",
 )
+BB_THREAD_ID_PATTERN = re.compile(r"thr_[a-z0-9]+")
 
 # The reader's native id IS the worker's ordinary native, so native IDENTITY is
 # (family, id) — the reader must carry its ACTUAL family, never a synthetic label.
@@ -612,8 +615,20 @@ RUNTIME_ID_ENV_FAMILY = {
 }
 
 
-def runtime_id_from_env() -> str | None:
-    for name in RUNTIME_ID_ENV_VARS:
+def runtime_id_from_env(*, include_bb_thread: bool = False) -> str | None:
+    # A BB thread can own watcher coverage without becoming an activation
+    # family. Presence is authoritative: never fall through an invalid or
+    # ambiguous native value into a legacy identity from the host environment.
+    native = os.environ.get(BB_THREAD_ID_ENV_VAR)
+    if native is not None:
+        if not include_bb_thread:
+            return None
+        if native != native.strip() or BB_THREAD_ID_PATTERN.fullmatch(native) is None:
+            return None
+        if any(os.environ.get(name, "").strip() for name in RUNTIME_ID_ENV_VARS[1:]):
+            return None
+        return native
+    for name in RUNTIME_ID_ENV_VARS[1:]:
         value = os.environ.get(name)
         if value and value.strip():
             return value.strip()
@@ -621,6 +636,8 @@ def runtime_id_from_env() -> str | None:
 
 
 def runtime_family_from_env() -> str | None:
+    if BB_THREAD_ID_ENV_VAR in os.environ:
+        return None
     explicit = os.environ.get(RUNTIME_FAMILY_ENV_VAR)
     if explicit and explicit.strip():
         return explicit.strip()

@@ -144,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
             # (the same helper bootstrap uses); where it cannot be established,
             # fresh markers are owner-unknown, and unknown is never a pass.
             verdicts = evaluate_coverage(
-                check_markers(args.collab_project), runtime_id_from_env()
+                check_markers(args.collab_project),
+                runtime_id_from_env(include_bb_thread=True),
             )
         except Exception as error:
             # A gate probe that breaks must not render as a pass.
