@@ -145,6 +145,10 @@ def validate_supervisor_acceptance(
         value = frontmatter.get(field)
         if not isinstance(value, str) or not value or value != value.strip():
             problems.append(f"{field} must be a non-empty unpadded string")
+        elif field == "supervisor_acceptance_override_decision" and not value.isprintable():
+            problems.append(
+                f"{field} must be a non-empty printable single-line authority token"
+            )
 
     scope = frontmatter.get("supervisor_acceptance_override_scope")
     scope_match = SUPERVISOR_SCOPE_RE.fullmatch(scope) if isinstance(scope, str) else None

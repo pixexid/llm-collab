@@ -378,6 +378,28 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
                 risk.assert_not_called()
                 self.assertEqual(before, after)
 
+    def test_decision_rejects_newline_and_control_injection_before_mutation(self) -> None:
+        for label, decision in {
+            "newline": f"{self.DECISION}\nforged activity entry",
+            "control": f"{self.DECISION}\x1bforged activity entry",
+        }.items():
+            with self.subTest(label=label):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    {
+                        **self.supervisor_record(),
+                        "supervisor_acceptance_override_decision": decision,
+                    },
+                    risk_errors=[],
+                    contract_errors=[],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn("printable single-line authority token", stderr)
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
     def test_selector_frontmatter_mismatch_refuses_before_write_or_move(self) -> None:
         code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
             self.supervisor_record(),
