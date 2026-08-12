@@ -162,14 +162,25 @@ python3.11 bin/bb_spawn.py \
   --reasoning-level high \
   --permission-mode full \
   --title "<writing task title>" \
-  --prompt "<frozen writing delegation with the verified path, branch, base ref, and base SHA>" \
   --json
 ```
 
 The assignment goes through the script, not the native command: that is what
-applies the spawn gate and writes the assignment record. Write the delegation to
-a file and pass `"$(cat <file>)"` — `bb thread tell` and shell interpolation both
-eat backticks, and a prompt that arrives with a hole in it still reports success.
+applies the spawn gate, injects the task-free profile-only first prompt, and
+writes the assignment record. It does not accept a caller prompt. Write the
+delegation to a file. After the execution event proves the exact triple, deliver
+that file as the first task-bearing turn with `"${bb_cmd[@]}" thread tell <thread-id>
+"$(cat <file>)" --mode queue`. The explicit queue mode keeps the task behind the
+active profile-only turn; `steer` remains reserved for corrections to work already
+running. Shell interpolation eats backticks, and a prompt
+that arrives with a hole in it still reports success, so prefer BB's file or
+attachment surface when the brief contains shell syntax.
+Provider, model, and reasoning level are required flags; remembered project
+defaults are never assignment authority. The first attached turn is
+profile-only and receives no task content. Send the task-bearing frozen brief
+only after the BB execution event proves the exact requested triple. For Claude
+Code workers and reviewers, the only admitted triple is exact
+`claude-code / claude-opus-5[1m] / medium`; Fable is supervisor-only.
 
 The probe must be idle before that spawn and must receive no further messages.
 After the writer successfully returns the same environment ID, archive the
@@ -234,14 +245,19 @@ hard stop, or unblock that must affect the work already running. `queue` waits
 until the active turn finishes. `bb thread tell` is the inbound transport; do
 not add a mailbox packet or wake step.
 
-The worker returns through BB. The orchestrator ingests the result with BB's
-read surfaces:
+The worker or reviewer returns through one direct terminal BB tell to the exact
+orchestrator thread:
 
 ```bash
-"${bb_cmd[@]}" thread output <thread-id>
-"${bb_cmd[@]}" thread show <thread-id> --json
-"${bb_cmd[@]}" thread log <thread-id> --format minimal
+"${bb_cmd[@]}" thread tell <orchestrator-thread-id> \
+  "DONE|BLOCKED <assignment> | summary=<one line> | head=<exact SHA or none> | evidence=<exact artifacts and checks>"
 ```
+
+The orchestrator does not run live-worker `wait`/`show`/`output` loops. After
+that specific terminal report, or an abnormal watcher pointer for `error`,
+`stopping`, or disappearance of a previously active worker, it may perform one
+bounded `show`/`output`/`log` evidence read and then inspect the named artifact.
+Normal `idle`, liveness, marker refresh, and unchanged baselines are silent.
 
 If a durable record is wanted, the orchestrator authors the packet under its own
 registered identity after reading and verifying the BB result. A BB worker must
@@ -276,7 +292,13 @@ state all of these explicitly:
 
 - the frozen scope and exact deliverable;
 - the terminal action, such as commit/push/PR or a named BB result;
+- one `DONE|BLOCKED` tell to the exact orchestrator thread with summary, exact
+  head, and evidence;
 - `Do not end the turn until the deliverable and terminal action are both done.`
+
+Implementation workers commit and push their exact branch head, then report it;
+they do not open the PR. The orchestrator independently verifies that pushed
+head and owns PR creation and every later review, merge, and disposition gate.
 
 An acknowledgement and `idle` status are not completion evidence. Verify both
 artifacts before reporting the task finished. If the work adjudicates a review
@@ -285,9 +307,10 @@ mailbox packet alone does not close that discussion. A genuine blocker gets a
 clear BB report instead of silence or an invented partial completion; the
 orchestrator authors any durable blocker packet.
 
-## Inspect completion and stalls
+## Inspect a pushed report or abnormal event
 
-Use BB's read surfaces rather than inferring state from elapsed time:
+After a specific terminal report or abnormal watcher event, use one bounded BB
+read rather than inferring state from elapsed time:
 
 ```bash
 "${bb_cmd[@]}" thread show <thread-id> --json
@@ -297,14 +320,9 @@ Use BB's read surfaces rather than inferring state from elapsed time:
 
 `show` reports thread/environment state, `output` returns the latest final
 answer, and `log` shows the turn history. Add `--work-status` or `--git-diff` to
-`show` when the artifact is a repository change.
-
-`"${bb_cmd[@]}" thread wait <thread-id>` waits for `idle` by default, but a normal completed
-turn also becomes idle. A status-only monitor therefore cannot distinguish
-ordinary completion from a worker ending its turn with work outstanding. The
-actionable stall signal is **idle while the delegated deliverable or terminal
-action is still outstanding**. Inspect the output, log, and artifact before
-re-driving the worker.
+`show` when the artifact is a repository change. These are evidence reads after
+an event, never a polling loop. A terminal tell remains a draft until its exact
+head and artifact are independently verified.
 
 ## See also
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -77,7 +79,6 @@ CLI_ARGS = [
     "--reasoning-level", PROFILE.reasoning_level,
     "--base-sha", SHA,
     "--environment", "env_expected",
-    "--prompt", "audit",
 ]
 
 # The CLI's entire coverage used to run through `--new-environment worktree`, the
@@ -209,6 +210,46 @@ class PreflightRefusalTest(unittest.TestCase):
             with self.subTest(assignment_kind=assignment_kind):
                 outcome = planned(assignment_kind=assignment_kind)
                 self.assertIsInstance(outcome, SpawnPlan)
+
+    def test_fable_refuses_every_worker_assignment_before_git(self) -> None:
+        for assignment_kind in ("read-only", "writing"):
+            transport = GitTransport()
+            with self.subTest(assignment_kind=assignment_kind):
+                outcome = planned(
+                    assignment_kind=assignment_kind,
+                    provider="claude-code",
+                    model="claude-fable-5",
+                    reasoning_level="xhigh",
+                    transport=transport,
+                )
+                self.assertIsInstance(outcome, GateRefusal)
+                self.assertEqual("supervisor_only_profile", outcome.reason)
+                self.assertEqual([], transport.calls)
+
+    def test_only_explicit_opus_medium_claude_profile_is_admitted(self) -> None:
+        admitted = planned(
+            provider="claude-code",
+            model="claude-opus-5[1m]",
+            reasoning_level="medium",
+        )
+        self.assertIsInstance(admitted, SpawnPlan)
+
+        for model, reasoning_level in (
+            ("claude-opus-5[1m]", "high"),
+            ("claude-opus-5", "medium"),
+            ("claude-sonnet-5", "medium"),
+        ):
+            transport = GitTransport()
+            with self.subTest(model=model, reasoning_level=reasoning_level):
+                outcome = planned(
+                    provider="claude-code",
+                    model=model,
+                    reasoning_level=reasoning_level,
+                    transport=transport,
+                )
+                self.assertIsInstance(outcome, GateRefusal)
+                self.assertEqual("unsupported_claude_profile", outcome.reason)
+                self.assertEqual([], transport.calls)
 
     def test_missing_worktree_isolation_refuses(self) -> None:
         outcome = planned(environment=None)
@@ -469,6 +510,71 @@ class CliPhaseTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("--assignment-kind", result.stdout)
+        self.assertNotIn("--prompt", result.stdout)
+
+    def test_profile_flags_are_required_before_any_task_or_registry_read(self) -> None:
+        for flag in ("--provider", "--model", "--reasoning-level"):
+            index = CLI_ARGS.index(flag)
+            argv = CLI_ARGS[:index] + CLI_ARGS[index + 2 :]
+            with self.subTest(flag=flag), mock.patch.object(
+                bb_spawn, "get_project"
+            ) as get_project, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                SystemExit
+            ) as raised:
+                bb_spawn.main(argv)
+            self.assertEqual(2, raised.exception.code)
+            get_project.assert_not_called()
+
+    def test_caller_task_prompt_is_rejected_before_registry_or_spawn(self) -> None:
+        sentinel = "TASK_SENTINEL_MUST_NOT_REACH_FIRST_TURN"
+        client = mock.Mock()
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(
+            bb_spawn, "get_project"
+        ) as get_project, mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), self.assertRaises(SystemExit) as raised:
+            bb_spawn.main([*CLI_ARGS, "--prompt", sentinel])
+        self.assertEqual(2, raised.exception.code)
+        get_project.assert_not_called()
+        client.spawn.assert_not_called()
+        client.send.assert_not_called()
+
+    def test_launcher_injects_profile_only_prompt_and_never_delivers_task(self) -> None:
+        sentinel = "TASK_SENTINEL_MUST_NOT_REACH_FIRST_TURN"
+        client = mock.Mock()
+        client.spawn.return_value = BbThread(
+            "thr_worker1", "proj_llm_collab", "env_expected", "codex", "starting"
+        )
+
+        def profile_only_plan(**values):
+            self.assertEqual(bb_spawn.PROFILE_ONLY_PROMPT, values["prompt"])
+            self.assertNotIn(sentinel, values["prompt"])
+            return planned(prompt=values["prompt"])
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            bb_spawn, "get_project", return_value=REGISTRY
+        ), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(
+            bb_spawn, "plan_spawn", side_effect=profile_only_plan
+        ), mock.patch.object(
+            bb_spawn, "project_state_dir", return_value=Path(temporary)
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), mock.patch("builtins.print"):
+            self.assertEqual(0, bb_spawn.main(CLI_ARGS))
+            record = json.loads(
+                (Path(temporary) / "bb-assignments" / "thr_worker1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(
+            bb_spawn.PROFILE_ONLY_PROMPT,
+            client.spawn.call_args.kwargs["prompt"],
+        )
+        self.assertEqual(bb_spawn.PROFILE_ONLY_PROMPT, record["prompt"])
+        client.send.assert_not_called()
 
     def test_new_worktree_refuses_before_planning_or_spawning_anything(self) -> None:
         """The refusal must land before the non-idempotent call, not after it.
@@ -570,8 +676,6 @@ class CliPhaseTest(unittest.TestCase):
         self.assertIn("native_thread_id=thr_worker1", emit.call_args.args[0])
 
     def test_configured_bb_executable_timeout_and_native_project_are_used(self) -> None:
-        plan = planned()
-        self.assertIsInstance(plan, SpawnPlan)
         transport, calls = bb_transport()
         timeouts = []
 
@@ -581,7 +685,11 @@ class CliPhaseTest(unittest.TestCase):
 
         with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
             bb_spawn, "resolve_project_repo_path", return_value=REPO
-        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+        ), mock.patch.object(
+            bb_spawn,
+            "plan_spawn",
+            side_effect=lambda **values: planned(prompt=values["prompt"]),
+        ), mock.patch.object(
             bb_spawn, "project_state_dir", return_value=Path("/state")
         ), mock.patch(
             "llm_collab.bb_client.subprocess_transport",
@@ -595,6 +703,18 @@ class CliPhaseTest(unittest.TestCase):
         self.assertEqual(
             "proj_llm_collab", spawn_argv[spawn_argv.index("--project") + 1]
         )
+        self.assertEqual(
+            bb_spawn.PROFILE_ONLY_PROMPT,
+            spawn_argv[spawn_argv.index("--prompt") + 1],
+        )
+        spawn_index = next(
+            index for index, call in enumerate(calls) if call[:2] == ["thread", "spawn"]
+        )
+        evidence_index = next(
+            index for index, call in enumerate(calls) if call[:2] == ["thread", "log"]
+        )
+        self.assertLess(spawn_index, evidence_index)
+        self.assertFalse(any(call[:2] == ["thread", "tell"] for call in calls))
         self.assertTrue(timeouts)
         self.assertEqual({17.0}, set(timeouts))
 
@@ -881,6 +1001,130 @@ class WatcherGateCliTest(unittest.TestCase):
         markers.assert_not_called()
         evaluate.assert_not_called()
         self.assertEqual(0, exit_code)
+
+
+class Gh801WorkflowContractTests(unittest.TestCase):
+    def test_frozen_role_brief_is_profile_proven_then_task_bearing(self) -> None:
+        text = (ROOT / "docs/workflows/bb-native-cutover-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(text.split())
+        profile_only = normalized.index("profile-only first turn")
+        execution_proof = normalized.index("exact event proof", profile_only)
+        task_bearing = normalized.index("first task-bearing turn", execution_proof)
+        procedure = text[
+            text.index("## Cutover procedure") : text.index("Re-running bootstrap")
+        ]
+        procedure_normalized = " ".join(procedure.split())
+        queued_brief = procedure_normalized.index("--mode queue")
+        readiness_report = procedure_normalized.index(
+            "READY|BLOCKED orchestrator:", queued_brief
+        )
+        readiness_read = procedure_normalized.index(
+            "thread show <role_thread_id> --json", readiness_report
+        )
+        barrier = procedure_normalized.index(
+            "No predecessor demotion, role-generation write, or activation tell "
+            "may occur until the candidate's queued readiness turn has completed "
+            "and its readiness report has been received and confirmed.",
+            readiness_read,
+        )
+        demotion = procedure_normalized.index(
+            "Demote the predecessor in writing", barrier
+        )
+        generation = procedure_normalized.index("Record the new generation", demotion)
+        activation = procedure_normalized.index("Send the activation tell", generation)
+        frozen = text[text.index("## Frozen role-thread brief") :]
+        frozen_normalized = " ".join(frozen.split())
+        self.assertLess(profile_only, execution_proof)
+        self.assertLess(execution_proof, task_bearing)
+        self.assertLess(queued_brief, readiness_report)
+        self.assertLess(readiness_report, readiness_read)
+        self.assertLess(readiness_read, barrier)
+        self.assertLess(barrier, demotion)
+        self.assertLess(demotion, generation)
+        self.assertLess(generation, activation)
+        self.assertEqual(
+            7,
+            sum(
+                frozen.count(f"\n## {heading}\n")
+                for heading in (
+                    "TASK", "EXPECTED OUTCOME", "REQUIRED SKILLS",
+                    "REQUIRED TOOLS", "MUST DO", "MUST NOT DO", "CONTEXT",
+                )
+            ),
+        )
+        for forbidden in ("bb thread wait", "thread show", "thread output"):
+            self.assertNotIn(forbidden, frozen_normalized)
+        for required in (
+            "DONE|BLOCKED",
+            "Workers commit and push only",
+            "Fable only for the supervisor",
+            "Luna MAX",
+            "GLM-5.2 MAX",
+            "Kimi K3 high",
+            "Sol high only for the hardest work",
+            "Opus medium",
+            "Amiga focused on customer-facing SEO output",
+        ):
+            self.assertIn(required, frozen_normalized)
+
+    def test_canonical_worker_docs_require_direct_terminal_reports(self) -> None:
+        for relative in (
+            "docs/workflows/orchestrator-sessions.md",
+            "docs/workflows/bb-native-cutover-runbook.md",
+            "docs/workflows/task-intake-and-delegation.md",
+            "docs/workflows/bb-workers.md",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                normalized = " ".join(text.split())
+                self.assertIn("DONE|BLOCKED", normalized)
+                self.assertIn("exact orchestrator thread", normalized)
+
+    def test_first_task_bearing_tells_use_explicit_queue_mode(self) -> None:
+        commands = {
+            "docs/workflows/bb-workers.md": '"$(cat <file>)" --mode queue',
+            "docs/workflows/bb-native-cutover-runbook.md": (
+                '"$(cat <brief_file>)" --mode queue'
+            ),
+        }
+        for relative, command in commands.items():
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn(command, text)
+                self.assertNotIn(command.replace("queue", "steer"), text)
+
+    def test_canonical_launchers_expose_no_caller_prompt(self) -> None:
+        workers = (ROOT / "docs/workflows/bb-workers.md").read_text(encoding="utf-8")
+        workers_command = workers[
+            workers.index("python3.11 bin/bb_spawn.py") :
+            workers.index("The assignment goes through the script")
+        ]
+        cutover = (ROOT / "docs/workflows/bb-native-cutover-runbook.md").read_text(
+            encoding="utf-8"
+        )
+        cutover_command = cutover[
+            cutover.index("<runtime_root>/bin/llm-collab bb_spawn.py \\") :
+            cutover.index("`--allow-stale-watchers` is recorded")
+        ]
+        self.assertNotIn("--prompt", workers_command)
+        self.assertNotIn("--prompt", cutover_command)
+        self.assertIn(
+            "injects the task-free profile-only first prompt", " ".join(workers.split())
+        )
+        self.assertIn("accepts no caller prompt", " ".join(cutover.split()))
+
+    def test_canonical_claude_coordinate_is_the_live_suffixed_id(self) -> None:
+        for relative in (
+            "AGENTS.md",
+            "docs/workflows/bb-worker-profiles.md",
+            "docs/workflows/bb-workers.md",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("claude-opus-5[1m] / medium", text)
+                self.assertNotIn("claude-opus-5 / medium", text)
 
 
 if __name__ == "__main__":

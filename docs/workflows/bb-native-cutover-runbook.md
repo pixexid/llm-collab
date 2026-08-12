@@ -53,7 +53,8 @@ verified worktree.
    apply that workflow's exact environment, path, branch, base, and clean-tree
    checks before attaching the role.
 3. Attach one **writing**, explicitly non-authoritative candidate to the verified
-   environment using the frozen brief below. Ordered succession has stopped the
+   environment with a profile-only first turn. Do not include the frozen brief
+   or any task content yet. Ordered succession has stopped the
    predecessor's watchers, while only the activated successor may start its own,
    so this one spawn uses the recorded watcher-gap override:
 
@@ -70,34 +71,68 @@ verified worktree.
      --reasoning-level <reasoning_level> \
      --permission-mode full \
      --title "Candidate orchestrator:<project_id> epoch <epoch>" \
-     --prompt "$(cat <brief_file>)" \
      --json
    ```
 
    `--allow-stale-watchers` is recorded in this assignment and authorizes only
    this succession-gap spawn; it authorizes no other spawn against stale,
    absent, foreign-owned, or unverifiable watcher coverage. The candidate's
-   initial turn may load and verify context but must not claim authority or
-   start protected work.
+   launcher injects the task-free profile-only prompt; it accepts no caller
+   prompt. The candidate's initial turn may load and verify context but must not
+   claim authority or start protected work.
 4. Require `<runtime_root>/bin/llm-collab bb_spawn.py` to return the same
    verified environment ID, then archive the provisioning thread immediately
    through the procedure in
    [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree). Do this before
    demoting the predecessor or writing the generation record.
-5. Require the candidate's live reply, then read the executed provider, model,
+5. Require the candidate's live profile-only reply, then read the executed provider, model,
    and reasoning level from its execution event. Requested flags and declared
    defaults are not execution evidence; a missing or mismatched event refuses
-   promotion. The candidate assignment itself supplies the exact-profile proof,
-   so do not create a second probe assignment.
-6. Demote the predecessor in writing. It becomes driver/reviewer: it may advise,
+   promotion. Only after that exact event proof, send the frozen task-bearing
+   brief below to the same thread in explicit queue mode, so it cannot enter the
+   active profile-only turn:
+
+   ```bash
+   "${bb_cmd[@]}" thread tell <role_thread_id> "$(cat <brief_file>)" --mode queue
+   ```
+
+   The candidate assignment itself supplies the
+   exact-profile proof, so do not create a second probe assignment or let the
+   first turn inspect the brief.
+6. Require the candidate to end that queued readiness turn with this exact
+   terminal action, choosing `READY` only after completing every readiness check
+   in the frozen brief:
+
+   ```bash
+   "${bb_cmd[@]}" thread tell <cutover_thread_id> \
+     "READY|BLOCKED orchestrator:<project_id> epoch <epoch> | thread=<role_thread_id> | summary=<one line> | evidence=<exact readiness checks>"
+   ```
+
+   After receiving the report, perform one direct status read of that exact
+   candidate:
+
+   ```bash
+   "${bb_cmd[@]}" thread show <role_thread_id> --json
+   ```
+
+   Confirm that the report names the expected role, epoch, and thread, that a
+   `READY` report supplies evidence for every frozen-brief readiness check, and
+   that this direct read reports the candidate `idle` after the queued readiness
+   turn. Queue acceptance, report receipt, an active/idle transition alone, and
+   `bb thread wait` exit 0 are each insufficient readiness evidence. If any
+   check is absent, mismatched, blocked, or still active, stop the cutover before
+   mutation; do not poll or repeat the read.
+
+   **No predecessor demotion, role-generation write, or activation tell may occur until the candidate's queued readiness turn has completed and its readiness report has been received and confirmed.**
+7. Demote the predecessor in writing. It becomes driver/reviewer: it may advise,
    steer through BB, and review, but it may not issue approvals or start
    protected work.
-7. Record the new generation in the project's existing
+8. Record the new generation in the project's existing
    `{project_state_root}/<project_id>/role-generation.md`, preserving the current
    approved record shape and its `handoff_sha256`. This runbook does not define a
    second schema or resolver; the program work tracked by GH-784 owns that shared
    authority seam.
-8. Send the activation tell to the same candidate thread through the configured
+9. Send the activation tell to the same candidate thread through the configured
    native BB command established by `BB Workers`:
 
    ```bash
@@ -122,12 +157,12 @@ verified worktree.
    thread guard. If the log is unreadable or incomplete, or acceptance is
    ambiguous, remain in degraded safe mode and escalate. Never guess or send
    more than one recovery tell.
-9. On activation, the successor first re-reads its generation and then starts or
+10. On activation, the successor first re-reads its generation and then starts or
    reconciles the standard project watcher set from
    [`Orchestrator Sessions`](orchestrator-sessions.md#standard-watcher-set).
    It performs no other protected work until successor-owned marker coverage is
    established.
-10. After the exact generation match, accepted activation input, and
+11. After the exact generation match, accepted activation input, and
     successor-owned watcher coverage are all proven, record terminal disposition
     `promoted` for the candidate bootstrap writing assignment in the own-project
     handoff. This is an assignment disposition, not a role-state field or second
@@ -144,7 +179,7 @@ watcher set, or project-state store. A fresh foreign-session watcher marker
 blocks succession exactly as specified by
 [`Orchestrator Sessions`](orchestrator-sessions.md#successor-bootstrap).
 A generation record alone never proves activation; recover the activation input
-through step 8 before treating the recorded candidate as authoritative.
+through step 9 before treating the recorded candidate as authoritative.
 
 ## Promotion and refusal
 
@@ -187,20 +222,25 @@ queues. Resolve every project-aware read and write from the role's exact
 
 ## Watcher wake status
 
-DEC-bb-wake-1 approves a minimal pointer-only watcher tell, but that code is an
-implementation slice until it merges. The approved design preserves these
-semantics:
+Watcher tells are minimal pointer-only events:
 
 - a watcher event points the role at canonical state; it does not carry task or
   message authority;
 - the liveness marker remains owned by the session that launched the watcher;
 - the tell target resolves the current role generation when the event fires;
   and
-- disabling tells reverts to in-turn waiting without changing canonical state or
-  marker ownership.
+- normal worker completion arrives directly from the worker as one terminal
+  `DONE|BLOCKED` tell; lifecycle tells are only for `error`, `stopping`, or
+  disappearance of a previously active worker;
+- PR/review/check timeline changes and deployed-version drift wake the role;
+- normal `idle`, liveness, marker refresh, `WATCHER LIVE`, and unchanged
+  baselines remain silent; and
+- identical semantic events coalesce until recovery or state change, while a
+  confirmed tell failure advances neither canonical watcher baseline, marker,
+  nor dedupe state.
 
-Do not report watcher tells as enforced before the implementation lands. In-turn
-waiting below is the safe path with or without tells.
+The orchestrator never polls live workers. It performs one bounded evidence read
+after a specific terminal report or watcher event.
 
 ## First actions after promotion
 
@@ -225,21 +265,26 @@ sections.
 ## TASK
 
 Join as the non-authoritative candidate for `orchestrator:<project_id>` epoch
-`<epoch>` and continue the project from `<handoff_path>`. In this initial turn,
-read and verify context, reply with readiness evidence, and stop. Do not claim
-the role or start protected work. Authority begins only after the exact
+`<epoch>` and continue the project from `<handoff_path>`. This is the first
+task-bearing turn and is sent only after the preceding profile-only turn's BB
+execution event proved `<provider> / <model> / <reasoning_level>`. Read and
+verify context, report readiness directly to `<cutover_thread_id>`, and stop. Do
+not claim the role or start protected work. Authority begins only after the exact
 activation input is accepted in a later turn; then re-read
 `<role_generation_path>` and proceed only when its project, role, epoch, and
 thread identify this exact candidate.
 
+Make this the terminal action of the readiness turn, choosing `READY` only after
+every required readiness check succeeds, then stop:
+`bb thread tell <cutover_thread_id> "READY|BLOCKED orchestrator:<project_id> epoch <epoch> | thread=<role_thread_id> | summary=<one line> | evidence=<exact readiness checks>"`.
+
 After activation, own orchestration, queue decisions, independent verification,
-review judgments, and contract-reserved work. Do not end an orchestrator turn
-while this role owns a live worker or startable queue work. Wait in-turn for live
-workers through the configured BB lifecycle. Immediately after every
-`bb thread wait`, inspect thread status, output, log, and the promised artifact
-as required by `<runtime_root>/docs/workflows/bb-workers.md`. Exit 0 from a wait
-is never a completion verdict. Before becoming idle, recheck the project task
-board and canonical queue and start all work that is ready under the lane gates.
+review judgments, and contract-reserved work. Workers and reviewers push one
+terminal `DONE|BLOCKED` tell to this exact orchestrator thread; do not poll live workers.
+Perform one bounded evidence read after that report or a watcher abnormal
+pointer, then verify the promised artifact. Before becoming idle, recheck the
+project task board and canonical queue and start all work that is ready under
+the lane gates.
 
 ## EXPECTED OUTCOME
 
@@ -265,7 +310,7 @@ release state remain project-exact.
 
 - Use `<runtime_root>/bin/llm-collab bb_spawn.py` for every code,
   documentation, and fixture assignment.
-- Use the exact project's configured BB executable for waits, tells, and read
+- Use the exact project's configured BB executable for tells and bounded read
   surfaces; never substitute PATH `bb`.
 - Use the project's canonical task board, queue, GitHub, verification, and
   collaboration tools through the workflows that own them.
@@ -292,6 +337,10 @@ release state remain project-exact.
   headings in the same order. Keep only contract-reserved orchestration and
   judgment, plus a truly single-line mechanical own-project-state edit, in this
   thread.
+- Put one exact terminal action in every worker and reviewer brief:
+  `bb thread tell <role_thread_id> "DONE|BLOCKED <assignment> | summary=<one line> | head=<exact SHA or none> | evidence=<exact artifacts and checks>"`.
+  Workers commit and push only; they never open the PR. This role independently
+  verifies the pushed head and owns PR creation, review, merge, and disposition.
 - Use `<runtime_root>` for shared `llm-collab` tools and contract documents. Do
   not make role-authored product-repository edits outside an authorized writing
   lane. Perform read-only diff, SHA, and test verification in each delegated
@@ -299,11 +348,30 @@ release state remain project-exact.
 - Keep one writer per lane. When two writing items are startable under the
   canonical queue and non-overlap gates, run both concurrently. The two-lane cap
   is a ceiling: never manufacture a second lane or exceed the cap.
-- Treat every worker result as a draft until you verify its exact diff and SHA,
-  diagnostics, focused tests, and promised terminal action directly.
-- Stay in-turn while workers are live: after `bb thread wait`, inspect status and
-  evidence directly, then continue, repair, or re-drive. Recheck the board and
-  queue before idle even when every wait exited 0.
+- Treat every terminal worker report as a draft until you verify its exact diff
+  and SHA, diagnostics, focused tests, and promised terminal action directly.
+  Read evidence once after that report or a watcher event; never run live-worker
+  `wait`/`show`/`output` loops.
+- Execute the failover plan in order: reconcile, epic, five scoped issues in PR
+  sequence, this manual cutover, then only PR 1 for role descriptor and authority
+  provenance, building on GH-784, GH-783, and GH-565.
+- Keep the supervisor on Fable for compact, event-driven high-value decisions.
+  Routine orchestration stays off Anthropic: Luna MAX first while GLM-5.2 MAX is
+  pending one passing requalification; use Kimi K3 high for complex work, Sol
+  high only for the hardest work, Opus medium only as an explicit emergency
+  orchestrator/worker tier, and Fable only for the supervisor. GPT-5 Pro receives
+  only orchestrator-prepared complex definitions with artifacts already on
+  GitHub, one send and one check.
+- Apply two-key supervisor-plus-orchestrator authority with recorded reasoning,
+  a revert path, and a distinct provider in the concurrence loop. Reserve only
+  credentials/accounts, real spend, legal commitments, stated product direction,
+  and destructive-irreversible actions for the operator.
+- Treat harness and model as separate: BB is the surface; use AX only for tools
+  available solely in the Codex app. Verify every spawned session from its BB
+  execution record, never a chip, requested profile, remembered default, or
+  self-report. Keep supervisor token use event-driven and delegate large reads.
+- Keep Amiga focused on customer-facing SEO output; the portable-Postgres DB
+  migration remains deferred.
 - Write only this role's own project state under
   `{project_state_root}/<project_id>/`, including its own handoff and
   role-generation files.
@@ -322,10 +390,12 @@ release state remain project-exact.
   mechanism, or message ledger.
 - Do not treat BB thread state, a watcher tell, `idle`, or wait exit 0 as task
   completion or authority evidence.
+- Do not poll live workers, let a worker open a PR, omit provider/model/reasoning
+  flags, or send task content before an execution event proves the exact triple.
 - Do not let a worker self-promote, silently switch the profile inside an
   authority thread, or accept a worker summary without inspecting its artifacts.
-- Do not end the turn with live workers or startable queue work still owned by
-  this role.
+- Do not leave startable queue work undispatched merely because live workers are
+  legitimately quiet between pushed events.
 
 ## CONTEXT
 
@@ -338,6 +408,7 @@ release state remain project-exact.
 - Handoff: `<handoff_path>`
 - Role generation record: `<role_generation_path>`
 - Candidate thread: `<role_thread_id>`
+- Cutover driver thread: `<cutover_thread_id>`
 - Brief file: `<brief_file>`
 - Exact profile: `<provider> / <model> / <reasoning_level>`
 - Read first: `<runtime_root>/AGENTS.md`,

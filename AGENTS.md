@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 29 -->
+<!-- CONTRACT_VERSION: 31 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,27 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v31 (2026-08-12) adds a completed-readiness barrier to manual native
+orchestrator succession. The queued candidate brief must finish with its exact
+terminal readiness report, and one direct status read must confirm that specific
+turn completed before predecessor demotion, the role-generation write, or the
+activation tell. A cached v30 cutover driver would keep performing those three
+authority mutations after queue acceptance and would fail to perform the newly
+required report-plus-status adjudication, so the prohibited-action and
+new-obligation branches both require the version signal. Related GH-801.
+
+Contract v30 (2026-08-11) replaces live-worker polling with direct terminal
+`DONE|BLOCKED` tells to the exact orchestrator thread and narrows watcher tells
+to abnormal worker lifecycle, complete PR artifact-timeline changes, and
+deployed-version drift. Routine idle transitions, marker refreshes, liveness
+lines, and unchanged baselines remain silent. It also requires explicit
+provider, model, and reasoning flags on the sanctioned spawn path, reserves
+Fable for the supervisor, and admits Claude Code workers only at exact
+`claude-code / claude-opus-5[1m] / medium` after execution-event proof. A cached v29
+orchestrator would keep polling live workers and a cached spawner could inherit
+remembered defaults or admit a now-forbidden Claude profile, so the version
+signal is required. Related GH-801.
 
 Contract v29 (2026-08-11) makes exact repository-target BB placement visible
 to every sanctioned spawn path and requires project-level worker observation
