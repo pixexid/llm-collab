@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 30 -->
+<!-- CONTRACT_VERSION: 31 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,15 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v31 (2026-08-12) adds a completed-readiness barrier to manual native
+orchestrator succession. The queued candidate brief must finish with its exact
+terminal readiness report, and one direct status read must confirm that specific
+turn completed before predecessor demotion, the role-generation write, or the
+activation tell. A cached v30 cutover driver would keep performing those three
+authority mutations after queue acceptance and would fail to perform the newly
+required report-plus-status adjudication, so the prohibited-action and
+new-obligation branches both require the version signal. Related GH-801.
 
 Contract v30 (2026-08-11) replaces live-worker polling with direct terminal
 `DONE|BLOCKED` tells to the exact orchestrator thread and narrows watcher tells

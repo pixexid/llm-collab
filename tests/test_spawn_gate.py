@@ -1012,10 +1012,38 @@ class Gh801WorkflowContractTests(unittest.TestCase):
         profile_only = normalized.index("profile-only first turn")
         execution_proof = normalized.index("exact event proof", profile_only)
         task_bearing = normalized.index("first task-bearing turn", execution_proof)
+        procedure = text[
+            text.index("## Cutover procedure") : text.index("Re-running bootstrap")
+        ]
+        procedure_normalized = " ".join(procedure.split())
+        queued_brief = procedure_normalized.index("--mode queue")
+        readiness_report = procedure_normalized.index(
+            "READY|BLOCKED orchestrator:", queued_brief
+        )
+        readiness_read = procedure_normalized.index(
+            "thread show <role_thread_id> --json", readiness_report
+        )
+        barrier = procedure_normalized.index(
+            "No predecessor demotion, role-generation write, or activation tell "
+            "may occur until the candidate's queued readiness turn has completed "
+            "and its readiness report has been received and confirmed.",
+            readiness_read,
+        )
+        demotion = procedure_normalized.index(
+            "Demote the predecessor in writing", barrier
+        )
+        generation = procedure_normalized.index("Record the new generation", demotion)
+        activation = procedure_normalized.index("Send the activation tell", generation)
         frozen = text[text.index("## Frozen role-thread brief") :]
         frozen_normalized = " ".join(frozen.split())
         self.assertLess(profile_only, execution_proof)
         self.assertLess(execution_proof, task_bearing)
+        self.assertLess(queued_brief, readiness_report)
+        self.assertLess(readiness_report, readiness_read)
+        self.assertLess(readiness_read, barrier)
+        self.assertLess(barrier, demotion)
+        self.assertLess(demotion, generation)
+        self.assertLess(generation, activation)
         self.assertEqual(
             7,
             sum(

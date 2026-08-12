@@ -99,15 +99,40 @@ verified worktree.
    The candidate assignment itself supplies the
    exact-profile proof, so do not create a second probe assignment or let the
    first turn inspect the brief.
-6. Demote the predecessor in writing. It becomes driver/reviewer: it may advise,
+6. Require the candidate to end that queued readiness turn with this exact
+   terminal action, choosing `READY` only after completing every readiness check
+   in the frozen brief:
+
+   ```bash
+   "${bb_cmd[@]}" thread tell <cutover_thread_id> \
+     "READY|BLOCKED orchestrator:<project_id> epoch <epoch> | thread=<role_thread_id> | summary=<one line> | evidence=<exact readiness checks>"
+   ```
+
+   After receiving the report, perform one direct status read of that exact
+   candidate:
+
+   ```bash
+   "${bb_cmd[@]}" thread show <role_thread_id> --json
+   ```
+
+   Confirm that the report names the expected role, epoch, and thread, that a
+   `READY` report supplies evidence for every frozen-brief readiness check, and
+   that this direct read reports the candidate `idle` after the queued readiness
+   turn. Queue acceptance, report receipt, an active/idle transition alone, and
+   `bb thread wait` exit 0 are each insufficient readiness evidence. If any
+   check is absent, mismatched, blocked, or still active, stop the cutover before
+   mutation; do not poll or repeat the read.
+
+   **No predecessor demotion, role-generation write, or activation tell may occur until the candidate's queued readiness turn has completed and its readiness report has been received and confirmed.**
+7. Demote the predecessor in writing. It becomes driver/reviewer: it may advise,
    steer through BB, and review, but it may not issue approvals or start
    protected work.
-7. Record the new generation in the project's existing
+8. Record the new generation in the project's existing
    `{project_state_root}/<project_id>/role-generation.md`, preserving the current
    approved record shape and its `handoff_sha256`. This runbook does not define a
    second schema or resolver; the program work tracked by GH-784 owns that shared
    authority seam.
-8. Send the activation tell to the same candidate thread through the configured
+9. Send the activation tell to the same candidate thread through the configured
    native BB command established by `BB Workers`:
 
    ```bash
@@ -132,12 +157,12 @@ verified worktree.
    thread guard. If the log is unreadable or incomplete, or acceptance is
    ambiguous, remain in degraded safe mode and escalate. Never guess or send
    more than one recovery tell.
-9. On activation, the successor first re-reads its generation and then starts or
+10. On activation, the successor first re-reads its generation and then starts or
    reconciles the standard project watcher set from
    [`Orchestrator Sessions`](orchestrator-sessions.md#standard-watcher-set).
    It performs no other protected work until successor-owned marker coverage is
    established.
-10. After the exact generation match, accepted activation input, and
+11. After the exact generation match, accepted activation input, and
     successor-owned watcher coverage are all proven, record terminal disposition
     `promoted` for the candidate bootstrap writing assignment in the own-project
     handoff. This is an assignment disposition, not a role-state field or second
@@ -154,7 +179,7 @@ watcher set, or project-state store. A fresh foreign-session watcher marker
 blocks succession exactly as specified by
 [`Orchestrator Sessions`](orchestrator-sessions.md#successor-bootstrap).
 A generation record alone never proves activation; recover the activation input
-through step 8 before treating the recorded candidate as authoritative.
+through step 9 before treating the recorded candidate as authoritative.
 
 ## Promotion and refusal
 
@@ -248,6 +273,10 @@ not claim the role or start protected work. Authority begins only after the exac
 activation input is accepted in a later turn; then re-read
 `<role_generation_path>` and proceed only when its project, role, epoch, and
 thread identify this exact candidate.
+
+Make this the terminal action of the readiness turn, choosing `READY` only after
+every required readiness check succeeds, then stop:
+`bb thread tell <cutover_thread_id> "READY|BLOCKED orchestrator:<project_id> epoch <epoch> | thread=<role_thread_id> | summary=<one line> | evidence=<exact readiness checks>"`.
 
 After activation, own orchestration, queue decisions, independent verification,
 review judgments, and contract-reserved work. Workers and reviewers push one
