@@ -50,8 +50,8 @@ def write_projects(workspace: Path, projects: list[dict]) -> None:
 class RecordExecutedTriplesTest(unittest.TestCase):
     """Each test runs in an isolated temp workspace. collab.config.json anchors
     find_workspace_root() at the temp dir and sets project_state_root; projects.json
-    registers two projects with distinct bb.project_id scopes (Amiga + a registered
-    non-Amiga project, for the shared-contract mutation proofs)."""
+    registers distinct native BB scopes, including Amiga's repo-target mapping
+    and a non-Amiga single-ID fallback, for shared-contract mutation proofs."""
 
     def setUp(self) -> None:
         self.workspace = Path(tempfile.mkdtemp(prefix="lc-et-", dir="/tmp"))
@@ -59,8 +59,23 @@ class RecordExecutedTriplesTest(unittest.TestCase):
             "project_state_root": str(self.workspace / "project-state"),
         }), encoding="utf-8")
         write_projects(self.workspace, [
-            {"id": "amiga", "bb": {"enabled": True, "project_id": "proj_amiga"}},
-            {"id": "nuvyr_app", "bb": {"enabled": True, "project_id": "proj_nuvyr"}},
+            {
+                "id": "amiga",
+                "repos": {"app": "amiga", "docs": "amiga-docs"},
+                "bb": {
+                    "enabled": True,
+                    "project_id": "proj_amiga",
+                    "project_ids": {
+                        "app": "proj_amiga",
+                        "docs": "proj_amiga_docs",
+                    },
+                },
+            },
+            {
+                "id": "nuvyr_app",
+                "repos": {"app": "nuvyr"},
+                "bb": {"enabled": True, "project_id": "proj_nuvyr"},
+            },
         ])
         self.addCleanup(shutil.rmtree, self.workspace, True)
 
@@ -307,6 +322,21 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertEqual(1, len(amiga), "the native Amiga id must resolve exactly to Amiga")
         self.assertEqual("amiga", amiga[0]["project_id"])
 
+    def test_every_amiga_native_placement_records_to_amiga(self) -> None:
+        for thread_id, native in (
+            ("thr_app", "proj_amiga"),
+            ("thr_docs", "proj_amiga_docs"),
+        ):
+            result = self._resolved(
+                "amiga", thread_id, thread_project=native, model="m"
+            )
+            self.assertEqual(0, result.returncode, result.stderr[:500])
+        self.assertEqual(
+            {"thr_app", "thr_docs"},
+            {row["thread_id"] for row in rows_for(self.workspace, "amiga")},
+        )
+        self.assertEqual([], rows_for(self.workspace, "nuvyr_app"))
+
     def test_non_amiga_thread_records_only_non_amiga(self) -> None:
         r = self._resolved("nuvyr_app", "thr_nuvyr", thread_project="proj_nuvyr", model="m2")
         self.assertEqual(0, r.returncode, r.stderr[:500])
@@ -339,6 +369,26 @@ class RecordExecutedTriplesTest(unittest.TestCase):
         self.assertIn("amiga", r.stderr)
         self.assertIn("nuvyr_app", r.stderr)
         self.assertEqual([], any_record_file(self.workspace), "a collided native id writes nowhere")
+
+    def test_mapped_native_project_collision_across_collab_projects_refuses(self) -> None:
+        write_projects(self.workspace, [
+            {
+                "id": "amiga",
+                "repos": {"app": "amiga", "docs": "docs"},
+                "bb": {
+                    "project_ids": {"app": "proj_amiga", "docs": "proj_shared"}
+                },
+            },
+            {"id": "nuvyr_app", "bb": {"project_id": "proj_shared"}},
+        ])
+        result = self._resolved(
+            "amiga", "thr_collision", thread_project="proj_shared"
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("collision", result.stderr)
+        self.assertIn("amiga", result.stderr)
+        self.assertIn("nuvyr_app", result.stderr)
+        self.assertEqual([], any_record_file(self.workspace))
 
     def test_malformed_bb_block_refuses_instead_of_dropping_candidate(self) -> None:
         write_projects(self.workspace, [

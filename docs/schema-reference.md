@@ -125,6 +125,15 @@ Project registry. Created by `scripts/init.py`. Gitignored.
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
+      "bb": {
+        "enabled": true,
+        "project_id": "proj_default",
+        "project_ids": {
+          "app": "proj_app",
+          "api": "proj_api"
+        },
+        "executable": ["bb"]
+      },
       "claude_desktop_bridge": false,
       "ui_ux": {
         "direct_app_only": false,
@@ -166,6 +175,9 @@ Project registry. Created by `scripts/init.py`. Gitignored.
 | `repos` | object | Map of repo ID → path (relative to `projects_root` or absolute) |
 | `default_branch_base` | string | Default git ref for worktree creation |
 | `preflight_command` | string[] or null | Complete project-owned argv to validate before task integration; shared callers execute it exactly and append no project-specific arguments |
+| `bb.project_id` | string | Existing single native BB project/default. Used for every repo target when `bb.project_ids` is absent. Values are matched raw and must be non-empty, unpadded text. |
+| `bb.project_ids` | object | Optional repo ID → native BB project ID mapping. When present, every selected registered repo target must have a non-empty, unpadded text value; a non-object mapping, missing selected key, or invalid value fails closed without falling back to `bb.project_id`. Duplicate values are allowed and project-level observers deduplicate them. |
+| `bb.executable` | string[] | Exact non-empty BB command argv. BB callers refuse rather than fall back to a PATH executable when this is absent or malformed. |
 | `claude_desktop_bridge` | bool | Retained for compatibility; selects nothing. Claude is woken by its durable packet and the app's own background inbox watcher, never AX or Computer Use. |
 | `ui_ux.direct_app_only` | bool | Optional, default-off direct-app gate. When `true`, every non-`done` task must avoid design/sandbox/spec/handoff/parity, bare-template, and template-design-only lane types, repository-root `design/**` targets, and dependency materialization of newly authored `design/**` artifacts. Explicit implementation lanes such as `template-implementation`, `src/design/**`, and read-only `required_design_docs` remain valid. Absolute related/dependency paths require a complete resolvable project `repos` mapping so repository-root scope can be evaluated. A present non-boolean value is a configuration error. |
 | `ui_ux.required_design_docs` | string[] | Optional project-specific design sources prepended to every UI/UX task contract. Non-Amiga projects must configure these or provide explicit task-level design docs. |

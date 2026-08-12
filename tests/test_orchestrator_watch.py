@@ -38,7 +38,16 @@ RECORDED_THREAD_LIST = ROOT / "tests" / "fixtures" / "bb" / "thread_list.json"
 def config() -> watch.WatcherConfig:
     return watch.WatcherConfig(
         bb_executable=("configured-bb", "--wrapper"),
-        bb_project_id="native-project",
+        bb_project_ids=("native-project",),
+        github_repo="owner/repo",
+        timeout_seconds=5.0,
+    )
+
+
+def multi_project_config() -> watch.WatcherConfig:
+    return watch.WatcherConfig(
+        bb_executable=("configured-bb", "--wrapper"),
+        bb_project_ids=("native-app", "native-docs"),
         github_repo="owner/repo",
         timeout_seconds=5.0,
     )
@@ -134,6 +143,149 @@ class RecordedThreadListTest(unittest.TestCase):
             )
         )
         self.assertIn("liveWorkers=1", messages[-1])
+
+
+class MultiProjectAggregationTest(unittest.TestCase):
+    def test_worker_and_heartbeat_aggregate_every_native_project(self) -> None:
+        calls = []
+        payloads = {
+            "native-app": {"threads": [{"id": "app-worker", "status": "active"}]},
+            "native-docs": {"threads": [{"id": "docs-worker", "status": "starting"}]},
+        }
+
+        def call(_executable, argv, _timeout):
+            calls.append(tuple(argv))
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            return payloads[argv[3]]
+
+        statuses = {}
+        self.assertTrue(
+            watch.worker_cycle(
+                multi_project_config(), statuses, call=call, emit=lambda _line: None
+            )
+        )
+        messages = []
+        self.assertTrue(
+            watch.heartbeat_cycle(
+                multi_project_config(),
+                call=call,
+                enumerate_open=lambda *_, **__: [],
+                emit=messages.append,
+            )
+        )
+        self.assertEqual(
+            {"app-worker": "active", "docs-worker": "starting"}, statuses
+        )
+        self.assertIn("liveWorkers=2", messages[-1])
+        thread_calls = [argv for argv in calls if argv[:2] == ("thread", "list")]
+        self.assertEqual(
+            ["native-app", "native-docs", "native-app", "native-docs"],
+            [argv[3] for argv in thread_calls],
+        )
+        self.assertTrue(all("--include-hidden" in argv for argv in thread_calls[:2]))
+        self.assertTrue(all("--include-hidden" not in argv for argv in thread_calls[2:]))
+
+    def test_combined_response_overflow_rejects_before_worker_state_or_marker(self) -> None:
+        limit = 120
+        payloads = {
+            "native-app": {
+                "threads": [
+                    {"id": "app-worker", "status": "idle", "title": "a" * 30}
+                ]
+            },
+            "native-docs": {
+                "threads": [
+                    {"id": "docs-worker", "status": "active", "title": "d" * 30}
+                ]
+            },
+        }
+        sizes = [
+            len(json.dumps(payload, separators=(",", ":")))
+            for payload in payloads.values()
+        ]
+        self.assertTrue(all(size < limit for size in sizes), sizes)
+        self.assertGreater(sum(sizes), limit)
+        statuses = {"app-worker": "active"}
+        messages = []
+
+        def call(_executable, argv, _timeout):
+            return payloads[argv[3]]
+
+        with mock.patch.object(watch, "MAX_RESPONSE_CHARS", limit), mock.patch.object(
+            watch._watcher_liveness, "write_marker"
+        ) as marker:
+            completed = watch.run_once(
+                "worker-lifecycle",
+                "project-a",
+                "session-a",
+                lambda: watch.worker_cycle(
+                    multi_project_config(), statuses, call=call, emit=messages.append
+                ),
+                emit=messages.append,
+            )
+        self.assertFalse(completed)
+        self.assertEqual({"app-worker": "active"}, statuses)
+        self.assertTrue(any(str(limit) in message for message in messages))
+        marker.assert_not_called()
+
+    def test_one_native_project_failure_rejects_whole_worker_aggregate(self) -> None:
+        statuses = {"app-worker": "active"}
+        calls = []
+
+        def call(_executable, argv, _timeout):
+            calls.append(tuple(argv))
+            if argv[3] == "native-app":
+                return {"threads": [{"id": "app-worker", "status": "idle"}]}
+            raise watch.ProbeError("docs project unavailable")
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "worker-lifecycle",
+                "project-a",
+                "session-a",
+                lambda: watch.worker_cycle(
+                    multi_project_config(), statuses, call=call, emit=lambda _line: None
+                ),
+                emit=lambda _line: None,
+            )
+        self.assertFalse(completed)
+        self.assertEqual({"app-worker": "active"}, statuses)
+        self.assertEqual(["native-app", "native-docs"], [argv[3] for argv in calls])
+        marker.assert_not_called()
+
+    def test_one_native_project_failure_rejects_whole_heartbeat_aggregate(self) -> None:
+        calls = []
+        messages = []
+
+        def call(_executable, argv, _timeout):
+            calls.append(tuple(argv))
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": watch.PINNED_BB_VERSION}
+            if argv[3] == "native-app":
+                return {"threads": [{"id": "app-worker", "status": "active"}]}
+            raise watch.ProbeError("docs project unavailable")
+
+        with mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: watch.heartbeat_cycle(
+                    multi_project_config(),
+                    call=call,
+                    enumerate_open=lambda *_, **__: [],
+                    emit=messages.append,
+                ),
+                emit=messages.append,
+            )
+        self.assertFalse(completed)
+        self.assertEqual(
+            ["native-app", "native-docs"],
+            [argv[3] for argv in calls if argv[:2] == ("thread", "list")],
+        )
+        self.assertTrue(any("liveWorkers=?" in line for line in messages))
+        marker.assert_not_called()
 
 
 class ProbeShapeTest(unittest.TestCase):
@@ -1543,7 +1695,7 @@ class EnumerationTest(unittest.TestCase):
         )
         bounded_config = watch.WatcherConfig(
             bb_executable=(sys.executable, "-c", script),
-            bb_project_id="native-project",
+            bb_project_ids=("native-project",),
             github_repo="owner/repo",
             timeout_seconds=5.0,
         )
@@ -2002,6 +2154,7 @@ class ProjectConfigTest(unittest.TestCase):
         self,
     ) -> None:
         project = {
+            "repos": {"app": "app"},
             "bb": {
                 "project_id": " native-project ",
                 "executable": ["configured-bb"],
@@ -2042,6 +2195,7 @@ class ProjectConfigTest(unittest.TestCase):
         self,
     ) -> None:
         project = {
+            "repos": {"app": "app"},
             "bb": {"project_id": "native-project", "timeout_seconds": 5},
             "github": {"repo": "owner/repo"},
         }
@@ -2050,6 +2204,25 @@ class ProjectConfigTest(unittest.TestCase):
                 watch.ProbeError, "bb.executable must be a non-empty list"
             ):
                 watch.project_config("project-a", "worker-lifecycle")
+
+    def test_all_repo_placements_are_resolved_and_deduplicated(self) -> None:
+        project = {
+            "repos": {"app": "app", "docs": "docs", "shared": "shared"},
+            "bb": {
+                "project_id": "legacy-project",
+                "project_ids": {
+                    "app": "native-app",
+                    "docs": "native-docs",
+                    "shared": "native-app",
+                },
+                "executable": ["configured-bb"],
+                "timeout_seconds": 5,
+            },
+            "github": {"repo": "owner/repo"},
+        }
+        with mock.patch.object(watch, "get_project", return_value=project):
+            resolved = watch.project_config("project-a", "heartbeat")
+        self.assertEqual(("native-app", "native-docs"), resolved.bb_project_ids)
 
 
 if __name__ == "__main__":

@@ -164,16 +164,6 @@ def plan_spawn(
     bb = registry_entry.get("bb")
     if not isinstance(bb, Mapping) or bb.get("enabled") is not True:
         return GateRefusal("bb_disabled", "bb adapter is not enabled for this project")
-    try:
-        native_project_id = bb_project_id_from_project(registry_entry, project_id)
-    except BbProjectIdRefused as error:
-        if not error.raw_nonempty:
-            return GateRefusal("registry_bb_project_invalid", "bb.project_id is invalid")
-        return GateRefusal(
-            "registry_bb_project_invalid",
-            f"bb.project_id {error.value!r} has surrounding whitespace; "
-            "refusing (match raw, reject padded)",
-        )
 
     repos = registry_entry.get("repos")
     keys = sorted(key for key in repos if isinstance(key, str) and key) if isinstance(repos, Mapping) else []
@@ -189,6 +179,20 @@ def plan_spawn(
         return GateRefusal(
             "registry_repo_missing",
             f"repo target {selected!r} is not a configured path",
+        )
+    try:
+        native_project_id = bb_project_id_from_project(
+            registry_entry, project_id, selected
+        )
+    except BbProjectIdRefused as error:
+        if not error.raw_nonempty:
+            return GateRefusal(
+                "registry_bb_project_invalid", f"{error.field} is invalid"
+            )
+        return GateRefusal(
+            "registry_bb_project_invalid",
+            f"{error.field} {error.value!r} has surrounding whitespace; "
+            "refusing (match raw, reject padded)",
         )
     repo_path = repos[selected]
     if not isinstance(repo_path, Path) or not repo_path.is_absolute():

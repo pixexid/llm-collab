@@ -117,6 +117,15 @@ Edit `projects.json` (or regenerate with `python scripts/init.py`):
       },
       "default_branch_base": "main",
       "preflight_command": ["pnpm", "preflight", "--json"],
+      "bb": {
+        "enabled": true,
+        "project_id": "proj_my_app",
+        "project_ids": {
+          "app": "proj_my_app",
+          "api": "proj_my_api"
+        },
+        "executable": ["bb"]
+      },
       "ui_ux": {
         "required_design_docs": ["/absolute/path/to/my-app/DESIGN.md"],
         "required_design_skills": ["impeccable"]
@@ -159,6 +168,15 @@ complete replacement for it. See
 canonical behavior.
 
 Repo paths are relative to `projects_root` (from `collab.config.json`). Project runtime state, such as queues and local runbooks, is separate and resolves from `project_state_root`.
+
+For BB-backed projects, `bb.project_ids` optionally maps each exact `repos` key
+to its native BB project. When the mapping is present, selecting a repo target
+requires that exact key; a non-object mapping, missing key, or non-text, empty,
+or padded value fails closed and never falls back to `bb.project_id`. When the
+mapping is absent, every repo target retains the existing single
+`bb.project_id` behavior. Project-level worker observation and execution
+attribution resolve all registered repo targets through this same rule and
+deduplicate native IDs.
 
 `preflight_command` is the complete argv for that project. Shared workflow callers
 execute the registered list exactly; project-specific flags belong in that project's

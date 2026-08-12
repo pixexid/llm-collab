@@ -105,12 +105,12 @@ documented contract cannot misclassify a non-executed row.
   against every registered project carrying a `bb` block. The plugin performs no
   second ownership lookup and has no project setting. A project without a `bb`
   block remains outside recorder coverage.
-- **Scope match, raw not normalized (GH-695 P2-D).** The thread's bb project must
-  exactly match one candidate's `bb.project_id`, and that registry value is
-  matched RAW: a padded `bb.project_id` is
-  **rejected** at both the recorder and `spawn_gate` (never stripped), so the two
-  authorities enforce the same scope. No match is **ignored observably** (exit 0
-  + `ignored unknown_thread_project` → info log) and writes nowhere.
+- **Repo-target-aware scope match.** The thread's bb project may match any native
+  placement resolved from a candidate project's exact repo-target mappings,
+  with the single `bb.project_id` fallback when the mapping is absent. The
+  [canonical BB mapping schema](../../docs/multi-project.md#registering-projects)
+  owns validation. No match is **ignored observably** (exit 0 +
+  `ignored unknown_thread_project` → info log) and writes nowhere.
 - **Ambiguity and malformed candidates fail closed.** Duplicate native ids refuse
   and name every colliding project. A malformed `bb` block or invalid/padded
   native id refuses rather than silently disappearing from the candidate set.

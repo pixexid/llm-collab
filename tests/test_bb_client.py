@@ -1327,6 +1327,46 @@ class BbProjectIdFromProjectTest(unittest.TestCase):
             bb_project_id_from_project({"bb": {}}, "collab-project"),
         )
 
+    def test_exact_repo_mapping_is_selected_and_incomplete_shapes_refuse(self):
+        project = {
+            "bb": {
+                "project_id": "legacy-project",
+                "project_ids": {"app": "native-app", "docs": "native-docs"},
+            }
+        }
+        self.assertEqual(
+            "native-app",
+            bb_project_id_from_project(project, "collab-project", "app"),
+        )
+        self.assertEqual(
+            "native-docs",
+            bb_project_id_from_project(project, "collab-project", "docs"),
+        )
+        for malformed, target in (([], "app"), ({"app": "native-app"}, "docs")):
+            with self.subTest(malformed=malformed, target=target), self.assertRaises(
+                BbProjectIdRefused
+            ):
+                bb_project_id_from_project(
+                    {"bb": {"project_ids": malformed}}, "collab-project", target
+                )
+        for value in (None, "", 7):
+            with self.subTest(value=value), self.assertRaises(BbProjectIdRefused):
+                bb_project_id_from_project(
+                    {"bb": {"project_ids": {"app": value}}},
+                    "collab-project",
+                    "app",
+                )
+
+    def test_padded_mapped_value_is_rejected_not_normalized(self):
+        with self.assertRaises(BbProjectIdRefused) as raised:
+            bb_project_id_from_project(
+                {"bb": {"project_ids": {"docs": " native-docs "}}},
+                "collab-project",
+                "docs",
+            )
+        self.assertEqual(" native-docs ", raised.exception.value)
+        self.assertEqual("bb.project_ids['docs']", raised.exception.field)
+
     def test_padded_value_is_rejected_not_normalized(self):
         with self.assertRaises(BbProjectIdRefused) as raised:
             bb_project_id_from_project(
