@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 31 -->
+<!-- CONTRACT_VERSION: 33 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,25 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v33 (2026-08-12) prohibits hidden fleet threads. Every provision
+probe, worker, and reviewer must be spawned with explicit visible visibility;
+the sanctioned BB client passes that flag and refuses any returned spawn
+envelope that reports otherwise. Direct bootstrap spawns carry the same
+obligation and may not rely on inherited visibility. A cached v32 spawner can
+keep creating hidden children that are absent from the operator UI and default
+thread list/search, so the prohibited-action and new-obligation branches both
+require the version signal. Related GH-806 and `DEC-visibility-1`.
+
+Contract v32 (2026-08-12) keeps BB message editing disabled on supervisor and
+orchestrator authority threads. Editing rewinds provider conversation history
+while retaining workspace changes, but it does not rewind the external
+role-generation record, leases, watcher ownership, or durable decisions. A
+cached v31 authority holder could enable or use that surface and manufacture a
+conversation whose authority history disagrees with live project state, so the
+prohibited-action branch requires the version signal. BB 0.37.0 adds the
+surface; the canonical update observations and compaction alternative live in
+[`Orchestrator Sessions`](docs/workflows/orchestrator-sessions.md#bb-update-procedure).
 
 Contract v31 (2026-08-12) adds a completed-readiness barrier to manual native
 orchestrator succession. The queued candidate brief must finish with its exact

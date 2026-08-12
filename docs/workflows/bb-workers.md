@@ -108,11 +108,19 @@ base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
   --provider codex \
   --model gpt-5.6-luna \
   --reasoning-level medium \
+  --visibility visible \
   --permission-mode accept-edits \
   --title "Provision <writing task>" \
   --prompt "NO-WRITE WORKTREE PREFLIGHT. BB has no read-only permission mode. Do not modify files, create commits, or begin implementation. Report pwd, current branch, HEAD SHA, and git status --short --untracked-files=all, then end the turn." \
   --json
 ```
+
+Every fleet thread — provision probe, worker, and reviewer — is visible. The
+sanctioned client always passes `--visibility visible` and refuses a returned
+spawn envelope that reports any other value. Direct bootstrap spawns must pass
+the same explicit flag. Do not rely on inherited visibility: a hidden parent
+silently produces a hidden child, which makes live work absent from the
+operator UI and from default thread list/search results.
 
 Never pass a branch name as the base: BB resolves the local ref, while
 `bin/local_main_sync.py` deliberately advances only the detached HEAD in a
@@ -122,8 +130,8 @@ created a worktree at `03431b9a`, 44 commits behind `origin/main` at
 `headSha == mergeBase.baseRef` both passed; only comparison with the
 independently resolved SHA caught the stale base.
 
-BB has no standalone environment-create command — verified against 0.35.1 and
-again at 0.36.0, where `bb environment` exposes only inspect-and-operate
+BB has no standalone environment-create command — verified against 0.35.1,
+0.36.0, and 0.37.0, where `bb environment` exposes only inspect-and-operate
 subcommands — and `bb thread spawn` requires `--prompt`, so it cannot create a
 chosen-base worktree without starting a turn. That is why provisioning takes a
 turn at all. Do not put a writing delegation in that first turn. Wait for the probe to
@@ -191,7 +199,11 @@ probe immediately:
 ```
 
 Do not archive it earlier: when it is the last attached thread, BB destroys the
-managed environment. Do not leave it merely idle afterward either; an idle
+managed environment. BB 0.37.0 adds a five-minute archive Undo; a live probe
+confirmed that immediate `bb thread unarchive` restores both the thread and its
+retiring managed environment. That recovery window softens an accidental
+archive but does not make expiry safe, so retain the ordering above. Do not
+leave the probe merely idle afterward either; an idle
 thread can be re-driven against the writer's worktree. Archive is a reversible
 lane-ownership marker, not a capability barrier, so never unarchive or message
 that probe. This handoff leaves one live thread with the writing assignment.

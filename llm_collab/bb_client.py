@@ -1,4 +1,4 @@
-"""bb 0.36.0 client and refusal surface (GH-563 Slice 1A).
+"""bb 0.37.0 client and refusal surface (GH-563 Slice 1A).
 
 This module is the SOLE place a bb response is parsed. Nothing else in the
 codebase may read a bb envelope; if a caller needs a field, it comes from a typed
@@ -11,8 +11,9 @@ of inventing one mid-flight.
 
 Four properties are load-bearing and all four come from live observation against
 the installed CLI, not from docs. They were first observed at 0.35.1 and
-re-observed unchanged at 0.36.0; the pin below is what makes that observation a
-control rather than a note, so moving it requires re-observing all four:
+re-observed unchanged at 0.36.0 and 0.37.0; the pin below is what makes that
+observation a control rather than a note, so moving it requires re-observing all
+four:
 
 * ``thread spawn --json`` returns the thread object at the TOP LEVEL, while
   ``thread show --json`` nests it under a ``thread`` key. One validator reused for
@@ -27,12 +28,14 @@ control rather than a note, so moving it requires re-observing all four:
 * ``thread log --json`` caps at 100 events by default. A page returned without
   its own bound is indistinguishable from a complete history, so replay returns an
   explicitly bounded page that declares its own truncation.
-* bb has no idempotency concept at any layer (zero ``idempotenc`` occurrences in
-  its shipped bundles, and two identical sends produced two ingresses in the
-  pilot). This client therefore never retries any native call: one attempt, one
-  deadline. A "retry" of a spawn or a tell would be a second real turn, and a
-  read that retries inside a deadline gives each attempt the full timeout, which
-  is not one deadline at all.
+* Native thread spawn and tell expose no caller-supplied idempotency or replay
+  key, and two identical sends produced two ingresses in the pilot. BB 0.37.0's
+  shipped bundles contain unrelated provider-SDK and legacy-automation
+  idempotency code; neither is on the native thread command surface. This client
+  therefore never retries any native call: one attempt, one deadline. A "retry"
+  of a spawn or a tell would be a second real turn, and a read that retries
+  inside a deadline gives each attempt the full timeout, which is not one
+  deadline at all.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-PINNED_BB_VERSION = "0.36.0"
+PINNED_BB_VERSION = "0.37.0"
 
 # Refuse rather than parse past this. A response this large is a contract break,
 # and truncating it would turn a resource limit into a correctness bug.
@@ -307,7 +310,7 @@ def _require_seq(value: Any) -> int | None:
 
 
 class BbClient:
-    """Validating client for bb 0.36.0.
+    """Validating client for bb 0.37.0.
 
     Default OFF. With the adapter disabled, every operation returns
     ``REFUSAL_DISABLED`` without touching the transport at all — no process, no
@@ -380,6 +383,12 @@ class BbClient:
             return BbRefusal(
                 REFUSAL_MALFORMED_RESPONSE,
                 "spawn envelope is nested under 'thread'; expected top-level thread object",
+            )
+        visibility = _require_str(payload, "visibility")
+        if visibility != "visible":
+            return BbRefusal(
+                REFUSAL_IDENTITY_MISMATCH,
+                f"spawned worker visibility must be 'visible'; bb reported {visibility!r}",
             )
         return BbClient._thread_from(payload, envelope="spawn")
 
@@ -493,6 +502,8 @@ class BbClient:
             profile.model,
             "--reasoning-level",
             profile.reasoning_level,
+            "--visibility",
+            "visible",
         ]
         if base_sha is not None:
             argv += ["--new-environment", "worktree", "--base-branch", base_sha]
@@ -620,7 +631,7 @@ class BbClient:
             return payload
 
         # Everything below runs AFTER bb exited 0, so the message may already be
-        # queued and bb has no idempotency at any layer. A response we cannot
+        # queued and native bb tell has no caller replay key. A response we cannot
         # validate tells us nothing about whether the send happened — only that
         # we cannot confirm it — so no check down here may report a clean
         # failure a caller would retry into a second enqueue. Mirrors spawn(),

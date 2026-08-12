@@ -187,8 +187,8 @@ class BootstrapPlan:
     """One first delivery that may create exactly one bb thread.
 
     Carries the packet identity so the caller can dedup on it BEFORE spawning:
-    bb has no idempotency, so a duplicate first delivery that reaches the spawn
-    produces a second real thread.
+    Native bb thread start has no caller replay key, so a duplicate first
+    delivery that reaches the spawn produces a second real thread.
     """
 
     project_id: str
@@ -315,9 +315,10 @@ def execute_bootstrap(
     because the watcher must log them differently and must never retry two of
     them.
 
-    Dedup comes FIRST and is the whole reason AC4 exists: bb has no idempotency,
-    so a duplicate first delivery that reaches the start produces a second real
-    thread. Checking after the start would be a check of something already done.
+    Dedup comes FIRST and is the whole reason AC4 exists: native bb thread start
+    has no caller replay key, so a duplicate first delivery that reaches the
+    start produces a second real thread. Checking after the start would be a
+    check of something already done.
     """
     if already_started(plan.canonical_message_id):
         return BootstrapOutcome(

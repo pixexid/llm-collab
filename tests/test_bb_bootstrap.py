@@ -211,7 +211,7 @@ class ExecuteBootstrapTest(unittest.TestCase):
         self.assertEqual(1, len(self.started))
 
     def test_a_duplicate_first_packet_never_reaches_the_start(self):
-        """V3/AC4: bb has no idempotency, so the guard must be BEFORE the spawn."""
+        """V3/AC4: native spawn has no replay key, so guard before the spawn."""
         outcome = self._run(seen={"cmid_0001"})
         self.assertEqual(BOOTSTRAP_DUPLICATE, outcome.state)
         self.assertEqual(
