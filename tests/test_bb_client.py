@@ -104,7 +104,13 @@ def version_ok() -> BbTransportResult:
 
 
 def spawn_ok() -> BbTransportResult:
-    return BbTransportResult(0, fixture("thread_spawn.json"), "")
+    # The recorded historical k3 spawn is hidden. Mutate only visibility to the
+    # newly required state; a live BB 0.37.0 visible Luna spawn proves the field
+    # and k3 is unavailable this billing cycle, so the exact old profile cannot
+    # be re-induced for a fresh combined recording.
+    envelope = json.loads(fixture("thread_spawn.json"))
+    envelope["visibility"] = "visible"
+    return BbTransportResult(0, json.dumps(envelope), "")
 
 
 def execution_ok() -> BbTransportResult:
@@ -127,7 +133,7 @@ def execution_events(**mutations) -> BbTransportResult:
 
 
 def spawn_envelope_without(field: str) -> BbTransportResult:
-    envelope = json.loads(fixture("thread_spawn.json"))
+    envelope = json.loads(spawn_ok().stdout)
     del envelope[field]
     return BbTransportResult(0, json.dumps(envelope), "")
 
@@ -229,10 +235,16 @@ class EnvelopeValidationTest(unittest.TestCase):
         self.assertNotIn("reasoningLevel", spawn_payload)
 
     def test_spawn_validator_reads_the_top_level_envelope(self):
-        thread = BbClient.validate_spawn_envelope(json.loads(fixture("thread_spawn.json")))
+        thread = BbClient.validate_spawn_envelope(json.loads(spawn_ok().stdout))
         self.assertIsInstance(thread, BbThread)
         self.assertEqual(SPAWNED_THREAD, thread.thread_id)
         self.assertEqual("pi", thread.provider_id)
+
+    def test_spawn_validator_refuses_a_hidden_thread(self):
+        outcome = BbClient.validate_spawn_envelope(json.loads(fixture("thread_spawn.json")))
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
+        self.assertIn("visibility", outcome.detail)
 
     def test_show_validator_reads_the_nested_envelope(self):
         thread = BbClient.validate_show_envelope(json.loads(fixture("thread_show.json")))
@@ -251,7 +263,7 @@ class EnvelopeValidationTest(unittest.TestCase):
         self.assertEqual(REFUSAL_MALFORMED_RESPONSE, outcome.reason)
 
     def test_missing_required_field_names_the_field(self):
-        payload = json.loads(fixture("thread_spawn.json"))
+        payload = json.loads(spawn_ok().stdout)
         del payload["status"]
         outcome = BbClient.validate_spawn_envelope(payload)
         self.assertIsInstance(outcome, BbRefusal)
@@ -278,6 +290,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual("pi", argv[argv.index("--provider") + 1])
         self.assertEqual("kimi-coding/k3", argv[argv.index("--model") + 1])
         self.assertEqual("high", argv[argv.index("--reasoning-level") + 1])
+        self.assertEqual("visible", argv[argv.index("--visibility") + 1])
 
     def test_spawn_succeeds_only_after_reading_native_execution_evidence(self):
         thread = spawn(client=spawning_client()[0])
@@ -409,7 +422,7 @@ class ProfileTest(unittest.TestCase):
 
 class DeadlineTest(unittest.TestCase):
     def test_task_bearing_timeout_is_ambiguous_and_never_retried(self):
-        """AC4 + lane contract: bb has no idempotency, so a retry is a second turn."""
+        """AC4: native spawn has no caller replay key, so retry is a second turn."""
         client, transport = enabled_client({"thread spawn": BbTransportTimeout("deadline")})
         outcome = spawn(client)
         self.assertIsInstance(outcome, BbRefusal)

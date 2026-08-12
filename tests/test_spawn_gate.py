@@ -409,6 +409,7 @@ def bb_transport(*, environment_id: str = "env_expected"):
         "projectId": "proj_llm_collab",
         "providerId": PROFILE.provider,
         "status": "starting",
+        "visibility": "visible",
     }
     events = [
         {
@@ -497,6 +498,7 @@ class BbClientSpawnOptionsTest(unittest.TestCase):
         self.assertEqual(SHA, argv[argv.index("--base-branch") + 1])
         self.assertEqual("accept-edits", argv[argv.index("--permission-mode") + 1])
         self.assertEqual("Audit", argv[argv.index("--title") + 1])
+        self.assertEqual("visible", argv[argv.index("--visibility") + 1])
 
 
 class CliPhaseTest(unittest.TestCase):

@@ -287,7 +287,9 @@ re-derive it.
 ## Succession protocol
 
 Continuation is by compaction by operator preference because a new orchestrator
-session adds a handoff boundary. Start a new session only for genuine
+session adds a handoff boundary. On BB 0.37.0, compact an idle or errored long
+authority thread with `bb thread compact <thread-id>`; completion or refusal is
+visible in its timeline. Start a new session only for genuine
 context-quality degradation; when a boundary is necessary, the succession
 protocol below remains the fallback. Anything verifiable headlessly or by a
 worker must never wait idle on an operator click.
@@ -510,6 +512,19 @@ release pass.
    parsed JSONL, diffed a snapshot and invented record identity, and it
    misclassified real rows; see
    [GH-771](https://github.com/pixexid/llm-collab/issues/771).
+
+BB 0.37.0 observations for this procedure:
+
+- Keep the `editMessages` experiment **off** for supervisor and orchestrator
+  authority threads. Message rewind retains workspace changes but cannot rewind
+  role generations, leases, watcher ownership, or durable decisions; use
+  `bb thread compact` for context pressure instead.
+- `sharedSkillRoots` can inject one physical user/project skill collection into
+  providers as read-only skills. Treat those roots as discovery, not another
+  editable contract copy; canonical repository guidance still lives here.
+- The waiting-state and background-task fixes do not restore orchestrator
+  polling. Direct terminal reports and event-worthy watcher tells remain the
+  push authority defined by the standard watcher set.
 
 The current pin is read from source, the installed version is read live, the
 qualified set is read from its code authority, model availability is queried on
