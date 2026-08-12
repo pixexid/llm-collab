@@ -103,6 +103,25 @@ class SupervisorAcceptanceError(ValueError):
         }
 
 
+class TaskSelectorMismatchError(ValueError):
+    """The CLI selector does not identify the selected record's task."""
+
+    def __init__(self, selector: object, record_task_id: object):
+        super().__init__("task selector does not match selected record")
+        self.selector = selector
+        self.record_task_id = record_task_id
+
+    def payload(self) -> dict:
+        return {
+            "error": "task selector does not match selected record; refusing in_progress transition",
+            "reason": "task_selector_mismatch",
+            "task_selector": self.selector,
+            "record_task_id": self.record_task_id,
+            "target_status": "in_progress",
+            "hint": "rerun with the selected record's exact frontmatter task_id",
+        }
+
+
 def validate_supervisor_acceptance(frontmatter: dict, task_id: object) -> str | None:
     """Return the decision id only for a complete, exact-task override record."""
     if not any(field in frontmatter for field in SUPERVISOR_ACCEPTANCE_FIELDS):
@@ -139,6 +158,14 @@ def validate_supervisor_acceptance(frontmatter: dict, task_id: object) -> str | 
     if problems:
         raise SupervisorAcceptanceError(task_id, problems)
     return frontmatter["supervisor_acceptance_override_decision"]
+
+
+def validate_task_selector(selector: object, frontmatter: dict) -> object:
+    """Bind the CLI selector to the task record before activation authority."""
+    record_task_id = frontmatter.get("task_id")
+    if selector != record_task_id:
+        raise TaskSelectorMismatchError(selector, record_task_id)
+    return record_task_id
 
 
 def resolve_activation_authority(
@@ -451,6 +478,13 @@ def main():
     fm, body = parse_frontmatter(content)
     original_frontmatter = dict(fm)
     fm, _ = sync_task_contract(fm, body)
+    record_task_id = None
+    if args.status == "in_progress":
+        try:
+            record_task_id = validate_task_selector(args.task, fm)
+        except TaskSelectorMismatchError as error:
+            print(json.dumps(error.payload(), indent=2), file=sys.stderr)
+            sys.exit(1)
 
     if args.accepted_by is not None:
         if args.accepted_by != ACCEPTANCE_AGENT:
@@ -732,7 +766,7 @@ def main():
         try:
             activation_authorized, supervisor_decision = resolve_activation_authority(
                 fm,
-                args.task,
+                record_task_id,
             )
         except SupervisorAcceptanceError as error:
             print(json.dumps(error.payload(), indent=2), file=sys.stderr)
