@@ -618,10 +618,10 @@ built and the orchestrator waits for work it never assigned.
 **Liveness (event-driven for BB workers)**
 
 - **For a BB worker, do not poll.** Normal completion pushes its terminal tell;
-  the worker-lifecycle watcher points only on `error`, `stopping`, or
-  disappearance of a previously active worker. After either event, read bounded
-  evidence once and inspect the artifact before deciding whether to re-drive.
-  Normal `idle`, liveness, marker refresh, and unchanged state remain silent.
+  the `exec-tracking` plugin points only on native `thread.failed`,
+  `thread.deleted`, or `thread.archived` events. After one of those events, read
+  bounded evidence once and inspect the artifact before deciding whether to
+  re-drive. Normal `idle`, liveness, and unchanged state remain silent.
 - **Confirm the worker is alive before treating silence as waiting.** A worker
   with no autonomous loop (a terminal-app or CLI worker, e.g. Codex) ends every
   turn awaiting its next wake. For OpenAI-model interaction that wake is through

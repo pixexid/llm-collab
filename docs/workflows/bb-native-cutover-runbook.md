@@ -157,8 +157,9 @@ verified worktree.
    thread guard. If the log is unreadable or incomplete, or acceptance is
    ambiguous, remain in degraded safe mode and escalate. Never guess or send
    more than one recovery tell.
-10. On activation, the successor first re-reads its generation and then starts or
-   reconciles the standard project watcher set from
+10. On activation, the successor first re-reads its generation, confirms the
+   shared `exec-tracking` plugin is running, and then starts or reconciles the
+   two host watchers from
    [`Orchestrator Sessions`](orchestrator-sessions.md#standard-watcher-set).
    It performs no other protected work until successor-owned marker coverage is
    established.
@@ -222,22 +223,20 @@ queues. Resolve every project-aware read and write from the role's exact
 
 ## Watcher wake status
 
-Watcher tells are minimal pointer-only events:
+The `exec-tracking` plugin is the one silent pointer authority:
 
-- a watcher event points the role at canonical state; it does not carry task or
-  message authority;
-- the liveness marker remains owned by the session that launched the watcher;
-- the tell target resolves the current role generation when the event fires;
-  and
-- normal worker completion arrives directly from the worker as one terminal
-  `DONE|BLOCKED` tell; lifecycle tells are only for `error`, `stopping`, or
-  disappearance of a previously active worker;
-- PR/review/check timeline changes and deployed-version drift wake the role;
-- normal `idle`, liveness, marker refresh, `WATCHER LIVE`, and unchanged
-  baselines remain silent; and
-- identical semantic events coalesce until recovery or state change, while a
-  confirmed tell failure advances neither canonical watcher baseline, marker,
-  nor dedupe state.
+- native failed, deleted, and archived thread events resolve the current role
+  generation when they fire;
+- the two host producers, `pr-artifacts` and `heartbeat`, enter through the
+  plugin CLI rather than addressing a role thread;
+- every pointer input part is `agent-only` and uses `queue-if-active`;
+- one plugin-database reservation coalesces producers and daemon reloads per
+  role thread; and
+- accepted or ambiguous sends retain the reservation, while a confirmed
+  failure releases it and advances neither host baseline nor host marker.
+
+Normal worker completion remains one direct `DONE|BLOCKED` tell. Normal idle,
+liveness, marker refresh, `WATCHER LIVE`, and unchanged baselines remain silent.
 
 The orchestrator never polls live workers. It performs one bounded evidence read
 after a specific terminal report or watcher event.
@@ -247,8 +246,8 @@ after a specific terminal report or watcher event.
 1. Re-read the generation record named by the activation tell and confirm that
    its project, role, epoch, and thread all identify this successor. A mismatch
    leaves the candidate non-authoritative.
-2. Start or reconcile the standard watcher set immediately and establish
-   successor-owned marker coverage before any other protected work.
+2. Confirm `exec-tracking` is running, start or reconcile the two host watchers,
+   and establish successor-owned coverage before any other protected work.
 3. After activation acceptance, exact generation match, and successor watcher
    coverage are proven, record the candidate bootstrap assignment's terminal
    `promoted` disposition in the own-project handoff.

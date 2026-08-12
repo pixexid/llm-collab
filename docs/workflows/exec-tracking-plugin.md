@@ -38,6 +38,7 @@ Run from the plugin directory. The typecheck MUST pass before install.
 cd bb-plugins/exec-tracking
 bb plugin types .          # (re)write types/bb-plugin-sdk.d.ts for this bb
 npm install                # install typescript + @types/node (devDependencies)
+npm test                   # SQLite concurrency, persistence, retry, and isolation
 npm run typecheck          # FAILS on an undeclared identifier before you install
 bb plugin install --yes .  # operator step — only after typecheck is green
 bb plugin config exec-tracking set checkoutPath /path/to/llm-collab
@@ -45,8 +46,9 @@ bb plugin config exec-tracking set pythonPath  /abs/path/to/python3.11   # serve
 bb plugin reload exec-tracking
 ```
 
-`checkoutPath` and `pythonPath` must be set before any row is recorded; until then
-the handler logs a warning and records nothing (rather than guess a path).
+`checkoutPath` and `pythonPath` must be set before a row is recorded or a wake is
+resolved; until then the handler logs a warning and writes/sends nothing rather
+than guess a path.
 The plugin has no project setting: its Python child resolves each native thread
 project against every registered project carrying a `bb` block, so the registry
 lookup exists in one place. In each covered project's workspace `projects.json`
@@ -65,3 +67,27 @@ native thread id is ignored with a reason. Leave out `enabled`: setting
 
 After an SDK bump, regenerate the declarations with `bb plugin types .` and
 re-run `npm run typecheck` before reinstalling.
+
+## Silent-wake activation gate
+
+`exec-tracking` also owns abnormal native thread wakes and the CLI ingress used
+by the `pr-artifacts` and `heartbeat` host watchers. Its per-plugin SQLite row is
+dedupe state only: project, current role thread, producer family, semantic
+digest, pending bit, and reservation token. It is not a task queue or role
+authority. The role target is resolved from the registered native-project map
+and `role-generation.md` each time an event fires.
+
+Plugin `running` state is the native abnormal-wake liveness signal. Do not add a
+third host marker. A running path install does not automatically follow checkout
+changes, so only the orchestrator reloads the plugin, and only after independent
+review of the draft.
+
+Before merge, the orchestrator creates a dedicated **visible** probe thread with
+the repository-configured BB executable, verifies the returned thread
+`visibility` is `visible`, sends the fixed pointer with every input part marked
+`agent-only` and `queue-if-active`, then verifies that the send added no
+user-facing row and changed neither unread nor attention state. Never aim this
+probe at an operator or authority thread. If BB renders even an empty row, stop
+as `BLOCKED` unless the alternative acceptance branch is proven literally: one
+atomic pending wake total for the probe role thread across event count, plugin
+reload, and both native and CLI producers.

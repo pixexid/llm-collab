@@ -62,14 +62,14 @@ consumes that ownership and liveness record and does not redefine its format.
 
 ## Standard watcher set
 
-Start all three watchers at the beginning of every BB orchestrator session as
-persistent `Monitor` calls from the repository checkout. Substitute the exact
-collaboration project, current orchestrator session ID, and `$SD` session
-scratchpad. The script resolves the project's configured `bb.executable`,
-`github.repo`, and the deduplicated native BB projects for every registered
-repository target through the shared project-ID resolver. Every worker cycle
-requires the complete aggregate; no watcher may substitute a PATH-default BB,
-a checkout-default GitHub repository, or a partial native-project result.
+Confirm the `exec-tracking` plugin is `running`, then start exactly two host
+watchers as persistent `Monitor` calls from the repository checkout:
+`pr-artifacts` and `heartbeat`. Substitute the exact collaboration project,
+current orchestrator session ID, and `$SD` session scratchpad. The script
+resolves the project's configured `bb.executable`, `github.repo`, and the
+deduplicated native BB projects for every registered repository target. No
+watcher may substitute a PATH-default BB, a checkout-default GitHub repository,
+or a partial native-project result.
 
 The watchers report changes; they do not decide that work is complete.
 
@@ -79,38 +79,34 @@ The watchers report changes; they do not decide that work is complete.
   head, and evidence. The orchestrator does not poll `wait`, `show`, or `output`
   on a live worker. It performs one bounded evidence read only after that exact
   terminal tell or a watcher abnormal pointer.
-- Worker lifecycle tells are abnormal-only: entry into `error` or `stopping`,
-  or disappearance of a previously active tracked worker. Normal `idle`,
-  routine liveness, marker refresh, and unchanged baselines are silent. An
-  abnormal pointer says **go inspect**; it is not completion evidence. A stale
-  final output can predate the failed turn, so verify the exact branch head and
-  promised artifact before deciding the lane.
-- PR/review/check tells cover any complete artifact-timeline change. The
-  deployed-version watcher tells only on drift. Identical accepted or ambiguous
-  semantic events coalesce until recovery or a different state re-arms them.
-  A confirmed tell failure is fatal for that cycle and advances neither watcher
-  baseline, marker, nor dedupe state.
+- The plugin observes native `thread.failed`, `thread.deleted`, and
+  `thread.archived` events plus one load-time abnormal-state reconciliation.
+  It resolves the current project role at fire time and sends one fixed,
+  all-`agent-only` pointer with `queue-if-active`. Normal `idle` never wakes;
+  it only re-arms a consumed pending pointer. An abnormal pointer says **go
+  inspect**; it is not completion evidence.
+- PR/review/check changes and deployed-version drift enter that same plugin
+  authority through `bb silent-wake emit`. One plugin SQLite reservation
+  coalesces producers and daemon reloads. Accepted and ambiguous sends suppress
+  retry; a confirmed send failure releases the reservation and makes the host
+  cycle fail before its baseline or marker advances.
 - A startable issue excludes work blocked on an external actor, parked by a
   decision, and epics. A drained queue produces a status line, not permission to
   invent work. Queue and lane activation remain owned by
   [`Task Intake And Delegation`](task-intake-and-delegation.md).
-- At handoff, **`TaskStop` every watcher first; then write the handoff**, whose
+- At handoff, **`TaskStop` both host watchers first; then write the handoff**, whose
   status must say **`watchers stopped: yes` and list the stopped watcher task
   IDs**. The ordered succession procedure below owns the complete teardown.
 
-Every watcher emits a liveness line every 20 cycles. It refreshes its
+Each host watcher emits a liveness line every 20 cycles. It refreshes its
 project-scoped marker through `bin/_watcher_liveness.py` only after a cycle
 completed every check; a failed or incomplete cycle leaves the marker stale.
-
-### Worker lifecycle
-
-```bash
-python3.11 bin/orchestrator_watch.py worker-lifecycle --project <COLLAB_PROJECT_ID> --session <SESSION_ID> --state-dir "$SD"
-```
-
-The watcher invokes `bb thread list` internally with that command's
-`--include-hidden` flag so probe threads remain observable. It records
-transitions, so steady state does not notify repeatedly.
+Plugin `running` state is the native abnormal-wake liveness signal; there is no
+third marker. A changed checkout is not a changed running plugin: after an
+independently reviewed plugin draft, the orchestrator reloads through the
+project's configured BB executable and performs the dedicated visible
+all-agent-only probe described in
+[`Exec-Tracking Plugin`](exec-tracking-plugin.md#silent-wake-activation-gate).
 
 ### PR connector artifacts
 
@@ -333,7 +329,8 @@ prevents.
    and runtime-root rule live in [`Session Startup`](session-startup.md).
 2. Read the handoff in full, beginning with Environment deltas and operator
    announcements.
-3. Check the three project-scoped watcher markers before starting watchers or
+3. Check the two project-scoped host-watcher markers and the `exec-tracking`
+   plugin's running state before starting watchers or
    work. A fresh marker owned by a different session means the predecessor's
    watcher is still alive and teardown is incomplete; use the task IDs recorded
    in the handoff and do not proceed until no fresh foreign-session owner
@@ -346,7 +343,7 @@ prevents.
    is planned recovery; the same mismatch at the first refused spawn is an
    outage.
 5. Ping the supervisor session that the successor is online.
-6. Start the watcher set above.
+6. Start the two host watchers above; do not start a third host process.
 7. Recover live work through the canonical BB, delegation, and PR workflows
    linked at the top of this document.
 
@@ -523,7 +520,7 @@ BB 0.37.0 observations for this procedure:
   providers as read-only skills. Treat those roots as discovery, not another
   editable contract copy; canonical repository guidance still lives here.
 - The waiting-state and background-task fixes do not restore orchestrator
-  polling. Direct terminal reports and event-worthy watcher tells remain the
+  polling. Direct terminal reports and event-worthy silent pointers remain the
   push authority defined by the standard watcher set.
 
 The current pin is read from source, the installed version is read live, the

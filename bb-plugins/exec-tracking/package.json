@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Execution tracking for llm-collab. First capability: records executed-triple evidence (provider, model, reasoning_level) from client/turn/requested, the source llm_collab/bb_client.py names authoritative for the profile bb actually ran. See the plugin README for the artifact's definition.",
+  "description": "Execution tracking and silent abnormal-thread wake authority for llm-collab.",
   "engines": {
     "bb": ">=0.9",
     "bbPluginSdk": "^0.4.1"
   },
   "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test server.test.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
@@ -17,7 +18,7 @@
   },
   "bb": {
     "name": "Exec Tracking",
-    "description": "Records executed-triple evidence (provider, model, reasoning_level) from client/turn/requested. First capability of the task/execution-tracking plugin (GH-630/GH-617/GH-710). See the plugin README for the artifact's definition.",
+    "description": "Records executed-triple evidence and coalesces silent abnormal-thread wakes.",
     "branding": {
       "icon": "ClipboardList"
     },

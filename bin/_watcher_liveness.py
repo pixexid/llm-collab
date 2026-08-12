@@ -39,7 +39,7 @@ from _bounded_io import (  # noqa: E402
 from _helpers import get_project, project_state_dir, write_file_durably
 from llm_collab.bb_client import subprocess_transport
 
-WATCHER_NAMES = ("worker-lifecycle", "pr-artifacts", "heartbeat")
+WATCHER_NAMES = ("pr-artifacts", "heartbeat")
 
 # The standard watcher periods live in bin/orchestrator_watch.py. All modes have
 # a 300s cumulative cycle deadline; heartbeat refreshes every 60s between 600s
@@ -302,7 +302,7 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     Order-independent is NOT position-blind. A recorded positional (the script
     and the watcher mode) must appear as a POSITIONAL in the live argv, never
     merely somewhere in it. Membership alone would let an unrelated process
-    carrying `--title worker-lifecycle` satisfy the mode requirement while the
+    carrying `--title pr-artifacts` satisfy the mode requirement while the
     real watcher parser would read that token as a flag's value. The first
     version of this matcher had exactly that hole.
     """

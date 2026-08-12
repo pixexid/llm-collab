@@ -52,17 +52,17 @@
  *   dispatch resolves to. We read the resolved options and copy their fields into
  *   plain strings before anything is persisted; no object reference survives.
  *
- * - **Thin over the stable seams.** The SDK is pre-1.0 (0.4.1). This module
- *   touches only `bb.sdk.threads.defaultExecutionOptions`, `bb.events`,
- *   `bb.settings`, `bb.log`, and `node:child_process` — the documented surfaces,
- *   never internals.
+ * - **Thin over the stable seams.** The SDK is pre-1.0 (0.4.1). The recorder
+ *   path uses `defaultExecutionOptions`, events, settings, logging, and one
+ *   child. GH-805's second capability uses only the adjacent documented plugin
+ *   database, CLI, lifecycle-event, thread-list, and thread-send surfaces.
  *
- * - **Cannot block or veto.** `thread.created` handlers are fire-and-forget with
+ * - **Cannot block or veto.** Plugin event handlers are fire-and-forget with
  *   no veto hook (GH-630 probe), and one stalling plugin stalls every project on
  *   the server. So:
  *     * `defaultExecutionOptions` is a loopback RPC; `await`-ing it yields the
  *       event loop (cooperative), it never blocks it.
- *     * the write is delegated to a child with `unref()` — the handler never
+ *     * the triple write is delegated to a child with `unref()` — its handler never
  *       waits on it, and no synchronous filesystem I/O runs in-process.
  *     * the handler is `void`-ed; any rejection is caught and logged, never
  *       propagated to the emitter.
@@ -79,10 +79,13 @@
  *   review, finding 5).
  */
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { BbPluginApi } from "@bb/plugin-sdk";
 
 const SCRIPT_REL = path.join("bin", "record_executed_triples.py");
+const ROLE_RESOLVER_REL = path.join("bin", "resolve_role_wake.py");
+const WAKE_POINTER = "event; inspect canonical state";
 // Both streams are piped+drained with a capped buffer so a verbose child cannot
 // fill the pipe and block. STDOUT_CAP bounds the captured stdout used for info
 // markers; STDERR_CAP bounds the captured stderr used for failure logging.
@@ -98,7 +101,24 @@ interface Settings {
   pythonPath: string | undefined;
 }
 
+type Db = ReturnType<BbPluginApi["storage"]["database"]>;
+type RoleTarget = { project_id: string; thread_id: string };
+type WakeResult = "accepted" | "ambiguous" | "coalesced" | "confirmed-failure";
+
+export const WAKE_SCHEMA = `CREATE TABLE IF NOT EXISTS role_wake_dedupe (
+    project_id TEXT NOT NULL,
+    role_thread_id TEXT NOT NULL,
+    family TEXT NOT NULL,
+    semantic_key TEXT NOT NULL,
+    pending INTEGER NOT NULL CHECK (pending IN (0, 1)),
+    reservation TEXT,
+    PRIMARY KEY (project_id, role_thread_id)
+  ) STRICT`;
+const WAKE_MIGRATIONS = [WAKE_SCHEMA];
+
 export default function plugin(bb: BbPluginApi): void {
+  const db = bb.storage.database();
+  bb.storage.migrate(db, WAKE_MIGRATIONS);
   const settings = bb.settings.define({
     checkoutPath: {
       type: "string",
@@ -117,6 +137,39 @@ export default function plugin(bb: BbPluginApi): void {
       bb.log.warn(`exec-tracking: thread.created handler failed: ${describe(error)}`);
     });
   });
+
+  for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
+    bb.events.on(event, ({ thread, ...payload }) => {
+      const error = "error" in payload ? payload.error : null;
+      void wakeForThread(bb, settings, db, event, thread, error).catch((failure) => {
+        bb.log.warn(`exec-tracking: ${event} wake refused for thread ${thread.id}: ${describe(failure)}`);
+      });
+    });
+  }
+  bb.events.on("thread.idle", ({ thread }) => {
+    void rearmForIdle(bb, settings, db, thread).catch((failure) => {
+      bb.log.warn(`exec-tracking: idle re-arm refused for thread ${thread.id}: ${describe(failure)}`);
+    });
+  });
+
+  bb.cli.register({
+    name: "silent-wake",
+    summary: "Queue one silent orchestrator pointer from a residual watcher",
+    commands: [{
+      name: "emit",
+      summary: "Emit a pr-artifacts or heartbeat semantic wake",
+      usage: "bb silent-wake emit --project <id> --producer <pr-artifacts|heartbeat> --semantic <sha256>",
+    }],
+    run: (argv) => runWakeCli(bb, settings, db, argv),
+  });
+
+  // The SDK is bind-gated during factory evaluation. One next-turn reconcile
+  // covers abnormal threads that survived a daemon restart; it is not a poll.
+  setTimeout(() => {
+    void reconcileAbnormalThreads(bb, settings, db).catch((failure) => {
+      bb.log.warn(`exec-tracking: load reconcile refused: ${describe(failure)}`);
+    });
+  }, 0);
 }
 
 async function onCreated(
@@ -259,6 +312,272 @@ function spawnRecorder(
     // Synchronous spawn failure (bad interpreter path, etc.). Logged, not swallowed.
     bb.log.warn(`exec-tracking: recorder could not spawn for thread ${threadId}: ${describe(error)}`);
   }
+}
+
+async function wakeForThread(
+  bb: BbPluginApi,
+  settings: { get(): Promise<Settings> },
+  db: Db,
+  event: string,
+  thread: { id: string; projectId: string; updatedAt?: number; archivedAt?: number | null; deletedAt?: number | null },
+  error: string | null,
+): Promise<WakeResult> {
+  const semantic = digest([
+    event,
+    thread.id,
+    thread.updatedAt ?? null,
+    thread.archivedAt ?? null,
+    thread.deletedAt ?? null,
+    error,
+  ]);
+  return requestWake(
+    bb,
+    settings,
+    db,
+    { threadProject: thread.projectId },
+    `worker:${thread.id}`,
+    semantic,
+  );
+}
+
+async function requestWake(
+  bb: BbPluginApi,
+  settings: { get(): Promise<Settings> },
+  db: Db,
+  scope: { threadProject: string } | { project: string },
+  family: string,
+  semantic: string,
+): Promise<WakeResult> {
+  const target = await resolveRole(settings, scope);
+  return deliverWake(bb, db, target, family, semantic);
+}
+
+export async function deliverWake(
+  bb: BbPluginApi,
+  db: Db,
+  target: RoleTarget,
+  family: string,
+  semantic: string,
+): Promise<WakeResult> {
+  const reservation = randomUUID();
+  const claimed = db.prepare(`
+    INSERT INTO role_wake_dedupe
+      (project_id, role_thread_id, family, semantic_key, pending, reservation)
+    VALUES (?, ?, ?, ?, 1, ?)
+    ON CONFLICT(project_id, role_thread_id) DO UPDATE SET
+      family = excluded.family,
+      semantic_key = excluded.semantic_key,
+      pending = CASE WHEN role_wake_dedupe.pending = 0 THEN 1 ELSE role_wake_dedupe.pending END,
+      reservation = CASE
+        WHEN role_wake_dedupe.pending = 0 THEN excluded.reservation
+        ELSE role_wake_dedupe.reservation
+      END
+    WHERE role_wake_dedupe.pending = 0
+       OR role_wake_dedupe.family <> excluded.family
+       OR role_wake_dedupe.semantic_key <> excluded.semantic_key
+    RETURNING reservation
+  `).get(target.project_id, target.thread_id, family, semantic, reservation) as
+    | { reservation: string | null }
+    | undefined;
+  if (claimed?.reservation !== reservation) return "coalesced";
+
+  try {
+    await bb.sdk.threads.send({
+      threadId: target.thread_id,
+      input: [{ type: "text", text: WAKE_POINTER, visibility: "agent-only" }],
+      mode: "queue-if-active",
+    } as unknown as Parameters<BbPluginApi["sdk"]["threads"]["send"]>[0]);
+    return "accepted";
+  } catch (failure) {
+    if (isConfirmedFailure(failure)) {
+      db.prepare(`
+        UPDATE role_wake_dedupe
+        SET pending = 0, reservation = NULL
+        WHERE project_id = ? AND role_thread_id = ? AND reservation = ?
+      `).run(target.project_id, target.thread_id, reservation);
+      bb.log.warn(
+        `exec-tracking: silent wake confirmed failed for project ${target.project_id} `
+        + `role ${target.thread_id} (${failureStatus(failure)})`,
+      );
+      return "confirmed-failure";
+    }
+    // Timeout, disconnect, and 5xx can happen after server commit. Retaining the
+    // atomic reservation is the only retry-safe outcome.
+    bb.log.warn(
+      `exec-tracking: silent wake acceptance ambiguous for project ${target.project_id} `
+      + `role ${target.thread_id}; retry suppressed`,
+    );
+    return "ambiguous";
+  }
+}
+
+export function rearmWake(
+  db: Db,
+  target: RoleTarget,
+  threadId: string,
+): void {
+  const family = `worker:${threadId}`;
+  db.prepare(`
+    UPDATE role_wake_dedupe
+    SET pending = 0, reservation = NULL
+    WHERE project_id = ? AND role_thread_id = ?
+      AND (? = role_thread_id OR family = ?)
+  `).run(target.project_id, target.thread_id, threadId, family);
+}
+
+async function rearmForIdle(
+  bb: BbPluginApi,
+  settings: { get(): Promise<Settings> },
+  db: Db,
+  thread: { id: string; projectId: string },
+): Promise<void> {
+  const target = await resolveRole(settings, { threadProject: thread.projectId });
+  rearmWake(db, target, thread.id);
+}
+
+async function runWakeCli(
+  bb: BbPluginApi,
+  settings: { get(): Promise<Settings> },
+  db: Db,
+  argv: string[],
+): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+  try {
+    const parsed = parseWakeCli(argv);
+    const result = await requestWake(
+      bb,
+      settings,
+      db,
+      { project: parsed.project },
+      parsed.producer,
+      parsed.semantic,
+    );
+    if (result === "confirmed-failure") {
+      return { exitCode: 1, stderr: "silent wake confirmed failed; reservation released\n" };
+    }
+    return { exitCode: 0, stdout: `${result}\n` };
+  } catch (failure) {
+    return { exitCode: 1, stderr: `silent wake refused: ${describe(failure)}\n` };
+  }
+}
+
+function parseWakeCli(argv: string[]): { project: string; producer: string; semantic: string } {
+  if (argv[0] !== "emit" || argv.length !== 7) throw new Error("usage: silent-wake emit --project <id> --producer <pr-artifacts|heartbeat> --semantic <sha256>");
+  const values = new Map<string, string>();
+  for (let index = 1; index < argv.length; index += 2) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (!flag.startsWith("--") || !value || values.has(flag)) throw new Error("invalid or repeated silent-wake argument");
+    values.set(flag, value);
+  }
+  const project = values.get("--project");
+  const producer = values.get("--producer");
+  const semantic = values.get("--semantic");
+  if (!project || project !== project.trim()) throw new Error("--project must be non-empty unpadded text");
+  if (producer !== "pr-artifacts" && producer !== "heartbeat") throw new Error("--producer must be pr-artifacts or heartbeat");
+  if (!semantic || !/^[0-9a-f]{64}$/.test(semantic)) throw new Error("--semantic must be a lowercase SHA-256 digest");
+  return { project, producer, semantic };
+}
+
+async function reconcileAbnormalThreads(
+  bb: BbPluginApi,
+  settings: { get(): Promise<Settings> },
+  db: Db,
+): Promise<void> {
+  const limit = 200;
+  for (let offset = 0; ; offset += limit) {
+    const threads = await bb.sdk.threads.list({
+      archived: false,
+      includeHidden: true,
+      limit,
+      offset,
+    });
+    for (const thread of threads) {
+      if (thread.status === "error" || thread.status === "stopping") {
+        await wakeForThread(bb, settings, db, "load.reconcile", thread, null);
+      }
+    }
+    if (threads.length < limit) return;
+  }
+}
+
+async function resolveRole(
+  settings: { get(): Promise<Settings> },
+  scope: { threadProject: string } | { project: string },
+): Promise<RoleTarget> {
+  const cfg = await settings.get();
+  if (!cfg.checkoutPath || !cfg.pythonPath) {
+    throw new Error("checkoutPath and pythonPath must be configured");
+  }
+  const script = path.join(cfg.checkoutPath, ROLE_RESOLVER_REL);
+  const args = [
+    script,
+    ...("threadProject" in scope
+      ? ["--thread-project", scope.threadProject]
+      : ["--project", scope.project]),
+  ];
+  const output = await boundedChild(cfg.pythonPath, args, cfg.checkoutPath);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("role resolver returned malformed JSON");
+  }
+  if (
+    !parsed
+    || typeof parsed !== "object"
+    || typeof (parsed as RoleTarget).project_id !== "string"
+    || typeof (parsed as RoleTarget).thread_id !== "string"
+    || !(parsed as RoleTarget).project_id
+    || !(parsed as RoleTarget).thread_id
+  ) {
+    throw new Error("role resolver returned an invalid target");
+  }
+  return parsed as RoleTarget;
+}
+
+function boundedChild(executable: string, args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8");
+      if (stdout.length > STDOUT_CAP) child.kill();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8");
+      if (stderr.length > STDERR_CAP) child.kill();
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (stdout.length > STDOUT_CAP || stderr.length > STDERR_CAP) {
+        reject(new Error("role resolver output exceeded its bound"));
+      } else if (code !== 0) {
+        reject(new Error(stderr.trim() || `role resolver exited ${code}`));
+      } else {
+        resolve(stdout.trim());
+      }
+    });
+  });
+}
+
+function digest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function isConfirmedFailure(failure: unknown): boolean {
+  const status = failureStatusNumber(failure);
+  return status !== null && status >= 400 && status < 500;
+}
+
+function failureStatusNumber(failure: unknown): number | null {
+  if (!failure || typeof failure !== "object" || !("status" in failure)) return null;
+  const status = (failure as { status?: unknown }).status;
+  return typeof status === "number" && Number.isInteger(status) ? status : null;
+}
+
+function failureStatus(failure: unknown): string {
+  return failureStatusNumber(failure)?.toString() ?? "unknown";
 }
 
 function describe(error: unknown): string {
