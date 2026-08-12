@@ -16,8 +16,9 @@ context, and operator direction.
   not a hierarchy. If the tooling later supports another owner, the role moves
   with the tooling.
 - **Planner / refiner** — owns spec, acceptance criteria, risk analysis, and
-  phase/sequencing. The refinement gate requires `refined_by: claude` (see
-  Planning And Acceptance Gate).
+  phase/sequencing. The normal refinement gate requires `refined_by: claude`,
+  with the fail-closed recorded supervisor alternative described in Planning
+  And Acceptance Gate.
 - **Implementer** — owns the diff in the assigned worktree. Roles are per-lane:
   by skill, backend lanes lean Codex and frontend/UI-UX lanes lean Claude, but
   either agent may implement either side when the task fits. There is exactly one
@@ -65,7 +66,7 @@ explicitly disjoint.
 8. provision branch/worktree when the lane is isolated-worker implementation
 9. assign one implementation owner
 10. send one clear delegation message
-11. move task to `in_progress` (gated — requires `refined_by: claude` or `skip_refinement: true`)
+11. move task to `in_progress` (gated — requires `refined_by: claude`, `skip_refinement: true`, or a complete recorded supervisor acceptance decision)
 12. then activate the assigned worker directly through its approved transport
 13. then begin implementation
 
@@ -298,9 +299,17 @@ message if they are run under an incompatible interpreter.
 
 Claude is the designated planning/refinement collaborator for non-trivial
 tasks. `claim_task.py` blocks any `open → in_progress` transition unless the
-task frontmatter contains `refined_by: claude` or `skip_refinement: true`.
-When Claude both creates and plans a task, `claim_task.py` also requires
-`accepted_by: codex` before activation.
+task frontmatter contains `refined_by: claude`, `skip_refinement: true`, or a
+complete `supervisor_acceptance_override*` decision record whose exact scope
+matches the task. When Claude both creates and plans a task, `claim_task.py`
+also requires `accepted_by: codex` before activation.
+
+The supervisor alternative is a narrow compatibility seam, not a general
+provenance resolver. A present override record must contain the literal true
+enabled and non-precedent fields, non-empty unpadded decision/thread/revert/
+follow-up strings, and the exact `TASK-* / GH-<digits> only` scope. Any partial,
+false, padded, malformed, or cross-task record refuses before mutation; the
+normal Claude/refinement and truthful trivial-task paths remain unchanged.
 
 The gate is a machine contract, not a requirement to open a separate refinement
 thread. Prefer the Claude thread that already holds the relevant context:

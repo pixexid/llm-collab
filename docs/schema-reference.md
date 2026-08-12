@@ -520,6 +520,7 @@ release_evidence: null
 | `related_paths` | string[] | File/directory paths involved |
 | `repo_targets` | string[] | Repos in scope |
 | `depends_on` | string[] | `TASK-{id}` blockers |
+| `supervisor_acceptance_override*` | existing task-scoped authority fields | The exact existing fields are `supervisor_acceptance_override`, `_decision`, `_thread`, `_scope`, `_non_precedent`, `_revert`, and `_provenance_followup`; `claim_task.py` consumes them only as one complete, exact-task `TASK-* / GH-<digits> only` record. |
 | `dependency_materialization_gate` | bool | For queued design lanes, require accepted dependency artifacts to be present in the assigned worktree before activation/review |
 | `required_dependency_artifacts` | string[] | Repo-relative or absolute artifact paths that `project_design_queue.py validate` checks when the lane is `ready`, `active`, or `review` |
 | `branch` | string or null | Git branch for this task |

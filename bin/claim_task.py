@@ -24,6 +24,7 @@ require_python()
 
 import argparse
 import json
+import re
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _backlog
@@ -58,10 +59,97 @@ from task_contract import (
 
 PLANNING_AGENT = "claude"
 ACCEPTANCE_AGENT = "codex"
+SUPERVISOR_ACCEPTANCE_FIELDS = (
+    "supervisor_acceptance_override",
+    "supervisor_acceptance_override_decision",
+    "supervisor_acceptance_override_thread",
+    "supervisor_acceptance_override_scope",
+    "supervisor_acceptance_override_non_precedent",
+    "supervisor_acceptance_override_revert",
+    "supervisor_acceptance_override_provenance_followup",
+)
+SUPERVISOR_ACCEPTANCE_TEXT_FIELDS = (
+    "supervisor_acceptance_override_decision",
+    "supervisor_acceptance_override_thread",
+    "supervisor_acceptance_override_revert",
+    "supervisor_acceptance_override_provenance_followup",
+)
+SUPERVISOR_SCOPE_RE = re.compile(r"(TASK-[A-Za-z0-9]+) / (GH-[0-9]+) only")
 
 
 class ReleaseGateError(ValueError):
     """A requested done transition lacks valid objective closure authority."""
+
+
+class SupervisorAcceptanceError(ValueError):
+    """A present supervisor acceptance record is not safe to consume."""
+
+    def __init__(self, task_id: object, problems: list[str]):
+        super().__init__("recorded supervisor acceptance is incomplete or invalid")
+        self.task_id = task_id
+        self.problems = problems
+
+    def payload(self) -> dict:
+        return {
+            "error": "recorded supervisor acceptance is incomplete or invalid; refusing in_progress transition",
+            "reason": "supervisor_acceptance_invalid",
+            "task_id": self.task_id,
+            "target_status": "in_progress",
+            "problems": self.problems,
+            "hint": (
+                "repair every supervisor_acceptance_override* field for this exact task, "
+                "or remove the record and complete the normal refinement path"
+            ),
+        }
+
+
+def validate_supervisor_acceptance(frontmatter: dict, task_id: object) -> str | None:
+    """Return the decision id only for a complete, exact-task override record."""
+    if not any(field in frontmatter for field in SUPERVISOR_ACCEPTANCE_FIELDS):
+        return None
+
+    problems: list[str] = []
+    if frontmatter.get("supervisor_acceptance_override") is not True:
+        problems.append(
+            "supervisor_acceptance_override must be the literal boolean true"
+        )
+    if frontmatter.get("supervisor_acceptance_override_non_precedent") is not True:
+        problems.append(
+            "supervisor_acceptance_override_non_precedent must be the literal boolean true"
+        )
+
+    for field in SUPERVISOR_ACCEPTANCE_TEXT_FIELDS:
+        value = frontmatter.get(field)
+        if not isinstance(value, str) or not value or value != value.strip():
+            problems.append(f"{field} must be a non-empty unpadded string")
+
+    scope = frontmatter.get("supervisor_acceptance_override_scope")
+    scope_match = SUPERVISOR_SCOPE_RE.fullmatch(scope) if isinstance(scope, str) else None
+    if scope_match is None:
+        problems.append(
+            "supervisor_acceptance_override_scope must match 'TASK-<id> / GH-<digits> only'"
+        )
+    elif scope_match.group(1) != task_id:
+        problems.append(
+            "supervisor_acceptance_override_scope task id must equal the current task id"
+        )
+    if not isinstance(task_id, str) or re.fullmatch(r"TASK-[A-Za-z0-9]+", task_id) is None:
+        problems.append("current task id must be an exact TASK-* id")
+
+    if problems:
+        raise SupervisorAcceptanceError(task_id, problems)
+    return frontmatter["supervisor_acceptance_override_decision"]
+
+
+def resolve_activation_authority(
+    frontmatter: dict,
+    task_id: object,
+) -> tuple[bool, str | None]:
+    """Resolve the recorded supervisor alternative, then legacy refinement."""
+    decision = validate_supervisor_acceptance(frontmatter, task_id)
+    if frontmatter.get("skip_refinement", False) or frontmatter.get("refined_by") == PLANNING_AGENT:
+        return True, None
+    return decision is not None, decision
 
 
 def validate_truthy_release_closure(
@@ -389,6 +477,7 @@ def main():
     preflight_summary = None
     queue_summary = None
     release_evidence_record = None
+    supervisor_decision = None
 
     if args.status != "done":
         validation_fm = dict(fm)
@@ -640,7 +729,15 @@ def main():
             sys.exit(1)
 
     if args.status == "in_progress":
-        if not fm.get("skip_refinement", False) and fm.get("refined_by") != "claude":
+        try:
+            activation_authorized, supervisor_decision = resolve_activation_authority(
+                fm,
+                args.task,
+            )
+        except SupervisorAcceptanceError as error:
+            print(json.dumps(error.payload(), indent=2), file=sys.stderr)
+            sys.exit(1)
+        if not activation_authorized:
             print(
                 json.dumps(
                     {
@@ -754,6 +851,8 @@ def main():
         fm["release_evidence"] = release_evidence_record
 
     note = args.note or f"Status → {args.status}, owner → {args.owner}"
+    if supervisor_decision is not None:
+        note = f"{note} | supervisor_acceptance_override_decision={supervisor_decision}"
     activity_line = f"- {utc_iso()} | {args.owner} | {note}"
 
     if "## Activity Log" in body:

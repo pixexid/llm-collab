@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -178,6 +179,207 @@ class ClaimTaskIssuePolicyTest(unittest.TestCase):
         self.assertNotIn("issue_policy_refusal", err)
         self.assertIn("has not been refined", err)
         write.assert_not_called()
+
+
+class SupervisorAcceptanceClaimTest(unittest.TestCase):
+    TASK_ID = "TASK-573923"
+    DECISION = "DEC-GH1621-REFINE-1"
+
+    def supervisor_record(self) -> dict:
+        return {
+            "supervisor_acceptance_override": True,
+            "supervisor_acceptance_override_decision": self.DECISION,
+            "supervisor_acceptance_override_thread": "thr_pft3kb9hsm",
+            "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621 only",
+            "supervisor_acceptance_override_non_precedent": True,
+            "supervisor_acceptance_override_revert": "release claim and requeue",
+            "supervisor_acceptance_override_provenance_followup": (
+                "GH-784-class machine-distinguishable two-key provenance seam"
+            ),
+        }
+
+    def invoke(
+        self,
+        supervisor_fields: dict | None = None,
+        *,
+        risk_errors: list[str] | None = None,
+        contract_errors: list[str] | None = None,
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            task = root / "Tasks" / "active" / f"fixture__{self.TASK_ID}.md"
+            task.parent.mkdir(parents=True)
+            frontmatter = {
+                "task_id": self.TASK_ID,
+                "title": "GH-1621 verify equivalence",
+                "status": "open",
+                "owner": "codex",
+                "created_by": "codex",
+                "project_id": "amiga",
+                "depends_on": [],
+                "skip_refinement": False,
+                "refined_by": None,
+            }
+            if supervisor_fields is not None:
+                frontmatter.update(supervisor_fields)
+            body = "# GH-1621 verify equivalence"
+            task.write_text(claim_task.dump_frontmatter(frontmatter, body))
+            before = task.read_text()
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            writer = patch.object(claim_task, "write_file")
+            risk = patch.object(
+                claim_task,
+                "validate_implementation_risk_analysis",
+                return_value=(risk_errors if risk_errors is not None else ["risk sentinel"]),
+            )
+            contract = patch.object(
+                claim_task,
+                "validate_task_contract",
+                return_value=(contract_errors if contract_errors is not None else [], {}),
+            )
+            active_policy = _backlog.IssuePolicy(
+                "active", "state:active", "state:active", ("state:active",)
+            )
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "claim_task.py",
+                        "--task",
+                        self.TASK_ID,
+                        "--owner",
+                        "codex",
+                        "--status",
+                        "in_progress",
+                        "--skip-preflight",
+                    ],
+                ),
+                patch.object(claim_task, "ROOT", root),
+                patch.object(claim_task, "agent_ids", return_value=["codex"]),
+                patch.object(claim_task, "ensure_agent_enabled"),
+                patch.object(claim_task, "find_task_by_id", return_value=task),
+                patch.object(
+                    claim_task,
+                    "sync_task_contract",
+                    return_value=(frontmatter, body),
+                ),
+                patch.object(
+                    claim_task,
+                    "validate_direct_app_policy",
+                    return_value=([], {}),
+                ),
+                patch.object(claim_task.issue_queue, "queue_exists", return_value=False),
+                patch.object(
+                    claim_task._backlog,
+                    "exact_issue_policy",
+                    return_value=("pixexid/amiga", active_policy),
+                ),
+                patch.object(claim_task, "target_task_path", return_value=task),
+                patch.object(claim_task, "utc_iso", return_value="2026-08-12T00:00:00+00:00"),
+                writer as write,
+                risk as risk_mock,
+                contract as contract_mock,
+                redirect_stderr(stderr),
+                redirect_stdout(stdout),
+            ):
+                exit_code = 0
+                try:
+                    claim_task.main()
+                except SystemExit as error:
+                    exit_code = int(error.code)
+            return (
+                exit_code,
+                stdout.getvalue(),
+                stderr.getvalue(),
+                write,
+                risk_mock,
+                before,
+                task.read_text(),
+            )
+
+    def test_complete_real_record_reaches_the_existing_risk_gate(self) -> None:
+        code, _stdout, stderr, write, risk, _before, _after = self.invoke(
+            self.supervisor_record()
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("implementation risk analysis is incomplete", stderr)
+        self.assertNotIn("supervisor_acceptance_invalid", stderr)
+        risk.assert_called_once()
+        write.assert_not_called()
+
+    def test_complete_real_record_mutates_and_names_the_exact_decision(self) -> None:
+        code, stdout, stderr, write, _risk, _before, _after = self.invoke(
+            self.supervisor_record(),
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual([], stderr.splitlines())
+        self.assertEqual("in_progress", json.loads(stdout)["new_status"])
+        write.assert_called_once()
+        _path, rendered = write.call_args.args
+        self.assertIn(
+            f"supervisor_acceptance_override_decision={self.DECISION}",
+            rendered,
+        )
+
+    def test_no_supervisor_record_preserves_the_existing_refinement_refusal(self) -> None:
+        code, _stdout, stderr, write, risk, before, after = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("has not been refined by claude", stderr)
+        self.assertNotIn("supervisor_acceptance_invalid", stderr)
+        risk.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_invalid_supervisor_shapes_refuse_before_risk_or_write(self) -> None:
+        complete = self.supervisor_record()
+        cases = {
+            "missing": {"supervisor_acceptance_override": True},
+            "false": {**complete, "supervisor_acceptance_override": False},
+            "padded": {
+                **complete,
+                "supervisor_acceptance_override_decision": f" {self.DECISION}",
+            },
+            "malformed": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621",
+            },
+            "partial": {
+                key: value
+                for key, value in complete.items()
+                if key != "supervisor_acceptance_override_provenance_followup"
+            },
+            "cross-task": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-OTHER / GH-1621 only",
+            },
+        }
+        for label, fields in cases.items():
+            with self.subTest(label=label):
+                code, _stdout, stderr, write, risk, before, after = self.invoke(fields)
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn("supervisor_acceptance", stderr)
+                write.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_legacy_authorities_still_win_without_supervisor_validation(self) -> None:
+        self.assertEqual(
+            (True, None),
+            claim_task.resolve_activation_authority(
+                {"skip_refinement": True}, self.TASK_ID
+            ),
+        )
+        self.assertEqual(
+            (True, None),
+            claim_task.resolve_activation_authority(
+                {"refined_by": "claude"}, self.TASK_ID
+            ),
+        )
 
 
 if __name__ == "__main__":

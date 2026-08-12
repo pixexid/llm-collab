@@ -1403,6 +1403,10 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v34",
+            "fail-closed alternative activation-authority path",
+            "cached v33 claimant",
+            "DEC-GH1621-ACTIVATION-1",
             "Contract v22",
             "singleton supervisor the decision-maker on the operator's behalf",
             "cached v21 worker can refuse a valid supervisor decision",
