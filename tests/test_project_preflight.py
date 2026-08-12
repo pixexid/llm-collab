@@ -19,7 +19,7 @@ class ProjectPreflightTest(unittest.TestCase):
     def test_registered_commands_are_executed_without_cross_project_suffixes(self) -> None:
         cases = {
             "amiga": ["pnpm", "preflight", "--json", "--browser-check", "skip"],
-            "llm-collab": ["python3.11", "-m", "unittest", "discover", "-s", "tests"],
+            "llm-collab": ["python3.11", "bin/verify.py"],
             "nuvyr": ["sh", "-lc", "pnpm --dir nuvyr build"],
         }
         with tempfile.TemporaryDirectory(prefix="preflight-") as raw_root:
