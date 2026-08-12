@@ -274,7 +274,8 @@ Tasks move through `open → in_progress → blocked/review → done`.
 - Non-trivial tasks require a completed implementation-risk analysis.
 - `plan_task.py` and `refine_task.py` record Claude planning/refinement.
 - `claim_task.py` blocks `in_progress` unless the task has
-  `refined_by: claude` or an explicit trivial-task `skip_refinement: true`.
+  `refined_by: claude`, an explicit trivial-task `skip_refinement: true`, or a
+  complete task-scoped `supervisor_acceptance_override*` decision record.
 - A task both created and planned by Claude requires `accepted_by: codex`
   before activation.
 - Queue order, project preflight, UI/UX evidence, and database evidence can add

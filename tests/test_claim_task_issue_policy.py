@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -178,6 +179,453 @@ class ClaimTaskIssuePolicyTest(unittest.TestCase):
         self.assertNotIn("issue_policy_refusal", err)
         self.assertIn("has not been refined", err)
         write.assert_not_called()
+
+
+class SupervisorAcceptanceClaimTest(unittest.TestCase):
+    TASK_ID = "TASK-573923"
+    DECISION = "DEC-GH1621-REFINE-1"
+
+    def supervisor_record(self) -> dict:
+        return {
+            "supervisor_acceptance_override": True,
+            "supervisor_acceptance_override_decision": self.DECISION,
+            "supervisor_acceptance_override_thread": "thr_pft3kb9hsm",
+            "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621 only",
+            "supervisor_acceptance_override_non_precedent": True,
+            "supervisor_acceptance_override_revert": "release claim and requeue",
+            "supervisor_acceptance_override_provenance_followup": (
+                "GH-784-class machine-distinguishable two-key provenance seam"
+            ),
+        }
+
+    def raw_record(self, **overrides: object) -> str:
+        frontmatter = {**self.supervisor_record(), **overrides}
+        return claim_task.dump_frontmatter(frontmatter, "# GH-1621 verify equivalence")
+
+    def invoke(
+        self,
+        supervisor_fields: dict | None = None,
+        *,
+        project_id: str = "amiga",
+        frontmatter_task_id: str | None = None,
+        task_title: str = "GH-1621 verify equivalence",
+        raw_content: str | None = None,
+        frontmatter_overrides: dict | None = None,
+        risk_errors: list[str] | None = None,
+        contract_errors: list[str] | None = None,
+    ):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            task = root / "Tasks" / "active" / f"fixture__{self.TASK_ID}.md"
+            task.parent.mkdir(parents=True)
+            frontmatter = {
+                "task_id": (
+                    self.TASK_ID if frontmatter_task_id is None else frontmatter_task_id
+                ),
+                "title": task_title,
+                "status": "open",
+                "owner": "codex",
+                "created_by": "codex",
+                "project_id": project_id,
+                "depends_on": [],
+                "skip_refinement": False,
+                "refined_by": None,
+            }
+            if frontmatter_overrides is not None:
+                frontmatter.update(frontmatter_overrides)
+            if supervisor_fields is not None:
+                frontmatter.update(supervisor_fields)
+            body = f"# {task_title}"
+            task.write_text(
+                claim_task.dump_frontmatter(frontmatter, body)
+                if raw_content is None
+                else raw_content
+            )
+            before = task.read_text()
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            writer = patch.object(claim_task, "write_file")
+            risk = patch.object(
+                claim_task,
+                "validate_implementation_risk_analysis",
+                return_value=(risk_errors if risk_errors is not None else ["risk sentinel"]),
+            )
+            contract = patch.object(
+                claim_task,
+                "validate_task_contract",
+                return_value=(contract_errors if contract_errors is not None else [], {}),
+            )
+            remover = patch.object(Path, "unlink")
+            active_policy = _backlog.IssuePolicy(
+                "active", "state:active", "state:active", ("state:active",)
+            )
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "claim_task.py",
+                        "--task",
+                        self.TASK_ID,
+                        "--owner",
+                        "codex",
+                        "--status",
+                        "in_progress",
+                        "--skip-preflight",
+                    ],
+                ),
+                patch.object(claim_task, "ROOT", root),
+                patch.object(claim_task, "agent_ids", return_value=["codex"]),
+                patch.object(claim_task, "ensure_agent_enabled"),
+                patch.object(claim_task, "find_task_by_id", return_value=task),
+                patch.object(
+                    claim_task,
+                    "sync_task_contract",
+                    return_value=(frontmatter, body),
+                ),
+                patch.object(
+                    claim_task,
+                    "validate_direct_app_policy",
+                    return_value=([], {}),
+                ),
+                patch.object(claim_task.issue_queue, "queue_exists", return_value=False),
+                patch.object(
+                    claim_task._backlog,
+                    "exact_issue_policy",
+                    return_value=(f"pixexid/{project_id}", active_policy),
+                ),
+                patch.object(claim_task, "target_task_path", return_value=task),
+                patch.object(claim_task, "utc_iso", return_value="2026-08-12T00:00:00+00:00"),
+                writer as write,
+                remover as remove,
+                risk as risk_mock,
+                contract as contract_mock,
+                redirect_stderr(stderr),
+                redirect_stdout(stdout),
+            ):
+                exit_code = 0
+                try:
+                    claim_task.main()
+                except SystemExit as error:
+                    exit_code = int(error.code)
+            return (
+                exit_code,
+                stdout.getvalue(),
+                stderr.getvalue(),
+                write,
+                remove,
+                risk_mock,
+                before,
+                task.read_text(),
+            )
+
+    def test_complete_real_record_reaches_the_existing_risk_gate(self) -> None:
+        code, _stdout, stderr, write, _remove, risk, _before, _after = self.invoke(
+            self.supervisor_record()
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("implementation risk analysis is incomplete", stderr)
+        self.assertNotIn("supervisor_acceptance_invalid", stderr)
+        risk.assert_called_once()
+        write.assert_not_called()
+
+    def test_complete_real_record_mutates_and_names_the_exact_decision(self) -> None:
+        code, stdout, stderr, write, _remove, _risk, _before, _after = self.invoke(
+            self.supervisor_record(),
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual([], stderr.splitlines())
+        self.assertEqual("in_progress", json.loads(stdout)["new_status"])
+        write.assert_called_once()
+        _path, rendered = write.call_args.args
+        self.assertIn(
+            f"supervisor_acceptance_override_decision={self.DECISION}",
+            rendered,
+        )
+
+    def test_no_supervisor_record_preserves_the_existing_refinement_refusal(self) -> None:
+        code, _stdout, stderr, write, _remove, risk, before, after = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("has not been refined by claude", stderr)
+        self.assertNotIn("supervisor_acceptance_invalid", stderr)
+        risk.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_invalid_supervisor_shapes_refuse_before_risk_or_write(self) -> None:
+        complete = self.supervisor_record()
+        cases = {
+            "missing": {"supervisor_acceptance_override": True},
+            "false": {**complete, "supervisor_acceptance_override": False},
+            "padded": {
+                **complete,
+                "supervisor_acceptance_override_decision": f" {self.DECISION}",
+            },
+            "malformed": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621",
+            },
+            "partial": {
+                key: value
+                for key, value in complete.items()
+                if key != "supervisor_acceptance_override_provenance_followup"
+            },
+            "cross-task": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-OTHER / GH-1621 only",
+            },
+        }
+        for label, fields in cases.items():
+            with self.subTest(label=label):
+                code, _stdout, stderr, write, _remove, risk, before, after = self.invoke(fields)
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn("supervisor_acceptance", stderr)
+                write.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_decision_rejects_newline_and_control_injection_before_mutation(self) -> None:
+        for label, decision in {
+            "newline": f"{self.DECISION}\nforged activity entry",
+            "control": f"{self.DECISION}\x1bforged activity entry",
+        }.items():
+            with self.subTest(label=label):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    {
+                        **self.supervisor_record(),
+                        "supervisor_acceptance_override_decision": decision,
+                    },
+                    risk_errors=[],
+                    contract_errors=[],
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn("printable single-line authority token", stderr)
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_selector_frontmatter_mismatch_refuses_before_write_or_move(self) -> None:
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            self.supervisor_record(),
+            frontmatter_task_id="TASK-OTHER",
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "task_selector_mismatch"', stderr)
+        self.assertIn(f'"task_selector": "{self.TASK_ID}"', stderr)
+        self.assertIn('"record_task_id": "TASK-OTHER"', stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_invalid_override_never_falls_through_legacy_authority(self) -> None:
+        malformed = {
+            **self.supervisor_record(),
+            "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621",
+        }
+        for legacy in (
+            {"skip_refinement": True},
+            {"refined_by": "claude"},
+        ):
+            with self.subTest(legacy=legacy):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    malformed,
+                    frontmatter_overrides=legacy,
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_unknown_override_field_refuses_before_legacy_authority_or_mutation(self) -> None:
+        for legacy in (
+            {"refined_by": "claude"},
+            {"skip_refinement": True},
+        ):
+            with self.subTest(legacy=legacy):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    {"supervisor_acceptance_override_decison": self.DECISION},
+                    frontmatter_overrides=legacy,
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn(
+                    "supervisor_acceptance_override_decison is not an allowed supervisor acceptance field",
+                    stderr,
+                )
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_bootstrap_metadata_extensions_preserve_complete_record(self) -> None:
+        code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
+            {
+                **self.supervisor_record(),
+                "supervisor_acceptance_override_bootstrap_decision": "DEC-GH1621-ACTIVATION-1",
+                "supervisor_acceptance_override_bootstrap_thread": "thr_m5m4xgf6u3",
+            },
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual("in_progress", json.loads(stdout)["new_status"])
+        write.assert_called_once()
+        remove.assert_not_called()
+
+    def test_raw_padded_decision_value_refuses_before_legacy_authority_or_mutation(self) -> None:
+        raw_content = self.raw_record(refined_by="claude").replace(
+            f"supervisor_acceptance_override_decision: {self.DECISION}",
+            f"supervisor_acceptance_override_decision:  {self.DECISION}",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            frontmatter_overrides={"refined_by": "claude"},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("value must not be padded", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_raw_padded_decision_key_refuses_before_legacy_authority_or_mutation(self) -> None:
+        raw_content = self.raw_record(skip_refinement=True).replace(
+            f"supervisor_acceptance_override_decision: {self.DECISION}",
+            f" supervisor_acceptance_override_decision: {self.DECISION}",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            frontmatter_overrides={"skip_refinement": True},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("key must not be padded", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_raw_duplicate_supervisor_field_refuses_before_mutation(self) -> None:
+        raw_content = self.raw_record().replace(
+            "\n---\n\n# GH-1621 verify equivalence",
+            "\nsupervisor_acceptance_override_thread: thr_pft3kb9hsm\n"
+            "supervisor_acceptance_override_thread: thr_pft3kb9hsm\n---",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("must not be duplicated", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_registered_non_amiga_project_accepts_matching_derived_issue_scope(self) -> None:
+        code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
+            self.supervisor_record(),
+            project_id="llm-collab",
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual("in_progress", json.loads(stdout)["new_status"])
+        write.assert_called_once()
+        remove.assert_not_called()
+        _path, rendered = write.call_args.args
+        self.assertIn(
+            f"supervisor_acceptance_override_decision={self.DECISION}",
+            rendered,
+        )
+
+    def test_mismatched_derived_issue_scope_refuses_before_risk_or_write(self) -> None:
+        fields = {
+            **self.supervisor_record(),
+            "supervisor_acceptance_override_scope": "TASK-573923 / GH-999 only",
+        }
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            fields,
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("issue number must equal the derived issue number", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_missing_derived_issue_refuses_before_risk_or_write(self) -> None:
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            self.supervisor_record(),
+            task_title="verify equivalence",
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("issue number cannot be derived", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_registered_non_amiga_project_refuses_malformed_and_cross_task_records(self) -> None:
+        complete = self.supervisor_record()
+        cases = {
+            "malformed": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-573923 / GH-1621",
+            },
+            "cross-task": {
+                **complete,
+                "supervisor_acceptance_override_scope": "TASK-OTHER / GH-1621 only",
+            },
+        }
+        for label, fields in cases.items():
+            with self.subTest(label=label):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    fields,
+                    project_id="llm-collab",
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_legacy_authorities_still_win_without_supervisor_validation(self) -> None:
+        self.assertEqual(
+            (True, None),
+            claim_task.resolve_activation_authority(
+                {"skip_refinement": True}, self.TASK_ID
+            ),
+        )
+        self.assertEqual(
+            (True, None),
+            claim_task.resolve_activation_authority(
+                {"refined_by": "claude"}, self.TASK_ID
+            ),
+        )
 
 
 if __name__ == "__main__":

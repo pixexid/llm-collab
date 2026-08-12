@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 33 -->
+<!-- CONTRACT_VERSION: 34 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,21 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v34 (2026-08-12) adds one fail-closed alternative activation-authority
+path in `claim_task.py` for a complete, task-scoped recorded supervisor decision.
+When the normal `refined_by: claude` or `skip_refinement: true` authority does
+not apply, a present `supervisor_acceptance_override*` record must contain the
+literal enabled and non-precedent booleans, unpadded decision/thread/revert/
+follow-up strings, and the exact `TASK-* / GH-<digits> only` scope before
+`open -> in_progress` can proceed. Partial, malformed, padded, false, or
+cross-task records refuse before mutation; the activity entry names the exact
+decision id. This is the bounded compatibility slice requested by
+`DEC-GH1621-ACTIVATION-1`, not the GH-784 descriptor resolver. A cached v33
+claimant would keep refusing a truthful task with `refined_by: null` and
+`skip_refinement: false` despite its complete recorded supervisor authority,
+so both the changed activation eligibility and the new fail-closed obligation
+require the version signal. Related GH-810 and `DEC-GH1621-ACTIVATION-1`.
 
 Contract v33 (2026-08-12) prohibits hidden fleet threads. Every provision
 probe, worker, and reviewer must be spawned with explicit visible visibility;
