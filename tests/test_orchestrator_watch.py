@@ -1296,11 +1296,8 @@ class RoleWakeTest(unittest.TestCase):
         def transport(_executable):
             def call(argv, _timeout):
                 calls.append(tuple(argv))
-                payload = (
-                    {"currentVersion": watch.PINNED_BB_VERSION}
-                    if tuple(argv) == ("settings", "version", "--json")
-                    else {"ok": True, "threadId": argv[2], "mode": "queue"}
-                )
+                self.assertEqual(("thread", "tell"), tuple(argv[:2]))
+                payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
                 return mock.Mock(exit_code=0, stdout=json.dumps(payload), stderr="")
 
             return call
@@ -1341,7 +1338,113 @@ class RoleWakeTest(unittest.TestCase):
 
         tells = [argv for argv in calls if argv[:2] == ("thread", "tell")]
         self.assertEqual(2, len(tells))
+        self.assertEqual(tells, calls, "version drift wake must not probe version twice")
         self.assertEqual(4, sum(line.startswith("HEARTBEAT openPRs=") for line in messages))
+
+    def test_version_drift_wake_requires_exact_acceptance_and_suppresses_retry(self) -> None:
+        cases = {
+            "wrong-ok": {"ok": False, "threadId": "thread-role", "mode": "queue"},
+            "wrong-thread": {"ok": True, "threadId": "other", "mode": "queue"},
+            "wrong-mode": {"ok": True, "threadId": "thread-role", "mode": "steer"},
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ):
+            write_role_record(directory)
+            for name, payload in cases.items():
+                with self.subTest(name=name):
+                    calls = []
+                    messages = []
+
+                    def transport(_executable):
+                        def call(argv, _timeout):
+                            calls.append(tuple(argv))
+                            self.assertEqual(("thread", "tell"), tuple(argv[:2]))
+                            return mock.Mock(
+                                exit_code=0, stdout=json.dumps(payload), stderr=""
+                            )
+
+                        return call
+
+                    with mock.patch.object(
+                        watch, "subprocess_transport", side_effect=transport
+                    ):
+                        emit = watch.role_wake_emitter(
+                            config(),
+                            "project-a",
+                            emit=messages.append,
+                            deadline=100.0,
+                            monotonic=lambda: 0.0,
+                        )
+                        self.assertTrue(
+                            emit(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
+                        )
+                        self.assertTrue(
+                            emit(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
+                        )
+
+                    self.assertEqual(1, len(calls))
+                    self.assertIn("ACCEPTANCE UNCONFIRMED", messages[0])
+                    self.assertIn("retry suppressed", messages[0])
+
+    def test_failed_version_drift_wake_advances_neither_cache_nor_marker(self) -> None:
+        calls = []
+        cache = watch.RoleWakeCache()
+
+        def transport(_executable):
+            def call(argv, _timeout):
+                calls.append(tuple(argv))
+                self.assertEqual(("thread", "tell"), tuple(argv[:2]))
+                return mock.Mock(exit_code=1, stdout="", stderr="tell failed")
+
+            return call
+
+        def heartbeat_call(_executable, argv, _timeout):
+            if argv[:2] == ("settings", "version"):
+                return {"currentVersion": "wrong-version"}
+            return {"threads": []}
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            watch, "project_state_dir", return_value=Path(directory)
+        ), mock.patch.object(
+            watch, "subprocess_transport", side_effect=transport
+        ), mock.patch.object(
+            watch._watcher_liveness, "write_marker"
+        ) as marker:
+            write_role_record(directory)
+
+            def check() -> bool:
+                return watch.heartbeat_cycle(
+                    config(),
+                    call=heartbeat_call,
+                    enumerate_open=lambda *_, **__: [],
+                    emit=lambda _line: None,
+                    wake=watch.role_wake_emitter(
+                        config(),
+                        "project-a",
+                        cache=cache,
+                        deadline=100.0,
+                        monotonic=lambda: 0.0,
+                    ),
+                    wake_cache=cache,
+                )
+
+            with self.assertRaises(watch.WatcherEventDeliveryError):
+                watch.run_once(
+                    "heartbeat",
+                    "project-a",
+                    "launching-session",
+                    check,
+                    emit=lambda _line: None,
+                    deadline=100.0,
+                    monotonic=lambda: 0.0,
+                )
+            marker.assert_not_called()
+            self.assertFalse(
+                cache.duplicate(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
+            )
+
+        self.assertEqual(1, len(calls))
 
     def test_project_exact_role_targets_have_cross_project_absence_both_ways(self) -> None:
         tells = []

@@ -593,6 +593,26 @@ class BbClient:
                 REFUSAL_PROFILE_MISMATCH,
                 f"mode {mode!r} is not implemented in Slice 1A; only queue-if-active",
             )
+        return self._send_queued(thread_id=thread_id, message=message)
+
+    def send_version_mismatch_diagnostic(
+        self, *, thread_id: str, message: str, installed_version: str
+    ) -> BbQueued | BbRefusal:
+        """Queue the one diagnostic whose known mismatch makes the gate unusable."""
+        if not self._enabled:
+            return BbRefusal(REFUSAL_DISABLED, "bb adapter is disabled")
+        if (
+            not isinstance(installed_version, str)
+            or not installed_version.strip()
+            or installed_version == PINNED_BB_VERSION
+        ):
+            return BbRefusal(
+                REFUSAL_VERSION_MISMATCH,
+                "a non-pinned installed bb version is required for this diagnostic",
+            )
+        return self._send_queued(thread_id=thread_id, message=message)
+
+    def _send_queued(self, *, thread_id: str, message: str) -> BbQueued | BbRefusal:
         payload = self._task_json(
             ["thread", "tell", thread_id, message, "--mode", "queue", "--json"]
         )

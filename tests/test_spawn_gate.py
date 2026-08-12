@@ -1054,6 +1054,19 @@ class Gh801WorkflowContractTests(unittest.TestCase):
                 self.assertIn("DONE|BLOCKED", normalized)
                 self.assertIn("exact orchestrator thread", normalized)
 
+    def test_first_task_bearing_tells_use_explicit_queue_mode(self) -> None:
+        commands = {
+            "docs/workflows/bb-workers.md": '"$(cat <file>)" --mode queue',
+            "docs/workflows/bb-native-cutover-runbook.md": (
+                '"$(cat <brief_file>)" --mode queue'
+            ),
+        }
+        for relative, command in commands.items():
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn(command, text)
+                self.assertNotIn(command.replace("queue", "steer"), text)
+
     def test_canonical_launchers_expose_no_caller_prompt(self) -> None:
         workers = (ROOT / "docs/workflows/bb-workers.md").read_text(encoding="utf-8")
         workers_command = workers[

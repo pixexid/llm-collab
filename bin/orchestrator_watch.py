@@ -56,6 +56,7 @@ MAX_STATE_BYTES = 1 << 20
 MAX_ROLE_GENERATION_BYTES = 64 * 1024
 MAX_ROLE_WAKE_KEYS = 256
 ROLE_WAKE_POINTER = "event; inspect canonical state"
+VERSION_MISMATCH_WAKE_FAMILY = "deployed-bb-version"
 ABNORMAL_WORKER_STATUSES = frozenset({"error", "stopping"})
 ROLE_RECORD_PATTERN = re.compile(
     r"^```json[ \t]*\r?\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL
@@ -337,15 +338,23 @@ def role_wake_emitter(
                     min(timeout, remaining_cycle_seconds(deadline, monotonic)),
                 )
 
-            result = BbClient(
+            client = BbClient(
                 cycle_transport,
                 enabled=True,
                 timeout_seconds=config.timeout_seconds,
-            ).send(
-                thread_id=thread_id,
-                message=ROLE_WAKE_POINTER,
-                mode="queue-if-active",
             )
+            if family == VERSION_MISMATCH_WAKE_FAMILY:
+                result = client.send_version_mismatch_diagnostic(
+                    thread_id=thread_id,
+                    message=ROLE_WAKE_POINTER,
+                    installed_version=key,
+                )
+            else:
+                result = client.send(
+                    thread_id=thread_id,
+                    message=ROLE_WAKE_POINTER,
+                    mode="queue-if-active",
+                )
         except Exception as error:
             raise WatcherEventDeliveryError(
                 f"watcher BB wake was not delivered: {str(error) or type(error).__name__}"
@@ -681,11 +690,11 @@ def heartbeat_cycle(
         require_event_delivery(emit, line)
         require_role_wake(
             wake,
-            "deployed-bb-version",
-            f"{PINNED_BB_VERSION}->{current}",
+            VERSION_MISMATCH_WAKE_FAMILY,
+            current,
         )
     elif current == PINNED_BB_VERSION and wake_cache is not None:
-        wake_cache.clear("deployed-bb-version")
+        wake_cache.clear(VERSION_MISMATCH_WAKE_FAMILY)
     try:
         rows = project_thread_rows(
             config,

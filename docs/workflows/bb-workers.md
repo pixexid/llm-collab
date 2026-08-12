@@ -170,7 +170,9 @@ applies the spawn gate, injects the task-free profile-only first prompt, and
 writes the assignment record. It does not accept a caller prompt. Write the
 delegation to a file. After the execution event proves the exact triple, deliver
 that file as the first task-bearing turn with `"${bb_cmd[@]}" thread tell <thread-id>
-"$(cat <file>)" --mode steer`. Shell interpolation eats backticks, and a prompt
+"$(cat <file>)" --mode queue`. The explicit queue mode keeps the task behind the
+active profile-only turn; `steer` remains reserved for corrections to work already
+running. Shell interpolation eats backticks, and a prompt
 that arrives with a hole in it still reports success, so prefer BB's file or
 attachment surface when the brief contains shell syntax.
 Provider, model, and reasoning level are required flags; remembered project

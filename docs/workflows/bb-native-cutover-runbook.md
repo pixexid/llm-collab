@@ -89,7 +89,14 @@ verified worktree.
    and reasoning level from its execution event. Requested flags and declared
    defaults are not execution evidence; a missing or mismatched event refuses
    promotion. Only after that exact event proof, send the frozen task-bearing
-   brief below to the same thread. The candidate assignment itself supplies the
+   brief below to the same thread in explicit queue mode, so it cannot enter the
+   active profile-only turn:
+
+   ```bash
+   "${bb_cmd[@]}" thread tell <role_thread_id> "$(cat <brief_file>)" --mode queue
+   ```
+
+   The candidate assignment itself supplies the
    exact-profile proof, so do not create a second probe assignment or let the
    first turn inspect the brief.
 6. Demote the predecessor in writing. It becomes driver/reviewer: it may advise,
