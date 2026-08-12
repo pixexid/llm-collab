@@ -204,6 +204,7 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
         *,
         project_id: str = "amiga",
         frontmatter_task_id: str | None = None,
+        task_title: str = "GH-1621 verify equivalence",
         frontmatter_overrides: dict | None = None,
         risk_errors: list[str] | None = None,
         contract_errors: list[str] | None = None,
@@ -216,7 +217,7 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
                 "task_id": (
                     self.TASK_ID if frontmatter_task_id is None else frontmatter_task_id
                 ),
-                "title": "GH-1621 verify equivalence",
+                "title": task_title,
                 "status": "open",
                 "owner": "codex",
                 "created_by": "codex",
@@ -229,7 +230,7 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
                 frontmatter.update(frontmatter_overrides)
             if supervisor_fields is not None:
                 frontmatter.update(supervisor_fields)
-            body = "# GH-1621 verify equivalence"
+            body = f"# {task_title}"
             task.write_text(claim_task.dump_frontmatter(frontmatter, body))
             before = task.read_text()
             stderr = io.StringIO()
@@ -414,7 +415,7 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
                 risk.assert_not_called()
                 self.assertEqual(before, after)
 
-    def test_registered_non_amiga_project_accepts_the_same_valid_record(self) -> None:
+    def test_registered_non_amiga_project_accepts_matching_derived_issue_scope(self) -> None:
         code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
             self.supervisor_record(),
             project_id="llm-collab",
@@ -430,6 +431,39 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
             f"supervisor_acceptance_override_decision={self.DECISION}",
             rendered,
         )
+
+    def test_mismatched_derived_issue_scope_refuses_before_risk_or_write(self) -> None:
+        fields = {
+            **self.supervisor_record(),
+            "supervisor_acceptance_override_scope": "TASK-573923 / GH-999 only",
+        }
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            fields,
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("issue number must equal the derived issue number", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_missing_derived_issue_refuses_before_risk_or_write(self) -> None:
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            self.supervisor_record(),
+            task_title="verify equivalence",
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("issue number cannot be derived", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
 
     def test_registered_non_amiga_project_refuses_malformed_and_cross_task_records(self) -> None:
         complete = self.supervisor_record()

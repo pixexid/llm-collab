@@ -122,7 +122,11 @@ class TaskSelectorMismatchError(ValueError):
         }
 
 
-def validate_supervisor_acceptance(frontmatter: dict, task_id: object) -> str | None:
+def validate_supervisor_acceptance(
+    frontmatter: dict,
+    task_id: object,
+    issue_number: int | None = None,
+) -> str | None:
     """Return the decision id only for a complete, exact-task override record."""
     if not any(field in frontmatter for field in SUPERVISOR_ACCEPTANCE_FIELDS):
         return None
@@ -152,6 +156,14 @@ def validate_supervisor_acceptance(frontmatter: dict, task_id: object) -> str | 
         problems.append(
             "supervisor_acceptance_override_scope task id must equal the current task id"
         )
+    elif issue_number is None:
+        problems.append(
+            "supervisor_acceptance_override_scope issue number cannot be derived for the current task"
+        )
+    elif int(scope_match.group(2)[3:]) != issue_number:
+        problems.append(
+            "supervisor_acceptance_override_scope issue number must equal the derived issue number"
+        )
     if not isinstance(task_id, str) or re.fullmatch(r"TASK-[A-Za-z0-9]+", task_id) is None:
         problems.append("current task id must be an exact TASK-* id")
 
@@ -171,9 +183,10 @@ def validate_task_selector(selector: object, frontmatter: dict) -> object:
 def resolve_activation_authority(
     frontmatter: dict,
     task_id: object,
+    issue_number: int | None = None,
 ) -> tuple[bool, str | None]:
     """Resolve the recorded supervisor alternative, then legacy refinement."""
-    decision = validate_supervisor_acceptance(frontmatter, task_id)
+    decision = validate_supervisor_acceptance(frontmatter, task_id, issue_number)
     if frontmatter.get("skip_refinement", False) or frontmatter.get("refined_by") == PLANNING_AGENT:
         return True, None
     return decision is not None, decision
@@ -479,12 +492,14 @@ def main():
     original_frontmatter = dict(fm)
     fm, _ = sync_task_contract(fm, body)
     record_task_id = None
+    issue_number = None
     if args.status == "in_progress":
         try:
             record_task_id = validate_task_selector(args.task, fm)
         except TaskSelectorMismatchError as error:
             print(json.dumps(error.payload(), indent=2), file=sys.stderr)
             sys.exit(1)
+        issue_number = issue_queue.extract_issue_number(fm, task_file)
 
     if args.accepted_by is not None:
         if args.accepted_by != ACCEPTANCE_AGENT:
@@ -596,7 +611,6 @@ def main():
     # changes ordering only; it cannot turn excluded, malformed, or blocked
     # issue-linked work into executable work.
     if project_id and args.status == "in_progress":
-        issue_number = issue_queue.extract_issue_number(fm, task_file)
         if issue_number is not None:
             try:
                 resolved_policy = _backlog.exact_issue_policy(project_id, issue_number)
@@ -767,6 +781,7 @@ def main():
             activation_authorized, supervisor_decision = resolve_activation_authority(
                 fm,
                 record_task_id,
+                issue_number,
             )
         except SupervisorAcceptanceError as error:
             print(json.dumps(error.payload(), indent=2), file=sys.stderr)
