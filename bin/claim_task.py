@@ -130,6 +130,36 @@ class TaskSelectorMismatchError(ValueError):
         }
 
 
+def validate_raw_supervisor_acceptance(content: str, task_id: object) -> None:
+    """Reject padded or duplicate supervisor fields before parsing normalizes them."""
+    if not content.startswith("---"):
+        return
+    end = content.find("\n---", 3)
+    if end == -1:
+        return
+
+    seen: set[str] = set()
+    problems: list[str] = []
+    for line in content[3:end].splitlines():
+        if ":" not in line:
+            continue
+        raw_key, _, raw_value = line.partition(":")
+        trimmed_key = raw_key.strip()
+        if not trimmed_key.startswith(SUPERVISOR_ACCEPTANCE_PREFIX):
+            continue
+        if raw_key != trimmed_key:
+            problems.append(f"{trimmed_key} key must not be padded")
+        value = raw_value[1:] if raw_value.startswith(" ") else raw_value
+        if value != value.strip():
+            problems.append(f"{trimmed_key} value must not be padded")
+        if trimmed_key in seen:
+            problems.append(f"{trimmed_key} must not be duplicated")
+        seen.add(trimmed_key)
+
+    if problems:
+        raise SupervisorAcceptanceError(task_id, problems)
+
+
 def validate_supervisor_acceptance(
     frontmatter: dict,
     task_id: object,
@@ -507,6 +537,12 @@ def main():
         sys.exit(1)
 
     content = task_file.read_text()
+    if args.status == "in_progress":
+        try:
+            validate_raw_supervisor_acceptance(content, args.task)
+        except SupervisorAcceptanceError as error:
+            print(json.dumps(error.payload(), indent=2), file=sys.stderr)
+            sys.exit(1)
     fm, body = parse_frontmatter(content)
     original_frontmatter = dict(fm)
     fm, _ = sync_task_contract(fm, body)

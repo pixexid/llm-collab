@@ -198,6 +198,10 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
             ),
         }
 
+    def raw_record(self, **overrides: object) -> str:
+        frontmatter = {**self.supervisor_record(), **overrides}
+        return claim_task.dump_frontmatter(frontmatter, "# GH-1621 verify equivalence")
+
     def invoke(
         self,
         supervisor_fields: dict | None = None,
@@ -205,6 +209,7 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
         project_id: str = "amiga",
         frontmatter_task_id: str | None = None,
         task_title: str = "GH-1621 verify equivalence",
+        raw_content: str | None = None,
         frontmatter_overrides: dict | None = None,
         risk_errors: list[str] | None = None,
         contract_errors: list[str] | None = None,
@@ -231,7 +236,11 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
             if supervisor_fields is not None:
                 frontmatter.update(supervisor_fields)
             body = f"# {task_title}"
-            task.write_text(claim_task.dump_frontmatter(frontmatter, body))
+            task.write_text(
+                claim_task.dump_frontmatter(frontmatter, body)
+                if raw_content is None
+                else raw_content
+            )
             before = task.read_text()
             stderr = io.StringIO()
             stdout = io.StringIO()
@@ -472,6 +481,62 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
         self.assertEqual("in_progress", json.loads(stdout)["new_status"])
         write.assert_called_once()
         remove.assert_not_called()
+
+    def test_raw_padded_decision_value_refuses_before_legacy_authority_or_mutation(self) -> None:
+        raw_content = self.raw_record(refined_by="claude").replace(
+            f"supervisor_acceptance_override_decision: {self.DECISION}",
+            f"supervisor_acceptance_override_decision:  {self.DECISION}",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            frontmatter_overrides={"refined_by": "claude"},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("value must not be padded", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_raw_padded_decision_key_refuses_before_legacy_authority_or_mutation(self) -> None:
+        raw_content = self.raw_record(skip_refinement=True).replace(
+            f"supervisor_acceptance_override_decision: {self.DECISION}",
+            f" supervisor_acceptance_override_decision: {self.DECISION}",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            frontmatter_overrides={"skip_refinement": True},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("key must not be padded", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
+
+    def test_raw_duplicate_supervisor_field_refuses_before_mutation(self) -> None:
+        raw_content = self.raw_record().replace(
+            "\n---\n\n# GH-1621 verify equivalence",
+            "\nsupervisor_acceptance_override_thread: thr_pft3kb9hsm\n"
+            "supervisor_acceptance_override_thread: thr_pft3kb9hsm\n---",
+            1,
+        )
+        code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+            raw_content=raw_content,
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+        self.assertIn("must not be duplicated", stderr)
+        write.assert_not_called()
+        remove.assert_not_called()
+        risk.assert_not_called()
+        self.assertEqual(before, after)
 
     def test_registered_non_amiga_project_accepts_matching_derived_issue_scope(self) -> None:
         code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
