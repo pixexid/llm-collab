@@ -68,6 +68,14 @@ SUPERVISOR_ACCEPTANCE_FIELDS = (
     "supervisor_acceptance_override_revert",
     "supervisor_acceptance_override_provenance_followup",
 )
+SUPERVISOR_ACCEPTANCE_PREFIX = "supervisor_acceptance_override"
+SUPERVISOR_ACCEPTANCE_METADATA_FIELDS = (
+    "supervisor_acceptance_override_bootstrap_decision",
+    "supervisor_acceptance_override_bootstrap_thread",
+)
+SUPERVISOR_ACCEPTANCE_ALLOWED_FIELDS = frozenset(
+    (*SUPERVISOR_ACCEPTANCE_FIELDS, *SUPERVISOR_ACCEPTANCE_METADATA_FIELDS)
+)
 SUPERVISOR_ACCEPTANCE_TEXT_FIELDS = (
     "supervisor_acceptance_override_decision",
     "supervisor_acceptance_override_thread",
@@ -128,10 +136,17 @@ def validate_supervisor_acceptance(
     issue_number: int | None = None,
 ) -> str | None:
     """Return the decision id only for a complete, exact-task override record."""
-    if not any(field in frontmatter for field in SUPERVISOR_ACCEPTANCE_FIELDS):
+    acceptance_fields = [
+        field for field in frontmatter if field.startswith(SUPERVISOR_ACCEPTANCE_PREFIX)
+    ]
+    if not acceptance_fields:
         return None
 
-    problems: list[str] = []
+    problems = [
+        f"{field} is not an allowed supervisor acceptance field"
+        for field in sorted(acceptance_fields)
+        if field not in SUPERVISOR_ACCEPTANCE_ALLOWED_FIELDS
+    ]
     if frontmatter.get("supervisor_acceptance_override") is not True:
         problems.append(
             "supervisor_acceptance_override must be the literal boolean true"

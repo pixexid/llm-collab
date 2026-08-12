@@ -437,6 +437,42 @@ class SupervisorAcceptanceClaimTest(unittest.TestCase):
                 risk.assert_not_called()
                 self.assertEqual(before, after)
 
+    def test_unknown_override_field_refuses_before_legacy_authority_or_mutation(self) -> None:
+        for legacy in (
+            {"refined_by": "claude"},
+            {"skip_refinement": True},
+        ):
+            with self.subTest(legacy=legacy):
+                code, _stdout, stderr, write, remove, risk, before, after = self.invoke(
+                    {"supervisor_acceptance_override_decison": self.DECISION},
+                    frontmatter_overrides=legacy,
+                )
+                self.assertEqual(code, 1)
+                self.assertIn('"reason": "supervisor_acceptance_invalid"', stderr)
+                self.assertIn(
+                    "supervisor_acceptance_override_decison is not an allowed supervisor acceptance field",
+                    stderr,
+                )
+                write.assert_not_called()
+                remove.assert_not_called()
+                risk.assert_not_called()
+                self.assertEqual(before, after)
+
+    def test_bootstrap_metadata_extensions_preserve_complete_record(self) -> None:
+        code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
+            {
+                **self.supervisor_record(),
+                "supervisor_acceptance_override_bootstrap_decision": "DEC-GH1621-ACTIVATION-1",
+                "supervisor_acceptance_override_bootstrap_thread": "thr_m5m4xgf6u3",
+            },
+            risk_errors=[],
+            contract_errors=[],
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual("in_progress", json.loads(stdout)["new_status"])
+        write.assert_called_once()
+        remove.assert_not_called()
+
     def test_registered_non_amiga_project_accepts_matching_derived_issue_scope(self) -> None:
         code, stdout, stderr, write, remove, _risk, _before, _after = self.invoke(
             self.supervisor_record(),
