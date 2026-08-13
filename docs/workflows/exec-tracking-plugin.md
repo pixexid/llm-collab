@@ -78,7 +78,10 @@ authority. The role target is resolved from the registered native-project map
 and `role-generation.md` each time an event fires.
 
 Plugin `running` state is the native abnormal-wake liveness signal. Do not add a
-third host marker. A running path install does not automatically follow checkout
+third host marker. The session gate and sanctioned writing-spawn path read this
+exact status through the project's configured BB executable and fail closed on
+every non-running or unreadable result, regardless of host-marker freshness. A
+running path install does not automatically follow checkout
 changes, so only the orchestrator reloads the plugin, and only after independent
 review of the draft.
 

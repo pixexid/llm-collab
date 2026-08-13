@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import plugin, { WAKE_SCHEMA, deliverWake, rearmWake } from "./server.ts";
+import plugin, {
+  WAKE_SCHEMA,
+  deliverWake,
+  rearmWake,
+  resumeRetryableWakes,
+  retryWake,
+} from "./server.ts";
 
 function database() {
   const db = new DatabaseSync(":memory:");
@@ -21,6 +27,12 @@ function api(send) {
     log: { warn: (line) => warnings.push(line) },
     warnings,
   };
+}
+
+function deliver(bb, db, wakeTarget, family, semantic, scheduleRetry = () => {
+  assert.fail("unexpected retry scheduling");
+}) {
+  return deliverWake(bb, db, wakeTarget, family, semantic, scheduleRetry);
 }
 
 function deferred() {
@@ -42,8 +54,8 @@ test("concurrent native and CLI producers reserve one pending wake", async () =>
     return { ok: true };
   });
   const results = await Promise.all([
-    deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64)),
-    deliverWake(bb, db, target(), "pr-artifacts", "b".repeat(64)),
+    deliver(bb, db, target(), "worker:thread-a", "a".repeat(64)),
+    deliver(bb, db, target(), "pr-artifacts", "b".repeat(64)),
   ]);
   assert.deepEqual(results.sort(), ["accepted", "coalesced"]);
   assert.equal(sends.length, 1);
@@ -63,11 +75,11 @@ test("pending reservation survives a plugin reload", async () => {
   const db = database();
   let sends = 0;
   assert.equal(
-    await deliverWake(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
+    await deliver(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
     "accepted",
   );
   assert.equal(
-    await deliverWake(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
+    await deliver(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
     "coalesced",
   );
   assert.equal(sends, 1);
@@ -77,14 +89,14 @@ test("semantic change coalesces while pending and recovery re-arms", async () =>
   const db = database();
   let sends = 0;
   const bb = api(async () => (++sends, { ok: true }));
-  await deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+  await deliver(bb, db, target(), "worker:thread-a", "a".repeat(64));
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-a", "b".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-a", "b".repeat(64)),
     "coalesced",
   );
   rearmWake(db, target(), "thread-a");
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-a", "b".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-a", "b".repeat(64)),
     "accepted",
   );
   assert.equal(sends, 2);
@@ -94,10 +106,10 @@ test("role idle re-arms every producer family", async () => {
   const db = database();
   let sends = 0;
   const bb = api(async () => (++sends, { ok: true }));
-  await deliverWake(bb, db, target(), "pr-artifacts", "a".repeat(64));
+  await deliver(bb, db, target(), "pr-artifacts", "a".repeat(64));
   rearmWake(db, target(), "role-a");
   assert.equal(
-    await deliverWake(bb, db, target(), "heartbeat", "b".repeat(64)),
+    await deliver(bb, db, target(), "heartbeat", "b".repeat(64)),
     "accepted",
   );
   assert.equal(sends, 2);
@@ -107,7 +119,7 @@ test("confirmed failure releases while ambiguous failure suppresses retry", asyn
   const confirmedDb = database();
   const confirmed = api(async () => { throw Object.assign(new Error("bad request"), { status: 400 }); });
   assert.equal(
-    await deliverWake(confirmed, confirmedDb, target(), "heartbeat", "a".repeat(64)),
+    await deliver(confirmed, confirmedDb, target(), "heartbeat", "a".repeat(64)),
     "confirmed-failure",
   );
   assert.equal(
@@ -118,12 +130,102 @@ test("confirmed failure releases while ambiguous failure suppresses retry", asyn
   const ambiguousDb = database();
   const ambiguous = api(async () => { throw Object.assign(new Error("server lost reply"), { status: 500 }); });
   assert.equal(
-    await deliverWake(ambiguous, ambiguousDb, target(), "heartbeat", "a".repeat(64)),
+    await deliver(ambiguous, ambiguousDb, target(), "heartbeat", "a".repeat(64)),
     "ambiguous",
   );
   assert.equal(
-    await deliverWake(api(async () => assert.fail("retry must be suppressed")), ambiguousDb, target(), "heartbeat", "a".repeat(64)),
+    await deliver(api(async () => assert.fail("retry must be suppressed")), ambiguousDb, target(), "heartbeat", "a".repeat(64)),
     "coalesced",
+  );
+  resumeRetryableWakes(ambiguousDb, () => assert.fail("ambiguous wake must not resume"));
+});
+
+test("native wake receiving 429 remains durable and retries to acceptance", async () => {
+  const db = database();
+  const scheduled = [];
+  let sends = 0;
+  const bb = api(async () => {
+    sends += 1;
+    if (sends === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+    return { ok: true };
+  });
+
+  assert.equal(
+    await deliver(
+      bb,
+      db,
+      target(),
+      "worker:thread-a",
+      "a".repeat(64),
+      (wakeTarget, reservation) => scheduled.push({ wakeTarget, reservation }),
+    ),
+    "retrying",
+  );
+  assert.equal(db.prepare("SELECT pending FROM role_wake_dedupe").get().pending, 1);
+  assert.equal(scheduled.length, 1);
+  assert.equal(
+    await retryWake(
+      bb,
+      db,
+      scheduled[0].wakeTarget,
+      scheduled[0].reservation,
+      () => assert.fail("accepted retry must not reschedule"),
+    ),
+    "accepted",
+  );
+  assert.equal(sends, 2, "changing 429 to terminal must fail this delivery proof");
+});
+
+test("plugin reload resumes repeated 429s until the latest durable wake is accepted", async () => {
+  const db = database();
+  let sends = 0;
+  const bb = api(async () => {
+    sends += 1;
+    if (sends < 3) throw Object.assign(new Error("rate limited"), { status: 429 });
+    return { ok: true };
+  });
+
+  assert.equal(
+    await deliver(bb, db, target(), "worker:thread-a", "a".repeat(64), () => {}),
+    "retrying",
+  );
+  assert.equal(
+    await deliver(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    "coalesced",
+  );
+  const afterReload = [];
+  resumeRetryableWakes(
+    db,
+    (wakeTarget, reservation) => afterReload.push({ wakeTarget, reservation }),
+  );
+  assert.equal(afterReload.length, 1, "reload must recover the durable retry reservation");
+
+  const again = [];
+  assert.equal(
+    await retryWake(
+      bb,
+      db,
+      afterReload[0].wakeTarget,
+      afterReload[0].reservation,
+      (wakeTarget, reservation) => again.push({ wakeTarget, reservation }),
+    ),
+    "retrying",
+  );
+  assert.equal(again.length, 1);
+  assert.equal(
+    await retryWake(
+      bb,
+      db,
+      again[0].wakeTarget,
+      again[0].reservation,
+      () => assert.fail("accepted retry must not reschedule"),
+    ),
+    "accepted",
+  );
+  assert.equal(sends, 3);
+  assert.deepEqual(
+    { ...db.prepare("SELECT family, semantic_key, pending FROM role_wake_dedupe").get() },
+    { family: "worker:thread-b", semantic_key: "b".repeat(64), pending: 1 },
   );
 });
 
@@ -140,11 +242,11 @@ test("confirmed failure delivers a changed wake coalesced during the send", asyn
     }
     return { ok: true };
   });
-  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+  const first = deliver(bb, db, target(), "worker:thread-a", "a".repeat(64));
 
   await firstStarted.promise;
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-b", "b".repeat(64)),
     "coalesced",
   );
   firstResult.reject(Object.assign(new Error("bad request"), { status: 400 }));
@@ -167,17 +269,17 @@ test("repeated changes deliver the latest wake after each confirmed failure", as
     started[attempt].resolve();
     return results[attempt]?.promise ?? { ok: true };
   });
-  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+  const first = deliver(bb, db, target(), "worker:thread-a", "a".repeat(64));
 
   await started[0].promise;
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-b", "b".repeat(64)),
     "coalesced",
   );
   results[0].reject(Object.assign(new Error("first refused"), { status: 400 }));
   await started[1].promise;
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-c", "c".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-c", "c".repeat(64)),
     "coalesced",
   );
   results[1].reject(Object.assign(new Error("second refused"), { status: 400 }));
@@ -203,18 +305,18 @@ test("ambiguous changed-wake delivery retains the reservation and suppresses ret
     }
     throw Object.assign(new Error("server lost reply"), { status: 500 });
   });
-  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+  const first = deliver(bb, db, target(), "worker:thread-a", "a".repeat(64));
 
   await firstStarted.promise;
   assert.equal(
-    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    await deliver(bb, db, target(), "worker:thread-b", "b".repeat(64)),
     "coalesced",
   );
   firstResult.reject(Object.assign(new Error("bad request"), { status: 400 }));
   assert.equal(await first, "ambiguous");
   assert.equal(sends, 2);
   assert.equal(
-    await deliverWake(
+    await deliver(
       api(async () => assert.fail("ambiguous delivery must suppress retry")),
       db,
       target(),
@@ -231,14 +333,14 @@ test("confirmed failure releases an unchanged wake coalesced during the send", a
   let rejectSend;
   const started = new Promise((resolve) => { sendStarted = resolve; });
   const rejected = new Promise((_, reject) => { rejectSend = reject; });
-  const first = deliverWake(api(async () => {
+  const first = deliver(api(async () => {
     sendStarted();
     return rejected;
   }), db, target(), "heartbeat", "a".repeat(64));
 
   await started;
   assert.equal(
-    await deliverWake(
+    await deliver(
       api(async () => assert.fail("coalesced wake must not send")),
       db,
       target(),
@@ -256,8 +358,8 @@ test("role promotion retargets at the new role-thread key", async () => {
   const db = database();
   const sent = [];
   const bb = api(async ({ threadId }) => (sent.push(threadId), { ok: true }));
-  await deliverWake(bb, db, target("project-a", "role-old"), "heartbeat", "a".repeat(64));
-  await deliverWake(bb, db, target("project-a", "role-new"), "heartbeat", "a".repeat(64));
+  await deliver(bb, db, target("project-a", "role-old"), "heartbeat", "a".repeat(64));
+  await deliver(bb, db, target("project-a", "role-new"), "heartbeat", "a".repeat(64));
   assert.deepEqual(sent, ["role-old", "role-new"]);
 });
 
@@ -265,8 +367,8 @@ test("project rows are isolated even when role ids collide", async () => {
   const db = database();
   let sends = 0;
   const bb = api(async () => (++sends, { ok: true }));
-  await deliverWake(bb, db, target("project-a", "same-role"), "heartbeat", "a".repeat(64));
-  await deliverWake(bb, db, target("project-b", "same-role"), "heartbeat", "a".repeat(64));
+  await deliver(bb, db, target("project-a", "same-role"), "heartbeat", "a".repeat(64));
+  await deliver(bb, db, target("project-b", "same-role"), "heartbeat", "a".repeat(64));
   assert.equal(sends, 2);
   assert.equal(db.prepare("SELECT count(*) AS n FROM role_wake_dedupe").get().n, 2);
 });
@@ -276,7 +378,7 @@ test("malformed dedupe schema fails closed before send", async () => {
   db.exec("CREATE TABLE role_wake_dedupe (project_id TEXT)");
   let sends = 0;
   await assert.rejects(
-    deliverWake(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
+    deliver(api(async () => (++sends, { ok: true })), db, target(), "heartbeat", "a".repeat(64)),
     /no column named role_thread_id/,
   );
   assert.equal(sends, 0);
@@ -299,6 +401,7 @@ test("plugin registers the three abnormal events, idle re-arm, CLI, and one reco
       },
     },
     log: { warn: () => {}, info: () => {} },
+    onDispose: () => {},
   });
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.deepEqual(

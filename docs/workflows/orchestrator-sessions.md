@@ -62,8 +62,10 @@ consumes that ownership and liveness record and does not redefine its format.
 
 ## Standard watcher set
 
-Confirm the `exec-tracking` plugin is `running`, then start exactly two host
-watchers as persistent `Monitor` calls from the repository checkout:
+The session gate and sanctioned writing-spawn path require the configured BB
+server to report `exec-tracking` exactly `running`; stopped, disabled, missing,
+or unreadable status fails closed even when both host markers are fresh. Then
+start exactly two host watchers as persistent `Monitor` calls from the repository checkout:
 `pr-artifacts` and `heartbeat`. Substitute the exact collaboration project,
 current orchestrator session ID, and `$SD` session scratchpad. The script
 resolves the project's configured `bb.executable`, `github.repo`, and the
@@ -88,7 +90,9 @@ The watchers report changes; they do not decide that work is complete.
 - PR/review/check changes and deployed-version drift enter that same plugin
   authority through `bb silent-wake emit`. One plugin SQLite reservation
   coalesces producers and daemon reloads. Accepted and ambiguous sends suppress
-  retry. A confirmed send failure releases an unchanged reservation and makes
+  retry. A retryable 4xx (408, 425, or 429) keeps the reservation durable and
+  schedules one event-loop retry; plugin reload resumes that same reservation. A
+  terminal confirmed send failure releases an unchanged reservation and makes
   the host cycle fail before its baseline or marker advances; if another event
   changed that same reservation in flight, its claimant sends the latest state
   instead of releasing it unseen.

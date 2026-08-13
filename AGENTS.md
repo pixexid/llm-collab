@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 35 -->
+<!-- CONTRACT_VERSION: 36 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,14 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v36 (2026-08-12) makes the documented `exec-tracking` running-state
+check mechanical in the session gate and every sanctioned writing spawn. Two
+fresh host-watcher markers no longer admit a writer when the plugin is stopped,
+disabled, missing, or unreadable. A cached v35 session would keep trusting the
+two-marker set without proving the native abnormal-wake authority is live, so
+the invalidated-belief and new-obligation branches require the version signal.
+Related GH-805.
 
 Contract v35 (2026-08-12) replaces the host `worker-lifecycle` watcher and its
 visible role-thread tells with `exec-tracking` plugin events and one silent,

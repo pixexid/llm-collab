@@ -75,7 +75,10 @@ atomically reserves one pending semantic wake in its plugin SQLite database, and
 sends only `event; inspect canonical state` as all-`agent-only` input with
 `queue-if-active`. `thread.idle` re-arms the role or recovered worker. The
 `pr-artifacts` and `heartbeat` host watchers use `bb silent-wake emit`; no host
-wake cache or role-addressed watcher tell remains.
+wake cache or role-addressed watcher tell remains. Retryable 429 responses keep
+that same reservation durable for an event-loop retry, including after plugin
+reload; ambiguous responses retain a non-retryable reservation so duplicate
+delivery stays suppressed.
 
 ## Records ONLY executed-triple evidence (GH-710)
 

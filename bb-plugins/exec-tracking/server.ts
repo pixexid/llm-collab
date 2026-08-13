@@ -103,7 +103,9 @@ interface Settings {
 
 type Db = ReturnType<BbPluginApi["storage"]["database"]>;
 type RoleTarget = { project_id: string; thread_id: string };
-type WakeResult = "accepted" | "ambiguous" | "coalesced" | "confirmed-failure";
+type WakeResult = "accepted" | "ambiguous" | "coalesced" | "confirmed-failure" | "retrying";
+type ScheduleRetry = (target: RoleTarget, reservation: string) => void;
+const RETRY_DELAY_MS = 1_000;
 
 export const WAKE_SCHEMA = `CREATE TABLE IF NOT EXISTS role_wake_dedupe (
     project_id TEXT NOT NULL,
@@ -119,6 +121,22 @@ const WAKE_MIGRATIONS = [WAKE_SCHEMA];
 export default function plugin(bb: BbPluginApi): void {
   const db = bb.storage.database();
   bb.storage.migrate(db, WAKE_MIGRATIONS);
+  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRetry: ScheduleRetry = (target, reservation) => {
+    if (retryTimers.has(reservation)) return;
+    retryTimers.set(reservation, setTimeout(() => {
+      retryTimers.delete(reservation);
+      void retryWake(bb, db, target, reservation, scheduleRetry).catch((failure) => {
+        bb.log.warn(`exec-tracking: silent wake retry refused: ${describe(failure)}`);
+      });
+    }, RETRY_DELAY_MS));
+  };
+  bb.onDispose(() => {
+    if (loadTimer) clearTimeout(loadTimer);
+    for (const timer of retryTimers.values()) clearTimeout(timer);
+    retryTimers.clear();
+  });
   const settings = bb.settings.define({
     checkoutPath: {
       type: "string",
@@ -141,7 +159,7 @@ export default function plugin(bb: BbPluginApi): void {
   for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
     bb.events.on(event, ({ thread, ...payload }) => {
       const error = "error" in payload ? payload.error : null;
-      void wakeForThread(bb, settings, db, event, thread, error).catch((failure) => {
+      void wakeForThread(bb, settings, db, event, thread, error, scheduleRetry).catch((failure) => {
         bb.log.warn(`exec-tracking: ${event} wake refused for thread ${thread.id}: ${describe(failure)}`);
       });
     });
@@ -160,13 +178,14 @@ export default function plugin(bb: BbPluginApi): void {
       summary: "Emit a pr-artifacts or heartbeat semantic wake",
       usage: "bb silent-wake emit --project <id> --producer <pr-artifacts|heartbeat> --semantic <sha256>",
     }],
-    run: (argv) => runWakeCli(bb, settings, db, argv),
+    run: (argv) => runWakeCli(bb, settings, db, argv, scheduleRetry),
   });
 
   // The SDK is bind-gated during factory evaluation. One next-turn reconcile
   // covers abnormal threads that survived a daemon restart; it is not a poll.
-  setTimeout(() => {
-    void reconcileAbnormalThreads(bb, settings, db).catch((failure) => {
+  loadTimer = setTimeout(() => {
+    resumeRetryableWakes(db, scheduleRetry);
+    void reconcileAbnormalThreads(bb, settings, db, scheduleRetry).catch((failure) => {
       bb.log.warn(`exec-tracking: load reconcile refused: ${describe(failure)}`);
     });
   }, 0);
@@ -321,6 +340,7 @@ async function wakeForThread(
   event: string,
   thread: { id: string; projectId: string; updatedAt?: number; archivedAt?: number | null; deletedAt?: number | null },
   error: string | null,
+  scheduleRetry: ScheduleRetry,
 ): Promise<WakeResult> {
   const semantic = digest([
     event,
@@ -337,6 +357,7 @@ async function wakeForThread(
     { threadProject: thread.projectId },
     `worker:${thread.id}`,
     semantic,
+    scheduleRetry,
   );
 }
 
@@ -347,9 +368,10 @@ async function requestWake(
   scope: { threadProject: string } | { project: string },
   family: string,
   semantic: string,
+  scheduleRetry: ScheduleRetry,
 ): Promise<WakeResult> {
   const target = await resolveRole(settings, scope);
-  return deliverWake(bb, db, target, family, semantic);
+  return deliverWake(bb, db, target, family, semantic, scheduleRetry);
 }
 
 export async function deliverWake(
@@ -358,6 +380,7 @@ export async function deliverWake(
   target: RoleTarget,
   family: string,
   semantic: string,
+  scheduleRetry: ScheduleRetry,
 ): Promise<WakeResult> {
   const reservation = randomUUID();
   const claimed = db.prepare(`
@@ -380,6 +403,21 @@ export async function deliverWake(
     | { reservation: string | null }
     | undefined;
   if (claimed?.reservation !== reservation) return "coalesced";
+
+  return sendReservedWake(
+    bb, db, target, reservation, family, semantic, scheduleRetry,
+  );
+}
+
+async function sendReservedWake(
+  bb: BbPluginApi,
+  db: Db,
+  target: RoleTarget,
+  reservation: string,
+  family: string,
+  semantic: string,
+  scheduleRetry: ScheduleRetry,
+): Promise<WakeResult> {
 
   const settleConfirmedFailure = db.prepare(`
         UPDATE role_wake_dedupe
@@ -408,6 +446,28 @@ export async function deliverWake(
       });
       return "accepted";
     } catch (failure) {
+      if (isRetryableFailure(failure)) {
+        const retryReservation = `retry:${randomUUID()}`;
+        const retained = db.prepare(`
+          UPDATE role_wake_dedupe
+          SET reservation = ?
+          WHERE project_id = ? AND role_thread_id = ?
+            AND pending = 1 AND reservation = ?
+          RETURNING reservation
+        `).get(
+          retryReservation,
+          target.project_id,
+          target.thread_id,
+          reservation,
+        ) as { reservation: string } | undefined;
+        if (!retained) return "coalesced";
+        scheduleRetry(target, retryReservation);
+        bb.log.warn(
+          `exec-tracking: silent wake retryable failure for project ${target.project_id} `
+          + `role ${target.thread_id} (${failureStatus(failure)}); retry scheduled`,
+        );
+        return "retrying";
+      }
       if (!isConfirmedFailure(failure)) {
         // Timeout, disconnect, and 5xx can happen after server commit. Retaining
         // the atomic reservation is the only retry-safe outcome.
@@ -436,6 +496,57 @@ export async function deliverWake(
       attemptedFamily = latest.family;
       attemptedSemantic = latest.semantic_key;
     }
+  }
+}
+
+export async function retryWake(
+  bb: BbPluginApi,
+  db: Db,
+  target: RoleTarget,
+  retryReservation: string,
+  scheduleRetry: ScheduleRetry,
+): Promise<WakeResult> {
+  if (!retryReservation.startsWith("retry:")) return "coalesced";
+  const reservation = randomUUID();
+  const claimed = db.prepare(`
+    UPDATE role_wake_dedupe
+    SET reservation = ?
+    WHERE project_id = ? AND role_thread_id = ?
+      AND pending = 1 AND reservation = ?
+    RETURNING family, semantic_key
+  `).get(
+    reservation,
+    target.project_id,
+    target.thread_id,
+    retryReservation,
+  ) as { family: string; semantic_key: string } | undefined;
+  if (!claimed) return "coalesced";
+  return sendReservedWake(
+    bb,
+    db,
+    target,
+    reservation,
+    claimed.family,
+    claimed.semantic_key,
+    scheduleRetry,
+  );
+}
+
+export function resumeRetryableWakes(db: Db, scheduleRetry: ScheduleRetry): void {
+  const rows = db.prepare(`
+    SELECT project_id, role_thread_id, reservation
+    FROM role_wake_dedupe
+    WHERE pending = 1 AND reservation LIKE 'retry:%'
+  `).all() as Array<{
+    project_id: string;
+    role_thread_id: string;
+    reservation: string;
+  }>;
+  for (const row of rows) {
+    scheduleRetry(
+      { project_id: row.project_id, thread_id: row.role_thread_id },
+      row.reservation,
+    );
   }
 }
 
@@ -468,6 +579,7 @@ async function runWakeCli(
   settings: { get(): Promise<Settings> },
   db: Db,
   argv: string[],
+  scheduleRetry: ScheduleRetry,
 ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
   try {
     const parsed = parseWakeCli(argv);
@@ -478,6 +590,7 @@ async function runWakeCli(
       { project: parsed.project },
       parsed.producer,
       parsed.semantic,
+      scheduleRetry,
     );
     if (result === "confirmed-failure") {
       return { exitCode: 1, stderr: "silent wake confirmed failed; reservation released\n" };
@@ -510,6 +623,7 @@ async function reconcileAbnormalThreads(
   bb: BbPluginApi,
   settings: { get(): Promise<Settings> },
   db: Db,
+  scheduleRetry: ScheduleRetry,
 ): Promise<void> {
   const limit = 200;
   for (let offset = 0; ; offset += limit) {
@@ -521,7 +635,7 @@ async function reconcileAbnormalThreads(
     });
     for (const thread of threads) {
       if (thread.status === "error" || thread.status === "stopping") {
-        await wakeForThread(bb, settings, db, "load.reconcile", thread, null);
+        await wakeForThread(bb, settings, db, "load.reconcile", thread, null, scheduleRetry);
       }
     }
     if (threads.length < limit) return;
@@ -596,6 +710,11 @@ function digest(value: unknown): string {
 function isConfirmedFailure(failure: unknown): boolean {
   const status = failureStatusNumber(failure);
   return status !== null && status >= 400 && status < 500;
+}
+
+function isRetryableFailure(failure: unknown): boolean {
+  const status = failureStatusNumber(failure);
+  return status === 408 || status === 425 || status === 429;
 }
 
 function failureStatusNumber(failure: unknown): number | null {

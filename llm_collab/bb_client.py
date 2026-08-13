@@ -250,6 +250,14 @@ class BbQueued:
 
 
 @dataclass(frozen=True)
+class BbPluginStatus:
+    """One plugin's validated native running-state record."""
+
+    plugin_id: str
+    status: str
+
+
+@dataclass(frozen=True)
 class BbEvent:
     """One replayable bb thread event, keyed by its sequence number."""
 
@@ -670,6 +678,37 @@ class BbClient:
                 f"asked for thread {thread_id!r}; bb reported {thread.thread_id!r}",
             )
         return thread
+
+    def plugin_status(self, plugin_id: str) -> BbPluginStatus | BbRefusal:
+        """Read one exact plugin status from ``bb plugin list --json``."""
+        refusal = self._gate()
+        if refusal is not None:
+            return refusal
+        payload = self._read_json(["plugin", "list", "--json"])
+        if isinstance(payload, BbRefusal):
+            return payload
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("plugins"), list):
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                "plugin list envelope has no plugins array",
+            )
+        matches = [
+            entry
+            for entry in payload["plugins"]
+            if isinstance(entry, Mapping) and entry.get("id") == plugin_id
+        ]
+        if len(matches) != 1:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"plugin list returned {len(matches)} entries for {plugin_id!r}",
+            )
+        status = _require_str(matches[0], "status")
+        if status is None:
+            return BbRefusal(
+                REFUSAL_MALFORMED_RESPONSE,
+                f"plugin {plugin_id!r} has no string status",
+            )
+        return BbPluginStatus(plugin_id=plugin_id, status=status)
 
     def events_after(
         self, thread_id: str, after_seq: int, *, limit: int = MAX_EVENT_PAGE

@@ -847,6 +847,10 @@ class SessionGateTest(unittest.TestCase):
                 for name in WATCHER_NAMES
             ],
         )
+        plugin_check = patches.pop(
+            "exec_tracking_plugin_check",
+            (session_gate.PASS, "exec-tracking is running"),
+        )
         with mock.patch.object(
             session_gate.session_bootstrap, "tooling_currency", return_value=tooling
         ), mock.patch.object(session_gate, "check_markers", return_value=markers), mock.patch.object(
@@ -855,6 +859,8 @@ class SessionGateTest(unittest.TestCase):
             session_gate, "get_project", return_value={"id": project_id}
         ), mock.patch.object(
             session_gate, "handoff_line", return_value="handoff: synthetic"
+        ), mock.patch.object(
+            session_gate, "exec_tracking_plugin_check", return_value=plugin_check
         ):
             for target, replacement in patches.items():
                 mock.patch.object(session_gate, target, replacement).start()
@@ -1136,6 +1142,22 @@ class SessionGateTest(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertIn(f"watcher pr-artifacts [{LLM_COLLAB_PROJECT}]: FAIL", out)
+        self.assertIn("SESSION SETUP INCOMPLETE", out)
+
+    def test_fresh_markers_do_not_hide_stopped_exec_tracking_plugin(self) -> None:
+        code, out = self._run(
+            exec_tracking_plugin_check=(session_gate.FAIL, "exec-tracking is 'stopped'")
+        )
+        self.assertEqual(0, code)
+        self.assertIn("exec-tracking plugin: FAIL", out)
+        self.assertIn("SESSION SETUP INCOMPLETE", out)
+
+    def test_fresh_markers_do_not_hide_unreadable_exec_tracking_status(self) -> None:
+        code, out = self._run(
+            exec_tracking_plugin_check=(session_gate.UNKNOWN, "plugin list unreadable")
+        )
+        self.assertEqual(0, code)
+        self.assertIn("exec-tracking plugin: UNKNOWN", out)
         self.assertIn("SESSION SETUP INCOMPLETE", out)
 
     def test_output_names_the_project_it_checked(self) -> None:

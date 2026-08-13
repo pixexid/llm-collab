@@ -27,7 +27,7 @@ from _watcher_liveness import (  # noqa: E402
     evaluate_coverage,
     uncovered,
 )
-from llm_collab.bb_client import BbClient  # noqa: E402
+from llm_collab.bb_client import BbClient, BbPluginStatus  # noqa: E402
 from llm_collab.bb_continuation import (  # noqa: E402
     BbContinuationRefused,
     client_from_project,
@@ -197,6 +197,27 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(client, GateRefusal):
         _emit(f"REFUSED: {client.reason}: {client.detail}")
         return 1
+    if args.assignment_kind == "writing":
+        try:
+            plugin = client.plugin_status("exec-tracking")
+        except Exception as error:
+            _emit(
+                "REFUSED: exec_tracking_status_unreadable: "
+                f"{type(error).__name__}: {error}"
+            )
+            return 1
+        if not isinstance(plugin, BbPluginStatus):
+            _emit(
+                "REFUSED: exec_tracking_status_unreadable: "
+                f"{plugin.reason}: {plugin.detail}"
+            )
+            return 1
+        if plugin.status != "running":
+            _emit(
+                "REFUSED: exec_tracking_not_running: exec-tracking is "
+                f"{plugin.status!r}, not 'running'"
+            )
+            return 1
     state_dir = project_state_dir(plan.project_id) / "bb-assignments"
     outcome: object = None
     try:
