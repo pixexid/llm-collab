@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 36 -->
+<!-- CONTRACT_VERSION: 37 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,18 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v37 (2026-08-12) makes `pr_watch.py --settle-after-push` distinguish
+terminal exact-head connector evidence from an empty review container. A cached
+v36 watcher would keep treating any exact-head connector review object as
+`review_seen`, including an empty body whose inline threads still carry the
+findings, so it could advance on a false terminal signal. The shared classifier
+now keeps that shape in `review_pending`, accepts only body-bearing exact-head
+reviews or fully bound manual-request reactions, and reports
+`no_connector_review` when no exact-head evidence exists. The version signal is
+required because the cached worker would keep trusting the old false
+`review_seen` claim; a PR-level reaction remains non-terminal without durable
+pickup binding. Related GH-774.
 
 Contract v36 (2026-08-12) makes the documented `exec-tracking` running-state
 check mechanical in the session gate and every sanctioned writing spawn. Two

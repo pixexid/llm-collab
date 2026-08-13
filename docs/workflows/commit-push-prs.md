@@ -407,14 +407,30 @@ Before merging a head pushed during the current session, do one of these:
      --settle-after-push 60 --interval 15
    ```
 
-   Preserve its JSON result with the review evidence. `review_seen` means an
-   exact-head connector review arrived and must go through the normal
-   adjudication/settle gate; `no_connector_review` includes the exact head, the
-   observation `waited_seconds`, and the bounded `final_snapshot_seconds` grace
-   used to obtain its tail snapshot. The budget starts before the baseline read,
-   and the tail read has its own bounded grace so the observation deadline is
-   not silently extended by an unbounded request. A head change or a window
-   with no successful snapshot fails closed.
+   Preserve its JSON result with the review evidence. Its successful result has
+   stable `settle`, `head`, `waited_seconds`, `final_snapshot_seconds`, and
+   `connector_review_oids` fields:
+
+   - `review_seen` means a body-bearing connector review names the exact head,
+     or a connector `+1` is on the latest, unedited manual request comment
+     that names only that exact head. It is review evidence only; it never
+     declares the reviewed artifact set clean, and normal adjudication still
+     applies. A fresh PR-level `+1` has no trustworthy exact-head pickup
+     binding in this captured artifact model, so settle mode keeps it
+     non-terminal; the automatic reaction-only route remains
+     known-unsatisfiable until a durable binding exists.
+   - `review_pending` means an exact-head connector review container was
+     observed with no body. It proves pickup only; keep waiting for terminal
+     evidence and do not infer the finding list from the body. This state is
+     retained through the tail check if the container is temporarily absent.
+   - `no_connector_review` means no terminal or exact-head empty-review
+     evidence was captured. A pre-existing or otherwise unbound reaction is
+     not exact-head evidence.
+
+   The budget starts before the baseline read, and the tail read has its own
+   bounded grace so the observation deadline is not silently extended by an
+   unbounded request. A zero `final_snapshot_seconds` means no tail was needed.
+   A head change or failed tail snapshot fails closed.
 
 Re-check the exact head, merge state, and reviewed artifact set immediately
 before the merge. Immediately after merging, run `bin/pr_watch.py --once` once

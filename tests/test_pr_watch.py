@@ -31,6 +31,28 @@ def _sig(**over):
     return base
 
 
+def _review(head, body="reviewed"):
+    return {
+        "event": "reviewed",
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "commit_id": head,
+        "body": body,
+    }
+
+
+def _raw(*, timeline=None, reactions=None, comments=None,
+         comment_reactions=None, captured_at="2026-08-12T00:00:00Z"):
+    return {
+        "timeline": [] if timeline is None else timeline,
+        "reactions": [] if reactions is None else reactions,
+        "comments": [] if comments is None else comments,
+        "comment_reactions": (
+            [] if comment_reactions is None else comment_reactions
+        ),
+        "captured_at": captured_at,
+    }
+
+
 class PrWatchDiffTest(unittest.TestCase):
     def setUp(self):
         self.pw = load_pr_watch()
@@ -68,6 +90,18 @@ class PrWatchDiffTest(unittest.TestCase):
              "commit_id": "head-2"},
         ]
         self.assertEqual(["head-1", "head-2"], self.pw.connector_review_oids(timeline))
+
+    def test_connector_review_status_distinguishes_body_from_empty_container(self):
+        head = "a" * 40
+        self.assertEqual("review_seen", self.pw.connector_review_status(
+            [_review(head, "findings or boilerplate")], head
+        ))
+        self.assertEqual("review_pending", self.pw.connector_review_status(
+            [_review(head, " \n")], head
+        ))
+        self.assertEqual("no_connector_review", self.pw.connector_review_status(
+            [_review("b" * 40, "reviewed another head")], head
+        ))
 
     def test_merge_detected(self):
         old = _sig()
@@ -286,8 +320,15 @@ class PrWatchDiffTest(unittest.TestCase):
     def test_settle_after_push_accepts_review_for_the_captured_head(self):
         head = "a" * 40
         base = _sig(head=head, connector_review_oids=[])
-        current = _sig(head=head, connector_review_oids=[head])
-        snapshots = iter([(base, {}), (current, {})])
+        current = _sig(
+            head=head,
+            connector_review_oids=[head],
+            timeline=[["reviewed", 1]],
+        )
+        snapshots = iter([
+            (base, _raw()),
+            (current, _raw(timeline=[_review(head)])),
+        ])
         clock = iter([0.0, 0.0, 0.0, 0.5])
         with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
                 patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
@@ -298,6 +339,178 @@ class PrWatchDiffTest(unittest.TestCase):
         output = "".join(call.args[0] for call in stdout.write.call_args_list)
         self.assertIn('"settle": "review_seen"', output)
         self.assertIn(head, output)
+
+    def test_empty_review_at_baseline_ends_review_pending(self):
+        head = "a" * 40
+        base = _sig(head=head, connector_review_oids=[head])
+        snapshots = iter([
+            (base, _raw(timeline=[_review(head, "\n")])),
+            (base, _raw(timeline=[_review(head, "\n")])),
+        ])
+        clock = iter([0.0, 0.0, 1.0, 1.0])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "review_pending"', output)
+        self.assertNotIn('"settle": "review_seen"', output)
+
+    def test_empty_review_during_window_remains_review_pending(self):
+        head = "a" * 40
+        base = _sig(head=head, connector_review_oids=[])
+        pending = _sig(head=head, connector_review_oids=[head])
+        snapshots = iter([
+            (base, _raw()),
+            (pending, _raw(timeline=[_review(head, "")])),
+            (pending, _raw(timeline=[_review(head, "")])),
+        ])
+        clock = iter([0.0, 0.0, 0.0, 0.5, 1.0, 1.0])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "review_pending"', output)
+
+    def test_empty_review_only_in_tail_ends_review_pending(self):
+        head = "a" * 40
+        base = _sig(head=head, connector_review_oids=[])
+        tail = _sig(head=head, connector_review_oids=[head])
+        snapshots = iter([
+            (base, _raw()),
+            (tail, _raw(timeline=[_review(head, "\t")])),
+        ])
+        clock = iter([0.0, 0.0, 1.0, 1.0])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "review_pending"', output)
+
+    def test_new_bound_manual_request_reaction_is_review_seen(self):
+        head = "a" * 40
+        request = {
+            "id": 7,
+            "body": f"@codex review for the exact head `{head}`.",
+            "user": {"login": "pixexid"},
+            "created_at": "2026-08-12T00:00:00Z",
+            "updated_at": "2026-08-12T00:00:00Z",
+        }
+        reaction = {
+            "id": 8,
+            "content": "+1",
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "created_at": "2026-08-12T00:00:02Z",
+        }
+        base = _sig(head=head, connector_review_oids=[])
+        current = _sig(head=head, connector_review_oids=[], reactions=["c7:chatgpt-codex-connector[bot]:+1"])
+        snapshots = iter([
+            (base, _raw(comments=[request], captured_at="2026-08-12T00:00:01Z")),
+            (current, _raw(
+                comments=[request],
+                comment_reactions=[{"comment": request, "reaction": reaction}],
+                captured_at="2026-08-12T00:00:03Z",
+            )),
+        ])
+        clock = iter([0.0, 0.0, 0.0, 0.5])
+        with patch.object(self.pw, "snapshot", side_effect=lambda *args: next(snapshots)), \
+                patch.object(self.pw.time, "monotonic", side_effect=lambda: next(clock)), \
+                patch.object(self.pw.time, "sleep"), \
+                patch.object(sys, "stdout") as stdout:
+            self.assertEqual(0, self.pw.settle_after_push("x/y", "1", 1.0, 1.0))
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('"settle": "review_seen"', output)
+
+    def test_request_comment_accepts_exact_single_head_sha(self):
+        head = "a" * 40
+        request = {
+            "id": 7,
+            "body": f"@codex review for the exact head `{head}`.",
+            "created_at": "2026-08-12T00:00:00Z",
+        }
+        self.assertEqual(
+            [request], self.pw._request_comments(_raw(comments=[request]), head)
+        )
+
+    def test_request_comment_rejects_target_and_different_full_sha(self):
+        head = "a" * 40
+        other = "b" * 40
+        request = {
+            "id": 7,
+            "body": f"@codex review for `{head}` and `{other}`.",
+            "created_at": "2026-08-12T00:00:00Z",
+        }
+        self.assertEqual([], self.pw._request_comments(_raw(comments=[request]), head))
+
+    def test_fresh_pr_level_reaction_without_pickup_binding_is_nonterminal(self):
+        head = "a" * 40
+        reaction = {
+            "id": 8,
+            "content": "+1",
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "created_at": "2026-08-12T00:00:02Z",
+        }
+        self.assertEqual(
+            "no_connector_review",
+            self.pw.connector_artifact_status(
+                _raw(
+                    reactions=[reaction],
+                    captured_at="2026-08-12T00:00:03Z",
+                ),
+                head,
+                _raw(captured_at="2026-08-12T00:00:01Z"),
+            ),
+        )
+
+    def test_stale_reaction_is_not_exact_head_evidence(self):
+        head = "a" * 40
+        reaction = {
+            "id": 8,
+            "content": "+1",
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "created_at": "2026-08-12T00:00:00Z",
+        }
+        self.assertEqual(
+            "no_connector_review",
+            self.pw.connector_artifact_status(
+                _raw(
+                    reactions=[reaction],
+                    captured_at="2026-08-12T00:00:03Z",
+                ),
+                head,
+                _raw(captured_at="2026-08-12T00:00:01Z"),
+            ),
+        )
+
+    def test_unbound_reaction_with_prior_connector_artifact_is_not_terminal(self):
+        head = "a" * 40
+        prior = _review("b" * 40, "reviewed another head")
+        reaction = {
+            "id": 8,
+            "content": "+1",
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "created_at": "2026-08-12T00:00:02Z",
+        }
+        self.assertEqual(
+            "no_connector_review",
+            self.pw.connector_artifact_status(
+                _raw(
+                    timeline=[prior],
+                    reactions=[reaction],
+                    captured_at="2026-08-12T00:00:03Z",
+                ),
+                head,
+                _raw(
+                    timeline=[prior],
+                    captured_at="2026-08-12T00:00:01Z",
+                ),
+            ),
+        )
 
     def test_settle_after_push_refuses_a_changed_head(self):
         base = _sig(head="a" * 40, connector_review_oids=[])

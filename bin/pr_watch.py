@@ -18,7 +18,9 @@ Exit 0 on first change (prints a JSON delta), exit 3 on timeout, exit 2 on error
 # ponytail: poll+diff, not ETag/webhooks — 3 reqs/min vs a 5000/hr budget is free.
 """
 import argparse
+from datetime import datetime
 import json
+import re
 import subprocess
 import sys
 import time
@@ -43,6 +45,8 @@ MAX_REACTION_COMMENTS = 30
 # cumulative page count, and the deadline is observed before every request.
 MAX_SNAPSHOT_PAGES = 80
 CONNECTOR_LOGINS = frozenset({"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"})
+REVIEW_REQUEST_MARKER = "@codex review"
+FULL_SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
 # A tail snapshot starts after the observation window, so it gets one bounded
 # request budget of its own rather than making the observation deadline porous.
 FINAL_SNAPSHOT_GRACE = GH_CALL_TIMEOUT
@@ -177,6 +181,185 @@ def connector_review_oids(timeline):
     )
 
 
+def _connector_event(event):
+    return (event.get("user") or event.get("actor") or {}).get("login") in CONNECTOR_LOGINS
+
+
+def _exact_connector_reviews(timeline, head):
+    return [
+        event
+        for event in timeline
+        if event.get("event") == "reviewed"
+        and _connector_event(event)
+        and event.get("commit_id") == head
+    ]
+
+
+def connector_review_status(timeline, head):
+    """Classify only connector reviews bound to the captured head.
+
+    A review container without a body proves pickup, not a terminal verdict:
+    inline review threads carry the authoritative findings and are adjudicated
+    by the normal reviewed-artifact gate.
+    """
+    if not isinstance(timeline, list):
+        return "no_connector_review"
+    reviews = _exact_connector_reviews(timeline, head)
+    if any(isinstance(event.get("body"), str) and event["body"].strip()
+           for event in reviews):
+        return "review_seen"
+    if reviews:
+        return "review_pending"
+    return "no_connector_review"
+
+
+def _github_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def _reaction_artifacts(raw):
+    reactions = raw.get("reactions")
+    comment_reactions = raw.get("comment_reactions")
+    if not isinstance(reactions, list) or not isinstance(comment_reactions, list):
+        return []
+    return (
+        [{"comment": None, "reaction": reaction}
+         for reaction in reactions]
+        + comment_reactions
+    )
+
+
+def _reaction_key(artifact):
+    reaction = artifact.get("reaction") or {}
+    comment = artifact.get("comment") or {}
+    comment_id = comment.get("id")
+    return (comment_id, reaction["id"]) if reaction.get("id") is not None else None
+
+
+def _new_connector_plus_ones(current_raw, baseline_raw):
+    baseline_capture = _github_timestamp(baseline_raw.get("captured_at"))
+    current_capture = _github_timestamp(current_raw.get("captured_at"))
+    if baseline_capture is None or current_capture is None:
+        return []
+    baseline_keys = {
+        key for artifact in _reaction_artifacts(baseline_raw)
+        if (key := _reaction_key(artifact)) is not None
+    }
+    fresh = []
+    for artifact in _reaction_artifacts(current_raw):
+        reaction = artifact.get("reaction") or {}
+        if ((reaction.get("user") or {}).get("login") not in CONNECTOR_LOGINS
+                or reaction.get("content") != "+1"):
+            continue
+        created = _github_timestamp(reaction.get("created_at"))
+        key = _reaction_key(artifact)
+        if (created is not None and baseline_capture < created <= current_capture
+                and key is not None and key not in baseline_keys):
+            fresh.append(artifact)
+    return fresh
+
+
+def _full_sha_tokens(value):
+    if not isinstance(value, str):
+        return []
+    return [match.group(1).lower() for match in FULL_SHA_RE.finditer(value)]
+
+
+def _names_exact_head(value, head):
+    return isinstance(head, str) and _full_sha_tokens(value) == [head.lower()]
+
+
+def _request_comments(raw, head):
+    if not isinstance(raw.get("comments"), list):
+        return []
+    candidates = []
+    for comment in raw.get("comments", []):
+        body = comment.get("body") or ""
+        if REVIEW_REQUEST_MARKER not in body:
+            continue
+        shas = _full_sha_tokens(body)
+        if not isinstance(head, str) or head.lower() not in shas:
+            continue
+        if not _names_exact_head(body, head):
+            return []
+        created = _github_timestamp(comment.get("created_at"))
+        if created is None:
+            return []
+        candidates.append((created, comment))
+    if not candidates:
+        return []
+    return [comment for _, comment in sorted(candidates, key=lambda item: item[0])]
+
+
+def _manual_request_plus_one(current_raw, head, fresh):
+    requests = _request_comments(current_raw, head)
+    if not requests:
+        return False
+    latest = requests[-1]
+    latest_id = latest.get("id")
+    if latest_id is None or (latest.get("user") or {}).get("login") in CONNECTOR_LOGINS:
+        return False
+    for comment in current_raw.get("comments", []):
+        if ((comment.get("user") or {}).get("login") in CONNECTOR_LOGINS
+                and comment.get("id") != latest_id):
+            return False
+    if any((reaction.get("user") or {}).get("login") in CONNECTOR_LOGINS
+           for reaction in current_raw.get("reactions", [])):
+        return False
+    for artifact in current_raw.get("comment_reactions", []):
+        reaction = artifact.get("reaction") or {}
+        if ((reaction.get("user") or {}).get("login") not in CONNECTOR_LOGINS):
+            continue
+        if ((artifact.get("comment") or {}).get("id") != latest_id
+                or reaction.get("content") not in {"+1", "eyes"}):
+            return False
+    for artifact in fresh:
+        comment = artifact.get("comment") or {}
+        reaction = artifact.get("reaction") or {}
+        if comment.get("id") != latest_id:
+            continue
+        reacted = _github_timestamp(reaction.get("created_at"))
+        edited = _github_timestamp(comment.get("updated_at"))
+        if reacted is not None and edited is not None and edited < reacted:
+            return True
+    return False
+
+
+def connector_artifact_status(raw, head, baseline_raw=None, prior_pending=False,
+                              prior_connector_artifact=False):
+    """Return the one settle status for a bounded exact-head observation."""
+    review_status = connector_review_status(raw.get("timeline", []), head)
+    if review_status != "no_connector_review":
+        return review_status
+    if prior_pending:
+        return "review_pending"
+    if not all(key in raw for key in (
+            "timeline", "reactions", "comments", "comment_reactions", "captured_at")):
+        return "no_connector_review"
+    if (not isinstance(raw["timeline"], list)
+            or not isinstance(raw["reactions"], list)
+            or not isinstance(raw["comments"], list)
+            or not isinstance(raw["comment_reactions"], list)):
+        return "no_connector_review"
+    connector_artifact = any(
+        _connector_event(event) for event in raw.get("timeline", [])
+    )
+    if prior_connector_artifact or connector_artifact or baseline_raw is None:
+        return "no_connector_review"
+    fresh = _new_connector_plus_ones(raw, baseline_raw)
+    if _manual_request_plus_one(raw, head, fresh):
+        return "review_seen"
+    return "no_connector_review"
+
+
 def snapshot(repo, pr, deadline=None):
     """Return (signature_dict, raw) — one poll's worth of state. All gh calls
     share one page+deadline budget so the whole snapshot is bounded, not just
@@ -204,10 +387,12 @@ def snapshot(repo, pr, deadline=None):
             f"{len(comments)} comments exceeds MAX_REACTION_COMMENTS="
             f"{MAX_REACTION_COMMENTS}; failing closed rather than skip reactions"
         )
+    comment_reactions = []
     for comment in comments:
         cid = comment.get("id")
         for rxn in gh_array(f"repos/{repo}/issues/comments/{cid}/reactions", budget):
             rx.append(f"c{cid}:{rxn.get('user', {}).get('login')}:{rxn.get('content')}")
+            comment_reactions.append({"comment": comment, "reaction": rxn})
     rx = sorted(rx)
 
     checks = {}
@@ -227,7 +412,13 @@ def snapshot(repo, pr, deadline=None):
         "timeline": tl, "connector_review_oids": connector_review_oids(timeline),
         "reactions": rx, "checks": checks,
     }
-    return sig, {"timeline": timeline, "reactions": reactions}
+    return sig, {
+        "timeline": timeline,
+        "reactions": reactions,
+        "comments": comments,
+        "comment_reactions": comment_reactions,
+        "captured_at": datetime.now().astimezone().isoformat(),
+    }
 
 
 def diff(old, new, raw_new):
@@ -269,14 +460,22 @@ def settle_after_push(repo, pr, interval, timeout):
     started = time.monotonic()
     observation_deadline = started + timeout
     final_deadline = observation_deadline + FINAL_SNAPSHOT_GRACE
-    base, _ = snapshot(repo, pr, observation_deadline)
+    base, base_raw = snapshot(repo, pr, observation_deadline)
     head = base["head"]
-    if head in base.get("connector_review_oids", []):
+    pending_seen = False
+    connector_artifact_seen = False
+    status = connector_artifact_status(base_raw, head)
+    pending_seen = status == "review_pending"
+    connector_artifact_seen = any(
+        _connector_event(event) for event in base_raw.get("timeline", [])
+    )
+    if status == "review_seen":
         print(json.dumps({
-            "settle": "review_seen",
+            "settle": status,
             "head": head,
             "waited_seconds": 0,
-            "connector_review_oids": base["connector_review_oids"],
+            "final_snapshot_seconds": 0.0,
+            "connector_review_oids": base.get("connector_review_oids", []),
         }, indent=2))
         return 0
 
@@ -288,7 +487,7 @@ def settle_after_push(repo, pr, interval, timeout):
         if time.monotonic() >= observation_deadline:
             break
         try:
-            current, _ = snapshot(repo, pr, observation_deadline)
+            current, current_raw = snapshot(repo, pr, observation_deadline)
         except RuntimeError as error:
             print(f"WARN: {error}", file=sys.stderr)
             continue
@@ -302,16 +501,28 @@ def settle_after_push(repo, pr, interval, timeout):
                 file=sys.stderr,
             )
             return 2
-        if head in current.get("connector_review_oids", []):
+        status = connector_artifact_status(
+            current_raw,
+            head,
+            base_raw,
+            prior_pending=pending_seen,
+            prior_connector_artifact=connector_artifact_seen,
+        )
+        pending_seen = pending_seen or status == "review_pending"
+        connector_artifact_seen = connector_artifact_seen or any(
+            _connector_event(event) for event in current_raw.get("timeline", [])
+        )
+        if status == "review_seen":
             print(json.dumps({
-                "settle": "review_seen",
+                "settle": status,
                 "head": head,
                 "waited_seconds": round(time.monotonic() - started, 3),
-                "connector_review_oids": current["connector_review_oids"],
+                "final_snapshot_seconds": 0.0,
+                "connector_review_oids": current.get("connector_review_oids", []),
             }, indent=2))
             return 0
     try:
-        tail, _ = snapshot(repo, pr, final_deadline)
+        tail, tail_raw = snapshot(repo, pr, final_deadline)
     except RuntimeError as error:
         print(
             f"ERROR: no successful tail snapshot at the end of the settle window: {error}",
@@ -324,7 +535,15 @@ def settle_after_push(repo, pr, interval, timeout):
             file=sys.stderr,
         )
         return 2
+    status = connector_artifact_status(
+        tail_raw,
+        head,
+        base_raw,
+        prior_pending=pending_seen,
+        prior_connector_artifact=connector_artifact_seen,
+    )
     result = {
+        "settle": status,
         "head": head,
         "waited_seconds": timeout,
         "final_snapshot_seconds": round(
@@ -332,11 +551,7 @@ def settle_after_push(repo, pr, interval, timeout):
         ),
         "connector_review_oids": tail.get("connector_review_oids", []),
     }
-    if head in tail.get("connector_review_oids", []):
-        result["settle"] = "review_seen"
-        print(json.dumps(result, indent=2))
-        return 0
-    print(json.dumps({"settle": "no_connector_review", **result}, indent=2))
+    print(json.dumps(result, indent=2))
     return 0
 
 

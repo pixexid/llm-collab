@@ -1403,6 +1403,14 @@ class ReviewLoopCapContractTest(unittest.TestCase):
             text, "### Recent contract changes", "## Required Reading"
         )
         for phrase in (
+            "Contract v37",
+            "distinguish terminal exact-head connector evidence",
+            "cached v36 watcher",
+            "empty review container",
+            "review_pending",
+            "no_connector_review",
+            "PR-level reaction remains non-terminal without durable pickup binding",
+            "Related GH-774",
             "Contract v34",
             "fail-closed alternative activation-authority path",
             "cached v33 claimant",
