@@ -309,6 +309,26 @@ class MarkerOwnershipTest(unittest.TestCase):
         )
         self.assertFalse(any(v["acceptable"] for v in verdicts))
 
+    def test_stale_legacy_and_foreign_markers_skip_process_probes(self) -> None:
+        report = [
+            {"name": "stale", "status": "stale"},
+            {"name": "legacy", "status": "fresh", "session_id": "sess-current"},
+            {
+                "name": "foreign",
+                "status": "fresh",
+                "session_id": "sess-other",
+                "pid": os.getpid(),
+                "argv_marker": Path(sys.executable).name,
+            },
+        ]
+        with mock.patch.object(_watcher_liveness, "probe_process_liveness") as probe:
+            verdicts = evaluate_coverage(report, "sess-current")
+        self.assertEqual(
+            ["stale", "liveness_unverifiable", "foreign"],
+            [verdict["reason"] for verdict in verdicts],
+        )
+        probe.assert_not_called()
+
 
 class MarkerProcessLivenessTest(unittest.TestCase):
     @staticmethod
@@ -536,6 +556,56 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             _watcher_liveness.LIVENESS_PROBE_TIMEOUT_SECONDS,
         )
         self.assertEqual((True, None), result)
+
+    def test_process_probe_uses_caller_timeout(self) -> None:
+        runner = mock.Mock(
+            return_value=mock.Mock(exit_code=0, stdout="recorded argv marker")
+        )
+        with mock.patch.object(
+            _watcher_liveness, "subprocess_transport", return_value=runner
+        ):
+            result = _watcher_liveness.probe_process_liveness(
+                os.getpid(), "recorded argv marker", timeout_seconds=0.75
+            )
+        runner.assert_called_once_with(
+            ("-ww", "-p", str(os.getpid()), "-o", "command="),
+            0.75,
+        )
+        self.assertEqual((True, None), result)
+
+    def test_cumulative_probe_budget_stops_before_later_markers(self) -> None:
+        report = [
+            {
+                "name": f"synthetic-{index}",
+                "status": "fresh",
+                "session_id": "sess-current",
+                "pid": index,
+                "argv_marker": f"marker-{index}",
+            }
+            for index in range(3)
+        ]
+        probe = mock.Mock(side_effect=[(None, "stalled"), (None, "stalled")])
+        with mock.patch.object(
+            _watcher_liveness.time,
+            "monotonic",
+            side_effect=[100.0, 100.5, 101.25, 102.0],
+        ), mock.patch.object(
+            _watcher_liveness, "probe_process_liveness", probe
+        ):
+            verdicts = evaluate_coverage(report, "sess-current")
+        self.assertEqual(
+            ["liveness_unverifiable"] * 3,
+            [verdict["reason"] for verdict in verdicts],
+        )
+        self.assertFalse(any(verdict["acceptable"] for verdict in verdicts))
+        self.assertEqual(2, probe.call_count)
+        self.assertEqual(
+            [
+                mock.call(0, "marker-0", timeout_seconds=1.5),
+                mock.call(1, "marker-1", timeout_seconds=0.75),
+            ],
+            probe.call_args_list,
+        )
 
     def test_live_recycled_pid_with_wrong_argv_marker_is_owner_gone(self) -> None:
         process, _marker = self._live_watcher_process()

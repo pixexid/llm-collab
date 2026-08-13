@@ -343,7 +343,11 @@ def _argv_identity_matches(argv_marker: str, command: str) -> tuple[bool, str | 
     return True, None
 
 
-def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str | None]:
+def probe_process_liveness(
+    pid: int,
+    argv_marker: str,
+    timeout_seconds: float = LIVENESS_PROBE_TIMEOUT_SECONDS,
+) -> tuple[bool | None, str | None]:
     """Return paired / gone-or-mismatched / unverifiable, and never raise."""
     try:
         try:
@@ -357,7 +361,7 @@ def probe_process_liveness(pid: int, argv_marker: str) -> tuple[bool | None, str
             ("ps",), max_response_chars=LIVENESS_PROBE_MAX_RESPONSE_CHARS
         )(
             ("-ww", "-p", str(pid), "-o", "command="),
-            LIVENESS_PROBE_TIMEOUT_SECONDS,
+            timeout_seconds,
         )
         if result.exit_code != 0:
             # The process may have exited between kill(0) and ps. Distinguish
@@ -478,6 +482,7 @@ def evaluate_coverage(report, current_session_id):
     COVERED / FOREIGN / OWNER_UNKNOWN / OWNER_GONE / LIVENESS_UNVERIFIABLE for
     fresh markers, else the marker status (stale / absent / unreadable).
     """
+    deadline = time.monotonic() + LIVENESS_PROBE_TIMEOUT_SECONDS
     verdicts = []
     for entry in report:
         verdict = {"name": entry["name"], "acceptable": False}
@@ -496,21 +501,28 @@ def evaluate_coverage(report, current_session_id):
         elif "pid" not in entry or "argv_marker" not in entry:
             verdict["reason"] = LIVENESS_UNVERIFIABLE
             verdict["detail"] = "fresh legacy marker has no pid/argv_marker"
+        elif current_session_id is None:
+            verdict["reason"] = OWNER_UNKNOWN
+        elif entry.get("session_id") != current_session_id:
+            verdict["reason"] = FOREIGN
         else:
-            live, detail = probe_process_liveness(entry["pid"], entry["argv_marker"])
-            if detail is not None:
-                verdict["detail"] = detail
-            if live is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 verdict["reason"] = LIVENESS_UNVERIFIABLE
-            elif not live:
-                verdict["reason"] = OWNER_GONE
-            elif current_session_id is None:
-                verdict["reason"] = OWNER_UNKNOWN
-            elif entry.get("session_id") == current_session_id:
-                verdict["acceptable"] = True
-                verdict["reason"] = COVERED
+                verdict["detail"] = "cumulative liveness probe deadline exhausted"
             else:
-                verdict["reason"] = FOREIGN
+                live, detail = probe_process_liveness(
+                    entry["pid"], entry["argv_marker"], timeout_seconds=remaining
+                )
+                if detail is not None:
+                    verdict["detail"] = detail
+                if live is None:
+                    verdict["reason"] = LIVENESS_UNVERIFIABLE
+                elif not live:
+                    verdict["reason"] = OWNER_GONE
+                else:
+                    verdict["acceptable"] = True
+                    verdict["reason"] = COVERED
         verdicts.append(verdict)
     return verdicts
 
