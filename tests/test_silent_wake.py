@@ -101,6 +101,15 @@ class RoleGenerationTest(unittest.TestCase):
 
 
 class ResidualProducerTest(unittest.TestCase):
+    def test_watcher_config_requires_project_id(self) -> None:
+        with self.assertRaisesRegex(TypeError, "project_id"):
+            watch.WatcherConfig(
+                bb_executable=("configured-bb",),
+                bb_project_ids=("native-a",),
+                github_repo="owner/repo",
+                timeout_seconds=5.0,
+            )
+
     def config(self):
         return watch.WatcherConfig(
             bb_executable=("configured-bb", "--wrapper"),

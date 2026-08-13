@@ -384,9 +384,14 @@ export async function deliverWake(
   try {
     await bb.sdk.threads.send({
       threadId: target.thread_id,
-      input: [{ type: "text", text: WAKE_POINTER, visibility: "agent-only" }],
+      input: [{
+        type: "text",
+        text: WAKE_POINTER,
+        mentions: [],
+        visibility: "agent-only",
+      }],
       mode: "queue-if-active",
-    } as unknown as Parameters<BbPluginApi["sdk"]["threads"]["send"]>[0]);
+    });
     return "accepted";
   } catch (failure) {
     if (isConfirmedFailure(failure)) {
@@ -394,7 +399,8 @@ export async function deliverWake(
         UPDATE role_wake_dedupe
         SET pending = 0, reservation = NULL
         WHERE project_id = ? AND role_thread_id = ? AND reservation = ?
-      `).run(target.project_id, target.thread_id, reservation);
+          AND family = ? AND semantic_key = ?
+      `).run(target.project_id, target.thread_id, reservation, family, semantic);
       bb.log.warn(
         `exec-tracking: silent wake confirmed failed for project ${target.project_id} `
         + `role ${target.thread_id} (${failureStatus(failure)})`,

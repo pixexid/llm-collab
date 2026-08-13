@@ -37,6 +37,7 @@ RECORDED_THREAD_LIST = ROOT / "tests" / "fixtures" / "bb" / "thread_list.json"
 
 def config() -> watch.WatcherConfig:
     return watch.WatcherConfig(
+        project_id="project-a",
         bb_executable=(sys.executable, "-c", "print('accepted')"),
         bb_project_ids=("native-project",),
         github_repo="owner/repo",
@@ -46,6 +47,7 @@ def config() -> watch.WatcherConfig:
 
 def multi_project_config() -> watch.WatcherConfig:
     return watch.WatcherConfig(
+        project_id="project-a",
         bb_executable=(sys.executable, "-c", "print('accepted')"),
         bb_project_ids=("native-app", "native-docs"),
         github_repo="owner/repo",
@@ -878,6 +880,7 @@ class EnumerationTest(unittest.TestCase):
             "print(version if sys.argv[1:3] == ['settings', 'version'] else threads)\n"
         )
         bounded_config = watch.WatcherConfig(
+            project_id="project-a",
             bb_executable=(sys.executable, "-c", script),
             bb_project_ids=("native-project",),
             github_repo="owner/repo",

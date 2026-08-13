@@ -120,11 +120,11 @@ def require_event_delivery(emit: Callable[[str], object], line: str) -> None:
 
 @dataclass(frozen=True)
 class WatcherConfig:
+    project_id: str
     bb_executable: tuple[str, ...]
     bb_project_ids: tuple[str, ...]
     github_repo: str
     timeout_seconds: float
-    project_id: str = "project-a"
 
 
 def project_config(project_id: str, mode: str) -> WatcherConfig:

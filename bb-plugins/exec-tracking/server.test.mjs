@@ -39,7 +39,12 @@ test("concurrent native and CLI producers reserve one pending wake", async () =>
   assert.equal(sends.length, 1);
   assert.deepEqual(sends[0], {
     threadId: "role-a",
-    input: [{ type: "text", text: "event; inspect canonical state", visibility: "agent-only" }],
+    input: [{
+      type: "text",
+      text: "event; inspect canonical state",
+      mentions: [],
+      visibility: "agent-only",
+    }],
     mode: "queue-if-active",
   });
 });
@@ -110,6 +115,63 @@ test("confirmed failure releases while ambiguous failure suppresses retry", asyn
     await deliverWake(api(async () => assert.fail("retry must be suppressed")), ambiguousDb, target(), "heartbeat", "a".repeat(64)),
     "coalesced",
   );
+});
+
+test("confirmed failure retains a changed wake coalesced during the send", async () => {
+  const db = database();
+  let sendStarted;
+  let rejectSend;
+  const started = new Promise((resolve) => { sendStarted = resolve; });
+  const rejected = new Promise((_, reject) => { rejectSend = reject; });
+  const first = deliverWake(api(async () => {
+    sendStarted();
+    return rejected;
+  }), db, target(), "worker:thread-a", "a".repeat(64));
+
+  await started;
+  assert.equal(
+    await deliverWake(
+      api(async () => assert.fail("coalesced wake must not send")),
+      db,
+      target(),
+      "worker:thread-b",
+      "b".repeat(64),
+    ),
+    "coalesced",
+  );
+  rejectSend(Object.assign(new Error("bad request"), { status: 400 }));
+  assert.equal(await first, "confirmed-failure");
+  assert.deepEqual(
+    { ...db.prepare("SELECT family, semantic_key, pending FROM role_wake_dedupe").get() },
+    { family: "worker:thread-b", semantic_key: "b".repeat(64), pending: 1 },
+  );
+});
+
+test("confirmed failure releases an unchanged wake coalesced during the send", async () => {
+  const db = database();
+  let sendStarted;
+  let rejectSend;
+  const started = new Promise((resolve) => { sendStarted = resolve; });
+  const rejected = new Promise((_, reject) => { rejectSend = reject; });
+  const first = deliverWake(api(async () => {
+    sendStarted();
+    return rejected;
+  }), db, target(), "heartbeat", "a".repeat(64));
+
+  await started;
+  assert.equal(
+    await deliverWake(
+      api(async () => assert.fail("coalesced wake must not send")),
+      db,
+      target(),
+      "heartbeat",
+      "a".repeat(64),
+    ),
+    "coalesced",
+  );
+  rejectSend(Object.assign(new Error("bad request"), { status: 400 }));
+  assert.equal(await first, "confirmed-failure");
+  assert.equal(db.prepare("SELECT pending FROM role_wake_dedupe").get().pending, 0);
 });
 
 test("role promotion retargets at the new role-thread key", async () => {
