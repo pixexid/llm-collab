@@ -314,7 +314,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
     @staticmethod
     def _report(pid: int, argv_marker: str) -> list[dict]:
         return [{
-            "name": "worker-lifecycle",
+            "name": "pr-artifacts",
             "status": "fresh",
             "age_seconds": 1.0,
             "session_id": "sess-current",
@@ -328,7 +328,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         session_id="sess-current",
     ) -> tuple[subprocess.Popen, str]:
         marker = (
-            f"orchestrator_watch.py worker-lifecycle --project {project_id} "
+            f"orchestrator_watch.py pr-artifacts --project {project_id} "
             f"--session {session_id}"
         )
         process = subprocess.Popen([
@@ -336,7 +336,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             "-c",
             "import time; time.sleep(30)",
             "orchestrator_watch.py",
-            "worker-lifecycle",
+            "pr-artifacts",
             "--project",
             project_id,
             "--session",
@@ -372,42 +372,42 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         script-token comparison stops tolerating a path-qualified argv.
         """
         marker = (
-            "orchestrator_watch.py worker-lifecycle "
+            "orchestrator_watch.py pr-artifacts "
             "--project project-a --session sess-current"
         )
         spellings = {
             "name-first": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "project-a", "--session", "sess-current",
             ],
             "name-trailing": [
                 "orchestrator_watch.py",
                 "--project", "project-a", "--session", "sess-current",
-                "worker-lifecycle",
+                "pr-artifacts",
             ],
             "interposed-flag": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--state-dir", "/tmp/owatch-x",
                 "--project", "project-a", "--session", "sess-current",
             ],
             "wrapper-and-path": [
                 "llm-collab", "/opt/runtime/bin/orchestrator_watch.py",
-                "worker-lifecycle",
+                "pr-artifacts",
                 "--project", "project-a", "--session", "sess-current",
             ],
             "equals-form": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project=project-a", "--session=sess-current",
             ],
             "option-terminator": [
                 "orchestrator_watch.py",
                 "--project", "project-a", "--session", "sess-current",
-                "--", "worker-lifecycle",
+                "--", "pr-artifacts",
             ],
             "wrapper-and-watcher-option-terminators": [
                 "env", "--", "/opt/runtime/bin/orchestrator_watch.py",
                 "--project", "project-a", "--session", "sess-current",
-                "--", "worker-lifecycle",
+                "--", "pr-artifacts",
             ],
         }
         for label, argv in spellings.items():
@@ -434,7 +434,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
         flag's value.
         """
         marker = (
-            "orchestrator_watch.py worker-lifecycle "
+            "orchestrator_watch.py pr-artifacts "
             "--project project-a --session sess-current"
         )
         rejected = {
@@ -443,46 +443,46 @@ class MarkerProcessLivenessTest(unittest.TestCase):
                 "--session", "sess-current", "heartbeat",
             ],
             "project-prefix": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "project-a-2", "--session", "sess-current",
             ],
             "foreign-session": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "project-a", "--session", "sess-other",
             ],
             "value-present-but-not-as-this-flag": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "sess-current", "--session", "project-a",
             ],
             # The mode name appears, but as a FLAG VALUE. The watcher's own
             # parser would never read it as the mode, so neither may we.
             "mode-name-only-as-a-flag-value": [
                 "orchestrator_watch.py", "heartbeat",
-                "--title", "worker-lifecycle",
+                "--title", "pr-artifacts",
                 "--project", "project-a", "--session", "sess-current",
             ],
             # Ambiguous identity is not identity: there is no single answer to
             # "which project is this process for".
             "repeated-project-flag": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "project-a", "--project", "other",
                 "--session", "sess-current",
             ],
             "repeated-session-flag-equals-form": [
-                "orchestrator_watch.py", "worker-lifecycle",
+                "orchestrator_watch.py", "pr-artifacts",
                 "--project", "project-a",
                 "--session=sess-current", "--session=sess-other",
             ],
             # The script name present only as a flag value, same hole one level up.
             "script-only-as-a-flag-value": [
                 "python3.11", "--log", "orchestrator_watch.py",
-                "worker-lifecycle",
+                "pr-artifacts",
                 "--project", "project-a", "--session", "sess-current",
             ],
             # argparse stops recognizing options after `--`; those tokens
             # cannot satisfy the marker's identifying flag pairs.
             "identifying-flags-after-option-terminator": [
-                "orchestrator_watch.py", "worker-lifecycle", "--",
+                "orchestrator_watch.py", "pr-artifacts", "--",
                 "--project", "project-a", "--session", "sess-current",
             ],
         }
@@ -504,19 +504,19 @@ class MarkerProcessLivenessTest(unittest.TestCase):
     def test_value_less_wrapper_option_does_not_hide_the_script(self) -> None:
         """A known wrapper flag without a value leaves the script positional."""
         marker = (
-            "orchestrator_watch.py worker-lifecycle "
+            "orchestrator_watch.py pr-artifacts "
             "--project project-a --session sess-current"
         )
         matched, detail = _watcher_liveness._argv_identity_matches(
             marker,
             "env --ignore-environment /opt/runtime/bin/orchestrator_watch.py "
-            "worker-lifecycle --project project-a --session sess-current",
+            "pr-artifacts --project project-a --session sess-current",
         )
         self.assertTrue(matched, detail)
         matched, _detail = _watcher_liveness._argv_identity_matches(
             marker,
             "other-wrapper --ignore-environment orchestrator_watch.py "
-            "worker-lifecycle --project project-a --session sess-current",
+            "pr-artifacts --project project-a --session sess-current",
         )
         self.assertFalse(matched)
 
@@ -561,7 +561,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             verdict = evaluate_coverage(
                 self._report(
                     process.pid,
-                    "orchestrator_watch.py worker-lifecycle --project alpha "
+                    "orchestrator_watch.py pr-artifacts --project alpha "
                     "--session sess-current",
                 ),
                 "sess-current",
@@ -578,7 +578,7 @@ class MarkerProcessLivenessTest(unittest.TestCase):
             verdict = evaluate_coverage(
                 self._report(
                     process.pid,
-                    "orchestrator_watch.py worker-lifecycle --project project-a "
+                    "orchestrator_watch.py pr-artifacts --project project-a "
                     "--session sess-current",
                 ),
                 "sess-current",
@@ -625,21 +625,21 @@ class MarkerWriterTest(unittest.TestCase):
             ), mock.patch.object(
                 _watcher_liveness, "get_project", side_effect=self._registered
             ):
-                marker = write_marker("project-a", "worker-lifecycle", "sess-1")
+                marker = write_marker("project-a", "pr-artifacts", "sess-1")
                 first = json.loads(marker.read_text(encoding="utf-8"))
-                again = write_marker("project-a", "worker-lifecycle", "sess-1")
+                again = write_marker("project-a", "pr-artifacts", "sess-1")
                 second = json.loads(again.read_text(encoding="utf-8"))
                 report = check_markers("project-a")
         self.assertEqual("sess-1", first["session_id"])
         self.assertEqual("project-a", first["project_id"])
         self.assertEqual(os.getpid(), first["pid"])
         self.assertEqual(
-            "orchestrator_watch.py worker-lifecycle --project project-a "
+            "orchestrator_watch.py pr-artifacts --project project-a "
             "--session sess-1",
             first["argv_marker"],
         )
         self.assertEqual(first["started_at"], second["started_at"])
-        own = next(e for e in report if e["name"] == "worker-lifecycle")
+        own = next(e for e in report if e["name"] == "pr-artifacts")
         self.assertEqual("fresh", own["status"])
         self.assertEqual("sess-1", own["session_id"])
 
@@ -847,6 +847,10 @@ class SessionGateTest(unittest.TestCase):
                 for name in WATCHER_NAMES
             ],
         )
+        plugin_check = patches.pop(
+            "exec_tracking_plugin_check",
+            (session_gate.PASS, "exec-tracking is running"),
+        )
         with mock.patch.object(
             session_gate.session_bootstrap, "tooling_currency", return_value=tooling
         ), mock.patch.object(session_gate, "check_markers", return_value=markers), mock.patch.object(
@@ -855,6 +859,8 @@ class SessionGateTest(unittest.TestCase):
             session_gate, "get_project", return_value={"id": project_id}
         ), mock.patch.object(
             session_gate, "handoff_line", return_value="handoff: synthetic"
+        ), mock.patch.object(
+            session_gate, "exec_tracking_plugin_check", return_value=plugin_check
         ):
             for target, replacement in patches.items():
                 mock.patch.object(session_gate, target, replacement).start()
@@ -1104,7 +1110,7 @@ class SessionGateTest(unittest.TestCase):
                 )
                 self.assertIn(f"project: {project_id}", output.getvalue())
                 self.assertIn(
-                    f"watcher worker-lifecycle [{project_id}]: PASS", output.getvalue()
+                    f"watcher pr-artifacts [{project_id}]: PASS", output.getvalue()
                 )
 
     def test_broken_bb_probe_is_unknown_not_a_pass(self) -> None:
@@ -1135,7 +1141,23 @@ class SessionGateTest(unittest.TestCase):
             ]
         )
         self.assertEqual(0, code)
-        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: FAIL", out)
+        self.assertIn(f"watcher pr-artifacts [{LLM_COLLAB_PROJECT}]: FAIL", out)
+        self.assertIn("SESSION SETUP INCOMPLETE", out)
+
+    def test_fresh_markers_do_not_hide_stopped_exec_tracking_plugin(self) -> None:
+        code, out = self._run(
+            exec_tracking_plugin_check=(session_gate.FAIL, "exec-tracking is 'stopped'")
+        )
+        self.assertEqual(0, code)
+        self.assertIn("exec-tracking plugin: FAIL", out)
+        self.assertIn("SESSION SETUP INCOMPLETE", out)
+
+    def test_fresh_markers_do_not_hide_unreadable_exec_tracking_status(self) -> None:
+        code, out = self._run(
+            exec_tracking_plugin_check=(session_gate.UNKNOWN, "plugin list unreadable")
+        )
+        self.assertEqual(0, code)
+        self.assertIn("exec-tracking plugin: UNKNOWN", out)
         self.assertIn("SESSION SETUP INCOMPLETE", out)
 
     def test_output_names_the_project_it_checked(self) -> None:
@@ -1161,7 +1183,7 @@ class SessionGateTest(unittest.TestCase):
             ),
         )
         self.assertEqual(0, code)
-        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: PASS", out)
+        self.assertIn(f"watcher pr-artifacts [{LLM_COLLAB_PROJECT}]: PASS", out)
         self.assertIn("owned by this session", out)
         self.assertNotIn("FOREIGN", out)
         self.assertNotIn("SESSION SETUP INCOMPLETE", out)
@@ -1170,13 +1192,13 @@ class SessionGateTest(unittest.TestCase):
         process = subprocess.Popen([sys.executable, "-c", "pass"])
         process.wait(timeout=5)
         report = [{
-            "name": "worker-lifecycle",
+            "name": "pr-artifacts",
             "status": "fresh",
             "age_seconds": 1.0,
             "session_id": "sess-own",
             "pid": process.pid,
             "argv_marker": (
-                "orchestrator_watch.py worker-lifecycle "
+                "orchestrator_watch.py pr-artifacts "
                 f"--project {LLM_COLLAB_PROJECT}"
             ),
         }]
@@ -1205,7 +1227,7 @@ class SessionGateTest(unittest.TestCase):
             ),
         )
         self.assertEqual(0, code)
-        self.assertIn(f"watcher worker-lifecycle [{LLM_COLLAB_PROJECT}]: FAIL", out)
+        self.assertIn(f"watcher pr-artifacts [{LLM_COLLAB_PROJECT}]: FAIL", out)
         self.assertIn("FOREIGN session sess-predecessor", out)
         self.assertIn("TaskStop", out)
         self.assertIn("SESSION SETUP INCOMPLETE", out)

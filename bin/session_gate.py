@@ -33,6 +33,8 @@ from _helpers import PROJECTS_FILE, get_project, projects_registry_missing  # no
 from _watcher_liveness import check_markers, evaluate_coverage, handoff_file  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     PINNED_BB_VERSION,
+    BbClient,
+    BbPluginStatus,
     bb_executable_from_project,
     subprocess_transport,
 )
@@ -123,6 +125,27 @@ def bb_version_check(project_id: str) -> tuple[str, str]:
     if current == PINNED_BB_VERSION:
         return PASS, f"bb {current} == pinned {PINNED_BB_VERSION}"
     return FAIL, f"bb {current} != pinned {PINNED_BB_VERSION} — see {ORCHESTRATOR_DOC}"
+
+
+def exec_tracking_plugin_check(project_id: str) -> tuple[str, str]:
+    """The configured BB server must report exec-tracking exactly running."""
+    try:
+        executable = bb_executable_from_project(get_project(project_id))
+        client = BbClient(
+            subprocess_transport(
+                executable, max_response_chars=BB_PROBE_MAX_RESPONSE_CHARS
+            ),
+            enabled=True,
+            timeout_seconds=BB_PROBE_TIMEOUT_SECONDS,
+        )
+        result = client.plugin_status("exec-tracking")
+    except Exception as error:
+        return UNKNOWN, f"exec-tracking probe could not run: {type(error).__name__}: {error}"
+    if not isinstance(result, BbPluginStatus):
+        return UNKNOWN, f"exec-tracking status unreadable: {result.reason}: {result.detail}"
+    if result.status == "running":
+        return PASS, "exec-tracking is running"
+    return FAIL, f"exec-tracking is {result.status!r}, not running — see {ORCHESTRATOR_DOC}"
 
 
 def tooling_check() -> tuple[str, str]:
@@ -242,6 +265,10 @@ def run_checks(project_id: str, own_session_id: str | None = None) -> bool:
         clean = False
     else:
         _line("contract", PASS, f"AGENTS.md version {version}")
+
+    status, detail = exec_tracking_plugin_check(project_id)
+    _line("exec-tracking plugin", status, detail)
+    clean = clean and status == PASS
 
     for check, status, detail in watcher_checks(project_id, own_session_id):
         _line(check, status, detail)

@@ -4,7 +4,8 @@ Custom bb plugin — the **task/execution-tracking** plugin (GH-630). This check
 first capability is the **executed-triple recorder** (GH-710 / GH-617): on
 `thread.created` it records the `(provider, model, reasoning_level)` triple that
 actually ran — and ONLY executed evidence. A non-executed result is refused
-observably.
+observably. It also owns GH-805's silent abnormal-thread wake and the single CLI
+ingress used by the two residual host watchers.
 
 > **Operator procedure (build, typecheck, install, config) lives in
 > [`docs/workflows/exec-tracking-plugin.md`](../../docs/workflows/exec-tracking-plugin.md).**
@@ -38,9 +39,9 @@ than restating it.
 
 Custom bb plugins live as siblings under `bb-plugins/`:
 
-- `bb-plugins/exec-tracking/` — **this plugin**. Executed-triple evidence (this
-  recorder) and, later, task/execution tracking carrying the gaps the builtin
-  `tasks` could not supply.
+- `bb-plugins/exec-tracking/` — **this plugin**. Executed-triple evidence, the
+  silent abnormal-thread wake authority, and later task/execution tracking for
+  gaps the builtin `tasks` cannot supply.
 - `bb-plugins/fan-out/` — a **future** orchestration/fan-out plugin (per-agent
   worktree isolation, fail-closed behaviour), added as a new sibling later.
 
@@ -66,6 +67,18 @@ An options object that cannot be resolved is recorded as an explicit `unresolved
 row, so an absent row and a failed resolution are distinguishable. The plugin
 **records, never gates**: `thread.created` handlers have no veto hook, so
 enforcement stays at the CLI call sites.
+
+For orchestration liveness, the plugin observes `thread.failed`,
+`thread.deleted`, and `thread.archived`, plus one load-time reconciliation of
+surviving abnormal threads. It resolves the current project role at fire time,
+atomically reserves one pending semantic wake in its plugin SQLite database, and
+sends only `event; inspect canonical state` as all-`agent-only` input with
+`queue-if-active`. `thread.idle` re-arms the role or recovered worker. The
+`pr-artifacts` and `heartbeat` host watchers use `bb silent-wake emit`; no host
+wake cache or role-addressed watcher tell remains. Retryable 429 responses keep
+that same reservation durable for an event-loop retry, including after plugin
+reload; ambiguous responses retain a non-retryable reservation so duplicate
+delivery stays suppressed.
 
 ## Records ONLY executed-triple evidence (GH-710)
 

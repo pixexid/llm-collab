@@ -25,6 +25,7 @@ from llm_collab.bb_client import (  # noqa: E402
     REFUSAL_TRANSPORT_FAILED,
     REFUSAL_VERSION_MISMATCH,
     BbClient,
+    BbPluginStatus,
     BbProfile,
     BbRefusal,
     BbThread,
@@ -442,6 +443,34 @@ def bb_transport(*, environment_id: str = "env_expected"):
     return transport, calls
 
 
+class BbClientPluginStatusTest(unittest.TestCase):
+    def test_plugin_status_requires_one_exact_running_record(self) -> None:
+        responses = iter([
+            BbTransportResult(0, json.dumps({"currentVersion": PINNED_BB_VERSION}), ""),
+            BbTransportResult(0, json.dumps({"plugins": [
+                {"id": "exec-tracking", "status": "running"},
+                {"id": "other", "status": "disabled"},
+            ]}), ""),
+        ])
+        client = BbClient(lambda _argv, _timeout: next(responses), enabled=True)
+        self.assertEqual(
+            BbPluginStatus("exec-tracking", "running"),
+            client.plugin_status("exec-tracking"),
+        )
+
+    def test_plugin_status_refuses_missing_or_unreadable_record(self) -> None:
+        for envelope in ({"plugins": []}, {"plugins": [{"id": "exec-tracking"}]}):
+            responses = iter([
+                BbTransportResult(0, json.dumps({"currentVersion": PINNED_BB_VERSION}), ""),
+                BbTransportResult(0, json.dumps(envelope), ""),
+            ])
+            with self.subTest(envelope=envelope):
+                result = BbClient(
+                    lambda _argv, _timeout: next(responses), enabled=True
+                ).plugin_status("exec-tracking")
+                self.assertIsInstance(result, BbRefusal)
+
+
 class BbClientSpawnOptionsTest(unittest.TestCase):
     def test_pre_task_refusals_prove_no_spawn_call_was_attempted(self) -> None:
         calls = []
@@ -762,6 +791,7 @@ class WatcherGateCliTest(unittest.TestCase):
 
     def _running_client(self) -> mock.Mock:
         client = mock.Mock()
+        client.plugin_status.return_value = BbPluginStatus("exec-tracking", "running")
         client.spawn.return_value = BbThread(
             "thr_worker1", "proj_llm_collab", "env_expected", "codex", "starting"
         )
@@ -788,6 +818,56 @@ class WatcherGateCliTest(unittest.TestCase):
         rendered = emit.call_args.args[0]
         self.assertIn("watcher_markers_not_fresh", rendered)
         self.assertIn("--allow-stale-watchers", rendered)
+        self.assertEqual(1, exit_code)
+
+    def test_fresh_markers_do_not_admit_writer_when_exec_tracking_is_not_running(self) -> None:
+        for status in ("stopped", "disabled"):
+            plan = planned(assignment_kind="writing")
+            client = self._running_client()
+            client.plugin_status.return_value = BbPluginStatus("exec-tracking", status)
+            with self.subTest(status=status), mock.patch.object(
+                bb_spawn, "get_project", return_value=REGISTRY
+            ), mock.patch.object(
+                bb_spawn, "resolve_project_repo_path", return_value=REPO
+            ), mock.patch.object(
+                bb_spawn, "plan_spawn", return_value=plan
+            ), mock.patch.object(
+                bb_spawn, "check_markers",
+                return_value=marker_report("fresh", session_id="sess-own"),
+            ), mock.patch.object(
+                bb_spawn, "runtime_id_from_env", return_value="sess-own"
+            ), mock.patch.object(
+                bb_spawn, "_configured_client", return_value=client
+            ), mock.patch.object(
+                bb_spawn, "persist_assignment"
+            ) as persist, mock.patch.object(bb_spawn, "_emit") as emit:
+                exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+            client.spawn.assert_not_called()
+            persist.assert_not_called()
+            self.assertIn("exec_tracking_not_running", emit.call_args.args[0])
+            self.assertEqual(1, exit_code)
+
+    def test_fresh_markers_do_not_admit_writer_when_plugin_status_is_unreadable(self) -> None:
+        plan = planned(assignment_kind="writing")
+        client = self._running_client()
+        client.plugin_status.return_value = BbRefusal(
+            REFUSAL_TRANSPORT_FAILED, "plugin list unavailable"
+        )
+        with mock.patch.object(bb_spawn, "get_project", return_value=REGISTRY), mock.patch.object(
+            bb_spawn, "resolve_project_repo_path", return_value=REPO
+        ), mock.patch.object(bb_spawn, "plan_spawn", return_value=plan), mock.patch.object(
+            bb_spawn, "check_markers", return_value=marker_report("fresh", session_id="sess-own")
+        ), mock.patch.object(
+            bb_spawn, "runtime_id_from_env", return_value="sess-own"
+        ), mock.patch.object(
+            bb_spawn, "_configured_client", return_value=client
+        ), mock.patch.object(bb_spawn, "persist_assignment") as persist, mock.patch.object(
+            bb_spawn, "_emit"
+        ) as emit:
+            exit_code = bb_spawn.main(WRITING_CLI_ARGS)
+        client.spawn.assert_not_called()
+        persist.assert_not_called()
+        self.assertIn("exec_tracking_status_unreadable", emit.call_args.args[0])
         self.assertEqual(1, exit_code)
 
     def test_writing_spawn_with_a_broken_marker_probe_refuses(self) -> None:

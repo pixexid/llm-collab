@@ -37,7 +37,8 @@ RECORDED_THREAD_LIST = ROOT / "tests" / "fixtures" / "bb" / "thread_list.json"
 
 def config() -> watch.WatcherConfig:
     return watch.WatcherConfig(
-        bb_executable=("configured-bb", "--wrapper"),
+        project_id="project-a",
+        bb_executable=(sys.executable, "-c", "print('accepted')"),
         bb_project_ids=("native-project",),
         github_repo="owner/repo",
         timeout_seconds=5.0,
@@ -46,7 +47,8 @@ def config() -> watch.WatcherConfig:
 
 def multi_project_config() -> watch.WatcherConfig:
     return watch.WatcherConfig(
-        bb_executable=("configured-bb", "--wrapper"),
+        project_id="project-a",
+        bb_executable=(sys.executable, "-c", "print('accepted')"),
         bb_project_ids=("native-app", "native-docs"),
         github_repo="owner/repo",
         timeout_seconds=5.0,
@@ -59,26 +61,6 @@ def signature(*, state: str = "open", merged: bool = False, head: str = "a" * 40
 
 def recorded_thread_list() -> list[dict]:
     return json.loads(RECORDED_THREAD_LIST.read_text(encoding="utf-8"))
-
-
-def write_role_record(
-    directory: str, *, project_id: str = "project-a", thread_id: str = "thread-role"
-) -> Path:
-    record = {
-        "role_id": f"orchestrator:{project_id}",
-        "scope": {"kind": "project", "project_id": project_id},
-        "epoch": 1,
-        "status": "active",
-        "thread_id": thread_id,
-    }
-    path = Path(directory) / "role-generation.md"
-    path.write_text(
-        "# Role generation\n\n```json\n"
-        + json.dumps(record, indent=2)
-        + "\n```\n",
-        encoding="utf-8",
-    )
-    return path
 
 
 class RecordedThreadListTest(unittest.TestCase):
@@ -108,12 +90,8 @@ class RecordedThreadListTest(unittest.TestCase):
             "recorded archivedAt values must be integer timestamps",
         )
 
-    def test_recorded_live_thread_list_completes_both_shared_probes(self) -> None:
+    def test_recorded_live_thread_list_completes_heartbeat_probe(self) -> None:
         payload = recorded_thread_list()
-        self.assertTrue(
-            watch.worker_cycle(config(), {}, call=lambda *_: payload, emit=lambda _line: None)
-        )
-
         def call(_executable, argv, _timeout):
             if argv[:2] == ("settings", "version"):
                 return {"currentVersion": watch.PINNED_BB_VERSION}
@@ -146,7 +124,7 @@ class RecordedThreadListTest(unittest.TestCase):
 
 
 class MultiProjectAggregationTest(unittest.TestCase):
-    def test_worker_and_heartbeat_aggregate_every_native_project(self) -> None:
+    def test_heartbeat_aggregates_every_native_project(self) -> None:
         calls = []
         payloads = {
             "native-app": {"threads": [{"id": "app-worker", "status": "active"}]},
@@ -159,12 +137,6 @@ class MultiProjectAggregationTest(unittest.TestCase):
                 return {"currentVersion": watch.PINNED_BB_VERSION}
             return payloads[argv[3]]
 
-        statuses = {}
-        self.assertTrue(
-            watch.worker_cycle(
-                multi_project_config(), statuses, call=call, emit=lambda _line: None
-            )
-        )
         messages = []
         self.assertTrue(
             watch.heartbeat_cycle(
@@ -174,85 +146,13 @@ class MultiProjectAggregationTest(unittest.TestCase):
                 emit=messages.append,
             )
         )
-        self.assertEqual(
-            {"app-worker": "active", "docs-worker": "starting"}, statuses
-        )
         self.assertIn("liveWorkers=2", messages[-1])
         thread_calls = [argv for argv in calls if argv[:2] == ("thread", "list")]
         self.assertEqual(
-            ["native-app", "native-docs", "native-app", "native-docs"],
+            ["native-app", "native-docs"],
             [argv[3] for argv in thread_calls],
         )
-        self.assertTrue(all("--include-hidden" in argv for argv in thread_calls[:2]))
-        self.assertTrue(all("--include-hidden" not in argv for argv in thread_calls[2:]))
-
-    def test_combined_response_overflow_rejects_before_worker_state_or_marker(self) -> None:
-        limit = 120
-        payloads = {
-            "native-app": {
-                "threads": [
-                    {"id": "app-worker", "status": "idle", "title": "a" * 30}
-                ]
-            },
-            "native-docs": {
-                "threads": [
-                    {"id": "docs-worker", "status": "active", "title": "d" * 30}
-                ]
-            },
-        }
-        sizes = [
-            len(json.dumps(payload, separators=(",", ":")))
-            for payload in payloads.values()
-        ]
-        self.assertTrue(all(size < limit for size in sizes), sizes)
-        self.assertGreater(sum(sizes), limit)
-        statuses = {"app-worker": "active"}
-        messages = []
-
-        def call(_executable, argv, _timeout):
-            return payloads[argv[3]]
-
-        with mock.patch.object(watch, "MAX_RESPONSE_CHARS", limit), mock.patch.object(
-            watch._watcher_liveness, "write_marker"
-        ) as marker:
-            completed = watch.run_once(
-                "worker-lifecycle",
-                "project-a",
-                "session-a",
-                lambda: watch.worker_cycle(
-                    multi_project_config(), statuses, call=call, emit=messages.append
-                ),
-                emit=messages.append,
-            )
-        self.assertFalse(completed)
-        self.assertEqual({"app-worker": "active"}, statuses)
-        self.assertTrue(any(str(limit) in message for message in messages))
-        marker.assert_not_called()
-
-    def test_one_native_project_failure_rejects_whole_worker_aggregate(self) -> None:
-        statuses = {"app-worker": "active"}
-        calls = []
-
-        def call(_executable, argv, _timeout):
-            calls.append(tuple(argv))
-            if argv[3] == "native-app":
-                return {"threads": [{"id": "app-worker", "status": "idle"}]}
-            raise watch.ProbeError("docs project unavailable")
-
-        with mock.patch.object(watch._watcher_liveness, "write_marker") as marker:
-            completed = watch.run_once(
-                "worker-lifecycle",
-                "project-a",
-                "session-a",
-                lambda: watch.worker_cycle(
-                    multi_project_config(), statuses, call=call, emit=lambda _line: None
-                ),
-                emit=lambda _line: None,
-            )
-        self.assertFalse(completed)
-        self.assertEqual({"app-worker": "active"}, statuses)
-        self.assertEqual(["native-app", "native-docs"], [argv[3] for argv in calls])
-        marker.assert_not_called()
+        self.assertTrue(all("--include-hidden" not in argv for argv in thread_calls))
 
     def test_one_native_project_failure_rejects_whole_heartbeat_aggregate(self) -> None:
         calls = []
@@ -289,26 +189,6 @@ class MultiProjectAggregationTest(unittest.TestCase):
 
 
 class ProbeShapeTest(unittest.TestCase):
-    def test_wrong_shape_valid_json_is_not_a_worker_sample_or_marker_refresh(self) -> None:
-        for payload in ({}, {"error": "backend unavailable"}, "not a list"):
-            with self.subTest(payload=payload), mock.patch.object(
-                watch._watcher_liveness, "write_marker"
-            ) as writer:
-                completed = watch.run_once(
-                    "worker-lifecycle",
-                    "project-a",
-                    "session-a",
-                    lambda: watch.worker_cycle(
-                        config(), {}, call=lambda *_: payload, emit=lambda _line: None
-                    ),
-                    emit=lambda _line: None,
-                )
-            self.assertFalse(
-                completed,
-                "wrong-shape valid JSON must not be a successful worker sample",
-            )
-            writer.assert_not_called()
-
     def test_wrong_shape_valid_json_is_not_a_heartbeat_sample_or_marker_refresh(self) -> None:
         for version_payload in ({}, {"currentVersion": ""}, {"currentVersion": " "}):
             def call(_executable, argv, _timeout):
@@ -375,46 +255,14 @@ class ProbeShapeTest(unittest.TestCase):
 
         with mock.patch.object(watch._watcher_liveness, "write_marker") as writer:
             completed = watch.run_once(
-                "worker-lifecycle",
+                "pr-artifacts",
                 "project-a",
                 "session-a",
-                lambda: watch.worker_cycle(config(), {}, call=failed),
+                failed,
                 emit=lambda _line: None,
             )
         self.assertFalse(completed, "a failed probe must skip marker refresh")
         writer.assert_not_called()
-
-    def test_incomplete_worker_row_does_not_refresh_marker(self) -> None:
-        invalid_rows = (
-            {"id": "", "status": "idle"},
-            {"id": " ", "status": "idle"},
-            {"id": "thread-a", "status": ""},
-            {"id": "thread-a", "status": " "},
-            {"id": "thread-a", "status": "idle", "archivedAt": ""},
-            {"id": "thread-a", "status": "idle", "archivedAt": " "},
-            {"id": "thread-a", "status": "idle", "archivedAt": {}},
-        )
-        for row in invalid_rows:
-            with self.subTest(row=row), mock.patch.object(
-                watch._watcher_liveness, "write_marker"
-            ) as writer:
-                completed = watch.run_once(
-                    "worker-lifecycle",
-                    "project-a",
-                    "session-a",
-                    lambda: watch.worker_cycle(
-                        config(),
-                        {},
-                        call=lambda *_: {"threads": [row]},
-                        emit=lambda _line: None,
-                    ),
-                    emit=lambda _line: None,
-                )
-            self.assertFalse(
-                completed,
-                "an incomplete worker identity row must fail the sample",
-            )
-            writer.assert_not_called()
 
     def test_unusable_pr_identity_does_not_persist_or_refresh_marker(self) -> None:
         invalid_signatures = (
@@ -453,68 +301,6 @@ class ProbeShapeTest(unittest.TestCase):
 
 
 class EventDeliveryTest(unittest.TestCase):
-    def test_property_a_undelivered_event_fails_without_advancing_baseline_or_marker(
-        self,
-    ) -> None:
-        class ClosedMonitor:
-            def __init__(self) -> None:
-                self.attempts = []
-                self.delivered = []
-
-            def write(self, text):
-                self.attempts.append(text)
-                raise BrokenPipeError("Monitor closed stdout")
-
-            def flush(self):
-                raise BrokenPipeError("Monitor closed stdout")
-
-        baseline = {"statuses": {"thread-a": "active"}}
-        state = json.loads(json.dumps(baseline))
-        monitor = ClosedMonitor()
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "worker-lifecycle.json"
-            watch.save_state(path, baseline)
-
-            def check() -> bool:
-                complete = watch.worker_cycle(
-                    config(),
-                    state["statuses"],
-                    call=lambda *_: {
-                        "threads": [{"id": "thread-a", "status": "error"}]
-                    },
-                )
-                if complete:
-                    watch.save_state(path, state)
-                return complete
-
-            with mock.patch.object(watch.sys, "stdout", monitor), mock.patch.object(
-                watch._watcher_liveness, "write_marker"
-            ) as writer:
-                completed = watch.run_once(
-                    "worker-lifecycle", "project-a", "session-a", check
-                )
-            persisted = watch.load_state(path, {})
-
-        with self.subTest(property="event delivery"):
-            self.assertTrue(monitor.attempts, "the event write must be attempted")
-            self.assertEqual([], monitor.delivered, "the event must not be delivered")
-        with self.subTest(property="cycle result"):
-            self.assertFalse(
-                completed, "an undelivered event must fail the complete cycle"
-            )
-        with self.subTest(property="baseline preservation"):
-            self.assertEqual(
-                (baseline, baseline),
-                (state, persisted),
-                "an undelivered event must not advance in-memory or persisted baseline",
-            )
-        with self.subTest(property="marker preservation"):
-            self.assertEqual(
-                [],
-                writer.call_args_list,
-                "an undelivered event must not refresh the liveness marker",
-            )
-
     def test_failure_event_is_flushed_immediately_to_non_tty_stdout(self) -> None:
         read_fd, write_fd = os.pipe()
         stdout = os.fdopen(write_fd, "w", encoding="utf-8")
@@ -548,7 +334,6 @@ class EventDeliveryTest(unittest.TestCase):
 
     def test_every_production_emit_default_uses_the_flushing_emitter(self) -> None:
         for function in (
-            watch.worker_cycle,
             watch.pr_cycle,
             watch.heartbeat_cycle,
             watch.run_once,
@@ -591,899 +376,6 @@ class EventDeliveryTest(unittest.TestCase):
             completed,
             "surviving an output failure must not turn a failed cycle into success",
         )
-
-
-class RoleWakeTest(unittest.TestCase):
-    def test_configured_executable_pointer_and_at_fire_retarget(self) -> None:
-        calls = []
-
-        def transport(executable):
-            self.assertEqual(config().bb_executable, tuple(executable))
-
-            def call(argv, timeout):
-                calls.append((tuple(argv), timeout))
-                if tuple(argv) == ("settings", "version", "--json"):
-                    payload = {"currentVersion": watch.PINNED_BB_VERSION}
-                else:
-                    payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
-                return mock.Mock(
-                    exit_code=0, stdout=json.dumps(payload), stderr=""
-                )
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory, thread_id="thread-one")
-            first_clock = iter((0.0, 2.0))
-            first_emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=4.0,
-                monotonic=lambda: next(first_clock),
-            )
-            self.assertTrue(first_emit("worker:one", "error"))
-            write_role_record(directory, thread_id="thread-two")
-            second_clock = iter((0.0, 2.0))
-            second_emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=4.0,
-                monotonic=lambda: next(second_clock),
-            )
-            self.assertTrue(second_emit("pr:7", "signature-two"))
-
-        self.assertEqual(
-            [
-                (("settings", "version", "--json"), 4.0),
-                (
-                    (
-                        "thread",
-                        "tell",
-                        "thread-one",
-                        watch.ROLE_WAKE_POINTER,
-                        "--mode",
-                        "queue",
-                        "--json",
-                    ),
-                    2.0,
-                ),
-                (("settings", "version", "--json"), 4.0),
-                (
-                    (
-                        "thread",
-                        "tell",
-                        "thread-two",
-                        watch.ROLE_WAKE_POINTER,
-                        "--mode",
-                        "queue",
-                        "--json",
-                    ),
-                    2.0,
-                ),
-            ],
-            calls,
-        )
-        self.assertEqual("event; inspect canonical state", watch.ROLE_WAKE_POINTER)
-
-    def test_missing_role_record_is_a_healthy_no_tell_fallback(self) -> None:
-        messages = []
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport") as transport:
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=messages.append,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-            self.assertTrue(emit("worker:one", "error"))
-
-        self.assertEqual([], messages)
-        transport.assert_not_called()
-
-    def test_unreadable_role_record_refuses_without_tell(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport") as transport:
-            (Path(directory) / "role-generation.md").mkdir()
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-            with self.assertRaises(watch.WatcherEventDeliveryError):
-                emit("worker:one", "error")
-
-        transport.assert_not_called()
-
-    def test_role_record_refuses_every_uncertain_target_without_tell(self) -> None:
-        valid = {
-            "role_id": "orchestrator:project-a",
-            "scope": {"kind": "project", "project_id": "project-a"},
-            "epoch": 1,
-            "status": "active",
-            "thread_id": "thread-role",
-        }
-        invalid = {
-            "retired": {**valid, "status": "retired"},
-            "wrong-role": {**valid, "role_id": "supervisor"},
-            "foreign-project": {
-                **valid,
-                "scope": {"kind": "project", "project_id": "project-b"},
-            },
-            "zero-epoch": {**valid, "epoch": 0},
-            "boolean-epoch": {**valid, "epoch": True},
-            "empty-thread": {**valid, "thread_id": ""},
-            "padded-thread": {**valid, "thread_id": " thread-role "},
-        }
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport") as transport:
-            path = Path(directory) / "role-generation.md"
-            cases = list(
-                (name, f"```json\n{json.dumps(record)}\n```\n")
-                for name, record in invalid.items()
-            )
-            cases.extend(
-                [
-                    ("missing-fence", "# no record\n"),
-                    ("malformed", "```json\n{\n```\n"),
-                    (
-                        "ambiguous",
-                        f"```json\n{json.dumps(valid)}\n```\n```json\n{json.dumps(valid)}\n```\n",
-                    ),
-                    (
-                        "duplicate-top-level-member",
-                        "```json\n"
-                        '{"role_id":"orchestrator:project-a",'
-                        '"scope":{"kind":"project","project_id":"project-a"},'
-                        '"epoch":1,"status":"active",'
-                        '"thread_id":"thread-one","thread_id":"thread-two"}'
-                        "\n```\n",
-                    ),
-                    (
-                        "duplicate-nested-member",
-                        "```json\n"
-                        '{"role_id":"orchestrator:project-a",'
-                        '"scope":{"kind":"project","kind":"foreign",'
-                        '"project_id":"project-a"},'
-                        '"epoch":1,"status":"active","thread_id":"thread-role"}'
-                        "\n```\n",
-                    ),
-                ]
-            )
-            for name, content in cases:
-                with self.subTest(name=name):
-                    path.write_text(content, encoding="utf-8")
-                    emit = watch.role_wake_emitter(
-                        config(),
-                        "project-a",
-                        emit=lambda _line: None,
-                        deadline=100.0,
-                        monotonic=lambda: 0.0,
-                    )
-                    with self.assertRaises(watch.WatcherEventDeliveryError):
-                        emit("worker:one", "error")
-            transport.assert_not_called()
-
-    def test_shared_seam_wakes_all_modes_but_not_unchanged_status(self) -> None:
-        calls = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                if tuple(argv) == ("settings", "version", "--json"):
-                    payload = {"currentVersion": watch.PINNED_BB_VERSION}
-                else:
-                    payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
-                return mock.Mock(
-                    exit_code=0, stdout=json.dumps(payload), stderr=""
-                )
-
-            return call
-
-        def heartbeat_call(_executable, argv, _timeout):
-            if argv[:2] == ("settings", "version"):
-                return {"currentVersion": watch.PINNED_BB_VERSION}
-            return {"threads": []}
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory)
-
-            def emit_for_cycle():
-                return watch.role_wake_emitter(
-                    config(),
-                    "project-a",
-                    emit=lambda _line: None,
-                    deadline=100.0,
-                    monotonic=lambda: 0.0,
-                )
-
-            statuses = {"worker": "active"}
-            watch.worker_cycle(
-                config(),
-                statuses,
-                call=lambda *_: {"threads": [{"id": "worker", "status": "error"}]},
-                emit=lambda _line: None,
-                wake=emit_for_cycle(),
-            )
-            watch.worker_cycle(
-                config(),
-                statuses,
-                call=lambda *_: {"threads": [{"id": "worker", "status": "error"}]},
-                emit=lambda _line: None,
-                wake=emit_for_cycle(),
-            )
-            baseline = json.dumps(signature(), sort_keys=True, separators=(",", ":"))
-            watch.pr_cycle(
-                config(),
-                {"signatures": {"7": baseline}, "terminal_left": {}},
-                enumerate_prs=lambda *_, **__: [7],
-                signature=lambda *_: signature(head="b" * 40),
-                emit=lambda _line: None,
-                wake=emit_for_cycle(),
-            )
-            watch.heartbeat_cycle(
-                config(),
-                call=heartbeat_call,
-                enumerate_open=lambda *_, **__: [],
-                emit=lambda _line: None,
-                wake=emit_for_cycle(),
-            )
-
-        tells = [argv for argv in calls if argv[:2] == ("thread", "tell")]
-        self.assertEqual(2, len(tells))
-        self.assertTrue(
-            all(
-                argv
-                == (
-                    "thread",
-                    "tell",
-                    "thread-role",
-                    watch.ROLE_WAKE_POINTER,
-                    "--mode",
-                    "queue",
-                    "--json",
-                )
-                for argv in tells
-            )
-        )
-
-    def test_multiple_events_in_one_cycle_emit_one_tell(self) -> None:
-        calls = []
-        messages = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                payload = (
-                    {"currentVersion": watch.PINNED_BB_VERSION}
-                    if tuple(argv) == ("settings", "version", "--json")
-                    else {"ok": True, "threadId": argv[2], "mode": "queue"}
-                )
-                return mock.Mock(
-                    exit_code=0, stdout=json.dumps(payload), stderr=""
-                )
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory)
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=messages.append,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-            watch.pr_cycle(
-                config(),
-                {
-                    "signatures": {
-                        "7": json.dumps(signature(), sort_keys=True, separators=(",", ":")),
-                        "8": json.dumps(signature(), sort_keys=True, separators=(",", ":")),
-                    },
-                    "terminal_left": {},
-                },
-                enumerate_prs=lambda *_, **__: [7, 8],
-                signature=lambda *_: signature(head="b" * 40),
-                emit=messages.append,
-                wake=emit,
-            )
-
-        self.assertEqual(2, len(messages))
-        self.assertEqual(
-            1, len([argv for argv in calls if argv[:2] == ("thread", "tell")])
-        )
-
-    def test_unconfirmed_tell_envelopes_suppress_same_cycle_retry(self) -> None:
-        cases = {
-            "wrong-ok": {"ok": False, "threadId": "thread-role", "mode": "queue"},
-            "wrong-thread": {"ok": True, "threadId": "other", "mode": "queue"},
-            "wrong-mode": {"ok": True, "threadId": "thread-role", "mode": "steer"},
-        }
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ):
-            write_role_record(directory)
-            for name, tell_payload in cases.items():
-                with self.subTest(name=name):
-                    calls = []
-                    messages = []
-
-                    def transport(_executable):
-                        def call(argv, _timeout):
-                            calls.append(tuple(argv))
-                            payload = (
-                                {"currentVersion": watch.PINNED_BB_VERSION}
-                                if tuple(argv) == ("settings", "version", "--json")
-                                else tell_payload
-                            )
-                            return mock.Mock(
-                                exit_code=0, stdout=json.dumps(payload), stderr=""
-                            )
-
-                        return call
-
-                    with mock.patch.object(
-                        watch, "subprocess_transport", side_effect=transport
-                    ):
-                        emit = watch.role_wake_emitter(
-                            config(),
-                            "project-a",
-                            emit=messages.append,
-                            deadline=100.0,
-                            monotonic=lambda: 0.0,
-                        )
-                        self.assertTrue(emit("worker:one", "error"))
-                        self.assertTrue(emit("worker:two", "stopping"))
-
-                    self.assertEqual(
-                        1,
-                        len(
-                            [
-                                argv
-                                for argv in calls
-                                if argv[:2] == ("thread", "tell")
-                            ]
-                        ),
-                    )
-                    diagnostic = messages[0]
-                    self.assertIn("ACCEPTANCE UNCONFIRMED", diagnostic)
-                    self.assertIn("retry suppressed", diagnostic)
-                    self.assertNotIn("delivered", diagnostic.lower())
-                    self.assertEqual(1, len(messages))
-
-    def test_timeout_ambiguity_suppresses_same_cycle_retry(self) -> None:
-        calls = []
-        messages = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                if tuple(argv) == ("settings", "version", "--json"):
-                    return mock.Mock(
-                        exit_code=0,
-                        stdout=json.dumps(
-                            {"currentVersion": watch.PINNED_BB_VERSION}
-                        ),
-                        stderr="",
-                    )
-                raise BbTransportTimeout("tell deadline expired")
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory)
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=messages.append,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-            self.assertTrue(emit("worker:one", "error"))
-            self.assertTrue(emit("worker:two", "stopping"))
-
-        self.assertEqual(
-            1, len([argv for argv in calls if argv[:2] == ("thread", "tell")])
-        )
-        self.assertIn("ACCEPTANCE UNCONFIRMED", messages[0])
-        self.assertEqual(1, len(messages))
-
-    def test_ambiguous_tell_advances_baseline_and_marker_to_suppress_retry(self) -> None:
-        calls = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                payload = (
-                    {"currentVersion": watch.PINNED_BB_VERSION}
-                    if tuple(argv) == ("settings", "version", "--json")
-                    else {"ok": False, "threadId": "thread-role", "mode": "queue"}
-                )
-                return mock.Mock(
-                    exit_code=0, stdout=json.dumps(payload), stderr=""
-                )
-
-            return call
-
-        state = {"statuses": {"worker": "active"}}
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "subprocess_transport", side_effect=transport
-        ), mock.patch.object(
-            watch._watcher_liveness, "write_marker"
-        ) as marker:
-            write_role_record(directory)
-            state_path = Path(directory) / "worker-lifecycle.json"
-            watch.save_state(state_path, state)
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-
-            def check() -> bool:
-                complete = watch.worker_cycle(
-                    config(),
-                    state["statuses"],
-                    call=lambda *_: {
-                        "threads": [{"id": "worker", "status": "error"}]
-                    },
-                    emit=lambda _line: None,
-                    wake=emit,
-                )
-                if complete:
-                    watch.save_state(state_path, state)
-                return complete
-
-            self.assertTrue(
-                watch.run_once(
-                    "worker-lifecycle",
-                    "project-a",
-                    "launching-session",
-                    check,
-                    emit=emit,
-                    deadline=100.0,
-                    monotonic=lambda: 0.0,
-                )
-            )
-
-            self.assertEqual("error", state["statuses"]["worker"])
-            self.assertEqual(state, watch.load_state(state_path, {}))
-            marker.assert_called_once_with(
-                "project-a", "worker-lifecycle", "launching-session"
-            )
-
-        self.assertEqual(
-            1, len([argv for argv in calls if argv[:2] == ("thread", "tell")])
-        )
-
-    def test_failed_worker_tell_is_fatal_without_baseline_or_marker_advance(self) -> None:
-        attempts = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                attempts.append(tuple(argv))
-                if tuple(argv) == ("settings", "version", "--json"):
-                    return mock.Mock(
-                        exit_code=0,
-                        stdout=json.dumps(
-                            {"currentVersion": watch.PINNED_BB_VERSION}
-                        ),
-                        stderr="",
-                    )
-                return mock.Mock(exit_code=1, stdout="", stderr="tell failed")
-
-            return call
-
-        baseline = {"statuses": {"worker": "active"}}
-        state = json.loads(json.dumps(baseline))
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "subprocess_transport", side_effect=transport
-        ), mock.patch.object(
-            watch._watcher_liveness, "write_marker"
-        ) as marker:
-            write_role_record(directory, thread_id="successor-thread")
-            state_path = Path(directory) / "worker-lifecycle.json"
-            watch.save_state(state_path, baseline)
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-
-            def check() -> bool:
-                complete = watch.worker_cycle(
-                    config(),
-                    state["statuses"],
-                    call=lambda *_: {
-                        "threads": [{"id": "worker", "status": "error"}]
-                    },
-                    emit=lambda _line: None,
-                    wake=emit,
-                )
-                if complete:
-                    watch.save_state(state_path, state)
-                return complete
-
-            with self.assertRaises(watch.WatcherEventDeliveryError):
-                watch.run_once(
-                    "worker-lifecycle",
-                    "project-a",
-                    "launching-session",
-                    check,
-                    emit=emit,
-                    deadline=100.0,
-                    monotonic=lambda: 0.0,
-                )
-            self.assertEqual(baseline, state)
-            self.assertEqual(baseline, watch.load_state(state_path, {}))
-            marker.assert_not_called()
-
-        self.assertEqual(2, len(attempts))
-
-    def test_pre_task_refusal_is_fatal_without_baseline_or_marker_advance(self) -> None:
-        attempts = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                attempts.append(tuple(argv))
-                return mock.Mock(
-                    exit_code=0,
-                    stdout=json.dumps({"currentVersion": "wrong-version"}),
-                    stderr="",
-                )
-
-            return call
-
-        state = {
-            "signatures": {
-                "7": json.dumps(signature(), sort_keys=True, separators=(",", ":"))
-            },
-            "terminal_left": {},
-        }
-        baseline = json.loads(json.dumps(state))
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "subprocess_transport", side_effect=transport
-        ), mock.patch.object(
-            watch._watcher_liveness, "write_marker"
-        ) as marker:
-            write_role_record(directory)
-            state_path = Path(directory) / "pr-artifacts.json"
-            watch.save_state(state_path, state)
-            emit = watch.role_wake_emitter(
-                config(),
-                "project-a",
-                emit=lambda _line: None,
-                deadline=100.0,
-                monotonic=lambda: 0.0,
-            )
-
-            def check() -> bool:
-                complete = watch.pr_cycle(
-                    config(),
-                    state,
-                    enumerate_prs=lambda *_, **__: [7],
-                    signature=lambda *_: signature(head="b" * 40),
-                    emit=lambda _line: None,
-                    wake=emit,
-                )
-                if complete:
-                    watch.save_state(state_path, state)
-                return complete
-
-            with self.assertRaises(watch.WatcherEventDeliveryError):
-                watch.run_once(
-                    "pr-artifacts",
-                    "project-a",
-                    "launching-session",
-                    check,
-                    emit=emit,
-                    deadline=100.0,
-                    monotonic=lambda: 0.0,
-                )
-            self.assertEqual(baseline, state)
-            self.assertEqual(baseline, watch.load_state(state_path, {}))
-            marker.assert_not_called()
-
-        self.assertEqual([("settings", "version", "--json")], attempts)
-
-    def test_worker_wakes_only_error_stopping_and_active_disappearance(self) -> None:
-        wakes = []
-        messages = []
-
-        def cycle(previous, rows):
-            watch.worker_cycle(
-                config(),
-                previous,
-                call=lambda *_: {"threads": rows},
-                emit=messages.append,
-                wake=lambda family, key: wakes.append((family, key)) or True,
-            )
-
-        cycle(
-            {"worker-error": "active"},
-            [{"id": "worker-error", "status": "error", "title": "error lane"}],
-        )
-        cycle(
-            {"worker-stopping": "active"},
-            [{"id": "worker-stopping", "status": "stopping"}],
-        )
-        cycle({"worker-gone": "active"}, [])
-        cycle(
-            {"worker-done": "active"},
-            [{"id": "worker-done", "status": "idle"}],
-        )
-
-        self.assertEqual(
-            [
-                ("worker:worker-error", "error"),
-                ("worker:worker-stopping", "stopping"),
-                ("worker:worker-gone", "disappeared"),
-            ],
-            wakes,
-        )
-        self.assertEqual(3, len(messages), "normal idle must be silent")
-
-    def test_accepted_semantic_wake_coalesces_until_recovery(self) -> None:
-        calls = []
-        cache = watch.RoleWakeCache()
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                payload = (
-                    {"currentVersion": watch.PINNED_BB_VERSION}
-                    if tuple(argv) == ("settings", "version", "--json")
-                    else {"ok": True, "threadId": argv[2], "mode": "queue"}
-                )
-                return mock.Mock(exit_code=0, stdout=json.dumps(payload), stderr="")
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory)
-
-            def fire():
-                return watch.role_wake_emitter(
-                    config(),
-                    "project-a",
-                    deadline=100.0,
-                    cache=cache,
-                    monotonic=lambda: 0.0,
-                )("worker:worker", "error")
-
-            self.assertTrue(fire())
-            self.assertTrue(fire())
-            cache.clear("worker:worker")
-            self.assertTrue(fire())
-
-        tells = [argv for argv in calls if argv[:2] == ("thread", "tell")]
-        self.assertEqual(2, len(tells), "recovery must re-arm the same semantic event")
-
-    def test_routine_heartbeat_is_silent_and_version_drift_rearms_after_recovery(self) -> None:
-        calls = []
-        messages = []
-        cache = watch.RoleWakeCache()
-        version = "wrong-version"
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                self.assertEqual(("thread", "tell"), tuple(argv[:2]))
-                payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
-                return mock.Mock(exit_code=0, stdout=json.dumps(payload), stderr="")
-
-            return call
-
-        def heartbeat_call(_executable, argv, _timeout):
-            if argv[:2] == ("settings", "version"):
-                return {"currentVersion": version}
-            return {"threads": []}
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-            write_role_record(directory)
-
-            def cycle():
-                wake = watch.role_wake_emitter(
-                    config(),
-                    "project-a",
-                    deadline=100.0,
-                    cache=cache,
-                    monotonic=lambda: 0.0,
-                )
-                watch.heartbeat_cycle(
-                    config(),
-                    call=heartbeat_call,
-                    enumerate_open=lambda *_, **__: [],
-                    emit=messages.append,
-                    wake=wake,
-                    wake_cache=cache,
-                )
-
-            cycle()
-            cycle()
-            version = watch.PINNED_BB_VERSION
-            cycle()
-            version = "wrong-version"
-            cycle()
-
-        tells = [argv for argv in calls if argv[:2] == ("thread", "tell")]
-        self.assertEqual(2, len(tells))
-        self.assertEqual(tells, calls, "version drift wake must not probe version twice")
-        self.assertEqual(4, sum(line.startswith("HEARTBEAT openPRs=") for line in messages))
-
-    def test_version_drift_wake_requires_exact_acceptance_and_suppresses_retry(self) -> None:
-        cases = {
-            "wrong-ok": {"ok": False, "threadId": "thread-role", "mode": "queue"},
-            "wrong-thread": {"ok": True, "threadId": "other", "mode": "queue"},
-            "wrong-mode": {"ok": True, "threadId": "thread-role", "mode": "steer"},
-        }
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ):
-            write_role_record(directory)
-            for name, payload in cases.items():
-                with self.subTest(name=name):
-                    calls = []
-                    messages = []
-
-                    def transport(_executable):
-                        def call(argv, _timeout):
-                            calls.append(tuple(argv))
-                            self.assertEqual(("thread", "tell"), tuple(argv[:2]))
-                            return mock.Mock(
-                                exit_code=0, stdout=json.dumps(payload), stderr=""
-                            )
-
-                        return call
-
-                    with mock.patch.object(
-                        watch, "subprocess_transport", side_effect=transport
-                    ):
-                        emit = watch.role_wake_emitter(
-                            config(),
-                            "project-a",
-                            emit=messages.append,
-                            deadline=100.0,
-                            monotonic=lambda: 0.0,
-                        )
-                        self.assertTrue(
-                            emit(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
-                        )
-                        self.assertTrue(
-                            emit(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
-                        )
-
-                    self.assertEqual(1, len(calls))
-                    self.assertIn("ACCEPTANCE UNCONFIRMED", messages[0])
-                    self.assertIn("retry suppressed", messages[0])
-
-    def test_failed_version_drift_wake_advances_neither_cache_nor_marker(self) -> None:
-        calls = []
-        cache = watch.RoleWakeCache()
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                calls.append(tuple(argv))
-                self.assertEqual(("thread", "tell"), tuple(argv[:2]))
-                return mock.Mock(exit_code=1, stdout="", stderr="tell failed")
-
-            return call
-
-        def heartbeat_call(_executable, argv, _timeout):
-            if argv[:2] == ("settings", "version"):
-                return {"currentVersion": "wrong-version"}
-            return {"threads": []}
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "subprocess_transport", side_effect=transport
-        ), mock.patch.object(
-            watch._watcher_liveness, "write_marker"
-        ) as marker:
-            write_role_record(directory)
-
-            def check() -> bool:
-                return watch.heartbeat_cycle(
-                    config(),
-                    call=heartbeat_call,
-                    enumerate_open=lambda *_, **__: [],
-                    emit=lambda _line: None,
-                    wake=watch.role_wake_emitter(
-                        config(),
-                        "project-a",
-                        cache=cache,
-                        deadline=100.0,
-                        monotonic=lambda: 0.0,
-                    ),
-                    wake_cache=cache,
-                )
-
-            with self.assertRaises(watch.WatcherEventDeliveryError):
-                watch.run_once(
-                    "heartbeat",
-                    "project-a",
-                    "launching-session",
-                    check,
-                    emit=lambda _line: None,
-                    deadline=100.0,
-                    monotonic=lambda: 0.0,
-                )
-            marker.assert_not_called()
-            self.assertFalse(
-                cache.duplicate(watch.VERSION_MISMATCH_WAKE_FAMILY, "wrong-version")
-            )
-
-        self.assertEqual(1, len(calls))
-
-    def test_project_exact_role_targets_have_cross_project_absence_both_ways(self) -> None:
-        tells = []
-
-        def transport(_executable):
-            def call(argv, _timeout):
-                if tuple(argv) == ("settings", "version", "--json"):
-                    payload = {"currentVersion": watch.PINNED_BB_VERSION}
-                else:
-                    tells.append(tuple(argv))
-                    payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
-                return mock.Mock(exit_code=0, stdout=json.dumps(payload), stderr="")
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for project_id, thread_id in (
-                ("project-a", "thread-a"),
-                ("project-b", "thread-b"),
-            ):
-                project_dir = root / project_id
-                project_dir.mkdir()
-                write_role_record(
-                    str(project_dir), project_id=project_id, thread_id=thread_id
-                )
-            with mock.patch.object(
-                watch, "project_state_dir", side_effect=lambda project_id: root / project_id
-            ), mock.patch.object(watch, "subprocess_transport", side_effect=transport):
-                for project_id in ("project-a", "project-b"):
-                    wake = watch.role_wake_emitter(
-                        config(),
-                        project_id,
-                        deadline=100.0,
-                        monotonic=lambda: 0.0,
-                    )
-                    self.assertTrue(wake(f"worker:{project_id}", "error"))
-
-        self.assertEqual(["thread-a", "thread-b"], [argv[2] for argv in tells])
 
 
 class TlsForensicCaptureTest(unittest.TestCase):
@@ -1711,7 +603,7 @@ class TlsForensicCaptureTest(unittest.TestCase):
         ):
             self.assertFalse(
                 watch.run_once(
-                    "worker-lifecycle",
+                    "pr-artifacts",
                     "project-a",
                     "session-a",
                     lambda: (_ for _ in ()).throw(error),
@@ -1863,7 +755,7 @@ class TlsForensicCaptureTest(unittest.TestCase):
         ):
             self.assertFalse(
                 watch.run_once(
-                    "worker-lifecycle",
+                    "pr-artifacts",
                     "project-a",
                     "session-a",
                     fail_near_deadline,
@@ -1915,7 +807,7 @@ class StatePersistenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             watch, "MAX_STATE_BYTES", 128
         ):
-            path = Path(directory) / "worker-lifecycle.json"
+            path = Path(directory) / "pr-artifacts.json"
             watch.save_state(path, state)
             self.assertEqual(
                 state,
@@ -1988,52 +880,35 @@ class EnumerationTest(unittest.TestCase):
             "print(version if sys.argv[1:3] == ['settings', 'version'] else threads)\n"
         )
         bounded_config = watch.WatcherConfig(
+            project_id="project-a",
             bb_executable=(sys.executable, "-c", script),
             bb_project_ids=("native-project",),
             github_repo="owner/repo",
             timeout_seconds=5.0,
         )
 
-        for mode in ("worker-lifecycle", "heartbeat"):
-            messages = []
-            with self.subTest(mode=mode), mock.patch.object(
-                watch, "THREAD_ENUM_MAX_RESPONSE_CHARS", limit
-            ), mock.patch.object(
-                watch._watcher_liveness, "write_marker"
-            ) as writer:
-                if mode == "worker-lifecycle":
-                    check = lambda: watch.worker_cycle(
-                        bounded_config, {}, emit=messages.append
-                    )
-                else:
-                    check = lambda: watch.heartbeat_cycle(
-                        bounded_config,
-                        enumerate_open=lambda *_, **__: [],
-                        emit=messages.append,
-                    )
-                completed = watch.run_once(
-                    mode,
-                    "project-a",
-                    "session-a",
-                    check,
+        messages = []
+        with mock.patch.object(
+            watch, "THREAD_ENUM_MAX_RESPONSE_CHARS", limit
+        ), mock.patch.object(
+            watch._watcher_liveness, "write_marker"
+        ) as writer:
+            completed = watch.run_once(
+                "heartbeat",
+                "project-a",
+                "session-a",
+                lambda: watch.heartbeat_cycle(
+                    bounded_config,
+                    enumerate_open=lambda *_, **__: [],
                     emit=messages.append,
-                )
-                self.assertFalse(
-                    completed,
-                    "thread enumeration exceeding the response size bound must fail the cycle",
-                )
-                self.assertTrue(
-                    any(
-                        "FAILED" in message and str(limit) in message
-                        for message in messages
-                    ),
-                    "thread enumeration size refusal must be visible to the Monitor",
-                )
-                self.assertEqual(
-                    [],
-                    writer.call_args_list,
-                    "over-bound thread enumeration must not refresh the marker",
-                )
+                ),
+                emit=messages.append,
+            )
+        self.assertFalse(completed)
+        self.assertTrue(
+            any("FAILED" in message and str(limit) in message for message in messages)
+        )
+        writer.assert_not_called()
 
     def test_gh_pr_list_failure_skips_cycle_without_marker_refresh(self) -> None:
         state = {"signatures": {}, "terminal_left": {}}
@@ -2268,10 +1143,9 @@ class MarkerRefreshTest(unittest.TestCase):
             )
         writer.assert_not_called()
 
-    def test_heartbeat_wait_reports_marker_failures_without_role_wakes(self) -> None:
+    def test_heartbeat_wait_reports_marker_failures_and_continues(self) -> None:
         sleeps = []
         messages = []
-        tells = []
         marker_calls = 0
 
         def write_marker(_project, _name, _session):
@@ -2282,29 +1156,11 @@ class MarkerRefreshTest(unittest.TestCase):
             if marker_calls == 2:
                 raise OSError("second mount hiccup")
 
-        def transport(_executable):
-            def call(argv, _timeout):
-                if tuple(argv) == ("settings", "version", "--json"):
-                    payload = {"currentVersion": watch.PINNED_BB_VERSION}
-                else:
-                    tells.append(tuple(argv))
-                    payload = {"ok": True, "threadId": argv[2], "mode": "queue"}
-                return mock.Mock(
-                    exit_code=0, stdout=json.dumps(payload), stderr=""
-                )
-
-            return call
-
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-            watch, "project_state_dir", return_value=Path(directory)
-        ), mock.patch.object(
-            watch, "subprocess_transport", side_effect=transport
-        ), mock.patch.object(
+        with mock.patch.object(
             watch._watcher_liveness,
             "write_marker",
             side_effect=write_marker,
         ) as writer:
-            write_role_record(directory, thread_id="thread-one")
             watch.heartbeat_wait(
                 "project-a",
                 "session-a",
@@ -2325,7 +1181,6 @@ class MarkerRefreshTest(unittest.TestCase):
             ],
             messages,
         )
-        self.assertEqual([], tells, "marker refresh and marker failure stay off the role wake path")
 
     def test_pr_cycle_uses_one_cumulative_deadline_and_does_not_refresh_on_exhaustion(
         self,
@@ -2409,7 +1264,6 @@ class MarkerRefreshTest(unittest.TestCase):
                 )
         self.assertEqual(
             [
-                mock.call("project-a", "worker-lifecycle", "session-a"),
                 mock.call("project-a", "pr-artifacts", "session-a"),
                 mock.call("project-a", "heartbeat", "session-a"),
             ],
@@ -2438,7 +1292,7 @@ class ProjectConfigTest(unittest.TestCase):
             "argv",
             [
                 "orchestrator_watch.py",
-                "worker-lifecycle",
+                "pr-artifacts",
                 "--project",
                 "project-a",
                 "--session",
@@ -2471,7 +1325,7 @@ class ProjectConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 watch.ProbeError, "bb.executable must be a non-empty list"
             ):
-                watch.project_config("project-a", "worker-lifecycle")
+                watch.project_config("project-a", "pr-artifacts")
 
     def test_all_repo_placements_are_resolved_and_deduplicated(self) -> None:
         project = {

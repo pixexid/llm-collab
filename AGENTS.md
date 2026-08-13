@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 34 -->
+<!-- CONTRACT_VERSION: 36 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,30 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v36 (2026-08-12) makes the documented `exec-tracking` running-state
+check mechanical in the session gate and every sanctioned writing spawn. Two
+fresh host-watcher markers no longer admit a writer when the plugin is stopped,
+disabled, missing, or unreadable. A cached v35 session would keep trusting the
+two-marker set without proving the native abnormal-wake authority is live, so
+the invalidated-belief and new-obligation branches require the version signal.
+Related GH-805.
+
+Contract v35 (2026-08-12) replaces the host `worker-lifecycle` watcher and its
+visible role-thread tells with `exec-tracking` plugin events and one silent,
+restart-persistent SQLite reservation. Orchestrators now verify that plugin is
+running and start exactly two host watchers, `pr-artifacts` and `heartbeat`; the
+only host markers are those two. A cached v34 role would start the retired host
+watcher, trust a false three-marker set, and omit the newly required plugin
+reload/liveness check, so the prohibited-action, invalidated-belief, and
+new-obligation branches all require the version signal. Related GH-805.
+
+Implementation-record correction: the refinement said, “With all three
+watchers stopped under `DEC-wake-noise-1`, the fleet is currently running on a
+standing `--allow-stale-watchers` override, and Amiga's preflight reports
+`watcher_status: false` for the same reason.” The final clause is false:
+Amiga's result was GH-1628's product preflight restart race, not evidence about
+the retired pointer-wake watcher set.
 
 Contract v34 (2026-08-12) adds one fail-closed alternative activation-authority
 path in `claim_task.py` for a complete, task-scoped recorded supervisor decision.

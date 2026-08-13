@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,7 +23,6 @@ ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(ROOT))
 
-from _bounded_io import read_regular_file_bounded  # noqa: E402
 from _helpers import (  # noqa: E402
     get_project,
     project_state_dir,
@@ -32,15 +32,12 @@ from _helpers import (  # noqa: E402
 from _python_runtime import require_python  # noqa: E402
 import _watcher_liveness  # noqa: E402
 import pr_watch  # noqa: E402
+from _bounded_io import read_regular_file_bounded  # noqa: E402
 from llm_collab.bb_client import (  # noqa: E402
     MAX_RESPONSE_CHARS,
     PINNED_BB_VERSION,
-    REFUSAL_AMBIGUOUS,
-    BbClient,
     BbExecutableRefused,
     BbProjectIdRefused,
-    BbQueued,
-    BbRefusal,
     BbResponseTooLarge,
     bb_executable_from_project,
     bb_project_id_from_project,
@@ -53,22 +50,13 @@ PR_ENUM_CAP = 200
 HEARTBEAT_ENUM_CAP = 1000
 TERMINAL_CYCLES = 30
 MAX_STATE_BYTES = 1 << 20
-MAX_ROLE_GENERATION_BYTES = 64 * 1024
-MAX_ROLE_WAKE_KEYS = 256
-ROLE_WAKE_POINTER = "event; inspect canonical state"
-VERSION_MISMATCH_WAKE_FAMILY = "deployed-bb-version"
-ABNORMAL_WORKER_STATUSES = frozenset({"error", "stopping"})
-ROLE_RECORD_PATTERN = re.compile(
-    r"^```json[ \t]*\r?\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL
-)
 
-# Successful worker and PR cycles repeat after 40s and 45s; heartbeat reports
+# Successful PR cycles repeat after 45s; heartbeat reports
 # remain 10 minutes apart but refresh liveness every 60s between reports. Every
 # mode also has one 300s cumulative cycle deadline. Thus a healthy watcher's
 # marker is at most 60s + 300s = 360s old, leaving 240s inside the external 600s
 # staleness bound. A cycle that cannot finish within that margin fails and
 # correctly lets its marker go stale.
-WORKER_REFRESH_SECONDS = 40.0
 PR_REFRESH_SECONDS = 45.0
 HEARTBEAT_REPORT_SECONDS = 600.0
 HEARTBEAT_MARKER_REFRESH_SECONDS = 60.0
@@ -105,36 +93,12 @@ class ProbeError(RuntimeError):
     """A watcher check did not produce one complete sample."""
 
 
-class WatcherEventDeliveryError(ProbeError):
-    """The Monitor saw an event but its BB wake did not commit."""
-
-
 class HeartbeatProbeFailure(ProbeError):
     """Heartbeat probes already emitted their exact failures but need one seam."""
 
     def __init__(self, failures: Sequence[Exception]):
         self.failures = tuple(failures)
         super().__init__(f"{len(self.failures)} heartbeat probe(s) failed")
-
-
-class RoleWakeCache:
-    """Bound accepted semantic wakes while allowing recovery to re-arm them."""
-
-    def __init__(self, limit: int = MAX_ROLE_WAKE_KEYS) -> None:
-        self.limit = limit
-        self._keys: dict[str, str] = {}
-
-    def duplicate(self, family: str, key: str) -> bool:
-        return self._keys.get(family) == key
-
-    def remember(self, family: str, key: str) -> None:
-        self._keys.pop(family, None)
-        if len(self._keys) >= self.limit:
-            self._keys.pop(next(iter(self._keys)))
-        self._keys[family] = key
-
-    def clear(self, family: str) -> None:
-        self._keys.pop(family, None)
 
 
 def emit_event(line: str) -> bool:
@@ -156,6 +120,7 @@ def require_event_delivery(emit: Callable[[str], object], line: str) -> None:
 
 @dataclass(frozen=True)
 class WatcherConfig:
+    project_id: str
     bb_executable: tuple[str, ...]
     bb_project_ids: tuple[str, ...]
     github_repo: str
@@ -197,12 +162,13 @@ def project_config(project_id: str, mode: str) -> WatcherConfig:
         ) from error
     github = project.get("github")
     repo = github.get("repo") if isinstance(github, Mapping) else None
-    if mode != "worker-lifecycle" and (not isinstance(repo, str) or not repo):
+    if not isinstance(repo, str) or not repo:
         raise ProbeError(f"project {project_id!r} has no github.repo")
     timeout = bb.get("timeout_seconds", 30.0)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ProbeError("bb.timeout_seconds must be positive")
     return WatcherConfig(
+        project_id=project_id,
         bb_executable=tuple(executable),
         bb_project_ids=bb_project_ids,
         github_repo=repo if isinstance(repo, str) else "",
@@ -258,137 +224,39 @@ def remaining_cycle_seconds(deadline: float, monotonic: Callable[[], float]) -> 
     return remaining
 
 
-def current_orchestrator_thread_id(project_id: str) -> str | None:
-    """Read the provisional role record until GH-784 supplies the shared resolver."""
-    path = project_state_dir(project_id) / "role-generation.md"
-    try:
-        text = read_regular_file_bounded(path, MAX_ROLE_GENERATION_BYTES).decode(
-            "utf-8"
-        )
-    except FileNotFoundError:
-        return None
-    except Exception as error:
-        raise ProbeError(f"cannot read role generation record {path}: {error}") from error
-    records = ROLE_RECORD_PATTERN.findall(text)
-    if len(records) != 1:
-        raise ProbeError("role generation record must contain exactly one fenced JSON record")
-
-    def reject_duplicates(pairs):
-        value = dict(pairs)
-        if len(value) != len(pairs):
-            raise ValueError("duplicate JSON object member")
-        return value
-
-    try:
-        record = json.loads(records[0], object_pairs_hook=reject_duplicates)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise ProbeError(f"role generation record is malformed JSON: {error}") from error
-    expected_role = f"orchestrator:{project_id}"
-    if not isinstance(record, dict):
-        raise ProbeError("role generation record is not a JSON object")
-    if record.get("role_id") != expected_role:
-        raise ProbeError(f"role generation record does not name {expected_role!r}")
-    if record.get("scope") != {"kind": "project", "project_id": project_id}:
-        raise ProbeError("role generation record does not have exact project scope")
-    if record.get("status") != "active":
-        raise ProbeError("role generation record is not active")
-    epoch = record.get("epoch")
-    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
-        raise ProbeError("role generation record epoch is not a positive integer")
-    thread_id = record.get("thread_id")
-    if (
-        not isinstance(thread_id, str)
-        or not thread_id
-        or thread_id != thread_id.strip()
-    ):
-        raise ProbeError("role generation record thread_id is not non-empty unpadded text")
-    return thread_id
-
-
-def role_wake_emitter(
+def request_silent_wake(
     config: WatcherConfig,
-    project_id: str,
-    *,
-    emit: Callable[[str], object] = emit_event,
+    producer: str,
+    semantic: str,
     deadline: float,
-    cache: RoleWakeCache | None = None,
+    *,
     monotonic: Callable[[], float] = time.monotonic,
-) -> Callable[[str, str], bool]:
-    """Send one at-fire pointer tell for each accepted semantic state change."""
-    cache = cache or RoleWakeCache()
-    wake_attempted = False
-
-    def deliver(family: str, key: str) -> bool:
-        nonlocal wake_attempted
-        if cache.duplicate(family, key):
-            return True
-        if wake_attempted:
-            cache.remember(family, key)
-            return True
-        try:
-            thread_id = current_orchestrator_thread_id(project_id)
-            if thread_id is None:
-                return True
-            wake_attempted = True
-            transport = subprocess_transport(config.bb_executable)
-
-            def cycle_transport(argv, timeout):
-                return transport(
-                    argv,
-                    min(timeout, remaining_cycle_seconds(deadline, monotonic)),
-                )
-
-            client = BbClient(
-                cycle_transport,
-                enabled=True,
-                timeout_seconds=config.timeout_seconds,
-            )
-            if family == VERSION_MISMATCH_WAKE_FAMILY:
-                result = client.send_version_mismatch_diagnostic(
-                    thread_id=thread_id,
-                    message=ROLE_WAKE_POINTER,
-                    installed_version=key,
-                )
-            else:
-                result = client.send(
-                    thread_id=thread_id,
-                    message=ROLE_WAKE_POINTER,
-                    mode="queue-if-active",
-                )
-        except Exception as error:
-            raise WatcherEventDeliveryError(
-                f"watcher BB wake was not delivered: {str(error) or type(error).__name__}"
-            ) from error
-        if isinstance(result, BbQueued):
-            cache.remember(family, key)
-            return True
-        if isinstance(result, BbRefusal) and result.reason == REFUSAL_AMBIGUOUS:
-            # A task may have committed. Diagnostic delivery cannot make retry safe.
-            try:
-                emit(
-                    "WATCHER BB WAKE ACCEPTANCE UNCONFIRMED — retry suppressed: "
-                    f"{result.detail}"
-                )
-            except Exception:
-                pass
-            cache.remember(family, key)
-            return True
-        if isinstance(result, BbRefusal):
-            raise WatcherEventDeliveryError(
-                f"watcher BB wake was not delivered: {result.reason}: {result.detail}"
-            )
-        raise WatcherEventDeliveryError("watcher BB wake returned an unknown outcome")
-
-    return deliver
-
-
-def require_role_wake(
-    wake: Callable[[str, str], object] | None,
-    family: str,
-    key: str,
 ) -> None:
-    if wake is not None and wake(family, key) is False:
-        raise WatcherEventDeliveryError("watcher BB wake was not delivered")
+    """Use the plugin's one durable coalescer; host watchers keep no wake state."""
+    try:
+        result = subprocess_transport(config.bb_executable)(
+            (
+                "silent-wake",
+                "emit",
+                "--project",
+                config.project_id,
+                "--producer",
+                producer,
+                "--semantic",
+                semantic,
+            ),
+            min(
+                config.timeout_seconds,
+                remaining_cycle_seconds(deadline, monotonic),
+            ),
+        )
+    except Exception as error:
+        raise ProbeError(f"silent wake command failed: {error}") from error
+    if result.exit_code != 0:
+        raise ProbeError(
+            "silent wake command refused: "
+            + (result.stderr.strip() or f"exit {result.exit_code}")
+        )
 
 
 def thread_rows(payload) -> list[dict]:
@@ -495,68 +363,6 @@ def open_numbers(
     return sorted({row["number"] for row in payload})
 
 
-def worker_cycle(
-    config: WatcherConfig,
-    statuses: dict[str, str],
-    *,
-    call: Callable[[Sequence[str], Sequence[str], float], object] = probe_thread_json,
-    emit: Callable[[str], None] = emit_event,
-    wake: Callable[[str, str], object] | None = None,
-    wake_cache: RoleWakeCache | None = None,
-    deadline: float | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> bool:
-    deadline = cycle_deadline(deadline, monotonic)
-    rows = project_thread_rows(
-        config,
-        include_hidden=True,
-        call=call,
-        deadline=deadline,
-        monotonic=monotonic,
-    )
-    updated: dict[str, str] = {}
-    event_families: set[str] = set()
-    recovery_families: set[str] = set()
-    for row in rows:
-        thread_id = row["id"]
-        status = row["status"]
-        previous = statuses.get(thread_id)
-        updated[thread_id] = status
-        family = f"worker:{thread_id}"
-        if status in ABNORMAL_WORKER_STATUSES and status != previous:
-            title = (row.get("title") or "")[:40].replace(" ", "_")
-            line = (
-                f"WORKER {status.upper()} {thread_id} ({title}): "
-                f"{previous or 'unseen'} -> {status} — inspect canonical thread state"
-            )
-            require_event_delivery(emit, line)
-            require_role_wake(wake, family, status)
-            event_families.add(family)
-        elif status not in ABNORMAL_WORKER_STATUSES:
-            recovery_families.add(family)
-    for thread_id, previous in statuses.items():
-        if thread_id in updated:
-            continue
-        family = f"worker:{thread_id}"
-        if previous == "active":
-            line = (
-                f"WORKER DISAPPEARED {thread_id}: previously active thread is absent "
-                "from the complete project aggregate — inspect canonical thread state"
-            )
-            require_event_delivery(emit, line)
-            require_role_wake(wake, family, "disappeared")
-            event_families.add(family)
-        else:
-            recovery_families.add(family)
-    remaining_cycle_seconds(deadline, monotonic)
-    if wake_cache is not None:
-        for family in recovery_families - event_families:
-            wake_cache.clear(family)
-    statuses.clear()
-    statuses.update(updated)
-    return True
-
-
 def pr_signature(repo: str, number: int, deadline: float) -> dict:
     signature, _ = pr_watch.snapshot(repo, str(number), deadline)
     if (
@@ -577,8 +383,6 @@ def pr_cycle(
     enumerate_prs: Callable[..., list[int]] = open_numbers,
     signature: Callable[[str, int, float], dict] = pr_signature,
     emit: Callable[[str], None] = emit_event,
-    wake: Callable[[str, str], object] | None = None,
-    wake_cache: RoleWakeCache | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
@@ -611,8 +415,6 @@ def pr_cycle(
         if previous is None:
             next_signatures[key] = encoded
             require_event_delivery(emit, f"PR #{number} armed (baseline captured)")
-            if wake_cache is not None:
-                wake_cache.clear(f"pr:{number}")
             continue
         if encoded != previous:
             next_signatures[key] = encoded
@@ -621,7 +423,13 @@ def pr_cycle(
                 f"artifact set at head {sample['head'][:7]}"
             )
             require_event_delivery(emit, line)
-            require_role_wake(wake, f"pr:{number}", encoded)
+            request_silent_wake(
+                config,
+                "pr-artifacts",
+                hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                deadline,
+                monotonic=monotonic,
+            )
         terminal = sample["merged"] or sample["state"] == "closed"
         if not terminal:
             next_terminal.pop(key, None)
@@ -634,8 +442,6 @@ def pr_cycle(
                 emit,
                 f"PR #{number} retired from the watch set after the post-merge window",
             )
-            if wake_cache is not None:
-                wake_cache.clear(f"pr:{number}")
         else:
             next_terminal[key] = remaining
     remaining_cycle_seconds(deadline, monotonic)
@@ -650,8 +456,6 @@ def heartbeat_cycle(
     call: Callable[[Sequence[str], Sequence[str], float], object] = probe_thread_json,
     enumerate_open: Callable[..., list[int]] = open_numbers,
     emit: Callable[[str], None] = emit_event,
-    wake: Callable[[str, str], object] | None = None,
-    wake_cache: RoleWakeCache | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
@@ -688,13 +492,13 @@ def heartbeat_cycle(
             "procedure before starting lanes"
         )
         require_event_delivery(emit, line)
-        require_role_wake(
-            wake,
-            VERSION_MISMATCH_WAKE_FAMILY,
-            current,
+        request_silent_wake(
+            config,
+            "heartbeat",
+            hashlib.sha256(current.encode("utf-8")).hexdigest(),
+            deadline,
+            monotonic=monotonic,
         )
-    elif current == PINNED_BB_VERSION and wake_cache is not None:
-        wake_cache.clear(VERSION_MISMATCH_WAKE_FAMILY)
     try:
         rows = project_thread_rows(
             config,
@@ -1016,15 +820,11 @@ def run_once(
     def report(line: str) -> None:
         try:
             require_event_delivery(emit, line)
-        except WatcherEventDeliveryError:
-            raise
         except ProbeError:
             pass
 
     try:
         complete = check()
-    except WatcherEventDeliveryError:
-        raise
     except Exception as error:
         already_emitted = isinstance(error, HeartbeatProbeFailure)
         failures = error.failures if isinstance(error, HeartbeatProbeFailure) else (error,)
@@ -1117,25 +917,16 @@ def main() -> int:
         state_path = args.state_dir / f"{args.mode}.json"
         state = load_state(
             state_path,
-            {"statuses": {}}
-            if args.mode == "worker-lifecycle"
-            else {"signatures": {}, "terminal_left": {}},
+            {"signatures": {}, "terminal_left": {}},
         )
     except ProbeError as error:
         print(f"REFUSED: {error}", file=sys.stderr, flush=True)
         return 1
 
     cycles = 0
-    wake_cache = RoleWakeCache()
     while True:
         cycles += 1
         deadline = cycle_deadline(None, time.monotonic)
-        deliver_event = role_wake_emitter(
-            config,
-            args.project,
-            deadline=deadline,
-            cache=wake_cache,
-        )
         periodic_delivered = True
         if cycles % 20 == 0:
             periodic_delivered = emit_event(
@@ -1145,26 +936,10 @@ def main() -> int:
         def check() -> bool:
             if not periodic_delivered:
                 return False
-            if args.mode == "worker-lifecycle":
-                statuses = state.setdefault("statuses", {})
-                if not isinstance(statuses, dict):
-                    raise ProbeError("worker watcher statuses state is not an object")
-                complete = worker_cycle(
-                    config,
-                    statuses,
-                    wake=deliver_event,
-                    wake_cache=wake_cache,
-                    deadline=deadline,
-                )
-                if complete:
-                    save_state(state_path, state)
-                return complete
             if args.mode == "pr-artifacts":
                 complete = pr_cycle(
                     config,
                     state,
-                    wake=deliver_event,
-                    wake_cache=wake_cache,
                     deadline=deadline,
                 )
                 if complete:
@@ -1172,8 +947,6 @@ def main() -> int:
                 return complete
             return heartbeat_cycle(
                 config,
-                wake=deliver_event,
-                wake_cache=wake_cache,
                 deadline=deadline,
             )
 
@@ -1184,9 +957,7 @@ def main() -> int:
             check,
             deadline=deadline,
         )
-        if args.mode == "worker-lifecycle":
-            time.sleep(WORKER_REFRESH_SECONDS if completed else 45)
-        elif args.mode == "pr-artifacts":
+        if args.mode == "pr-artifacts":
             time.sleep(PR_REFRESH_SECONDS)
         else:
             heartbeat_wait(args.project, args.session, completed)
