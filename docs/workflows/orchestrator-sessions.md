@@ -88,8 +88,10 @@ The watchers report changes; they do not decide that work is complete.
 - PR/review/check changes and deployed-version drift enter that same plugin
   authority through `bb silent-wake emit`. One plugin SQLite reservation
   coalesces producers and daemon reloads. Accepted and ambiguous sends suppress
-  retry; a confirmed send failure releases the reservation and makes the host
-  cycle fail before its baseline or marker advances.
+  retry. A confirmed send failure releases an unchanged reservation and makes
+  the host cycle fail before its baseline or marker advances; if another event
+  changed that same reservation in flight, its claimant sends the latest state
+  instead of releasing it unseen.
 - A startable issue excludes work blocked on an external actor, parked by a
   decision, and epics. A drained queue produces a status line, not permission to
   invent work. Queue and lane activation remain owned by

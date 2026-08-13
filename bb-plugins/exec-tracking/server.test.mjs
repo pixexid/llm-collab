@@ -23,6 +23,16 @@ function api(send) {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 test("concurrent native and CLI producers reserve one pending wake", async () => {
   const db = database();
   const sends = [];
@@ -117,33 +127,101 @@ test("confirmed failure releases while ambiguous failure suppresses retry", asyn
   );
 });
 
-test("confirmed failure retains a changed wake coalesced during the send", async () => {
+test("confirmed failure delivers a changed wake coalesced during the send", async () => {
   const db = database();
-  let sendStarted;
-  let rejectSend;
-  const started = new Promise((resolve) => { sendStarted = resolve; });
-  const rejected = new Promise((_, reject) => { rejectSend = reject; });
-  const first = deliverWake(api(async () => {
-    sendStarted();
-    return rejected;
-  }), db, target(), "worker:thread-a", "a".repeat(64));
+  const firstStarted = deferred();
+  const firstResult = deferred();
+  let sends = 0;
+  const bb = api(async () => {
+    sends += 1;
+    if (sends === 1) {
+      firstStarted.resolve();
+      return firstResult.promise;
+    }
+    return { ok: true };
+  });
+  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
 
-  await started;
+  await firstStarted.promise;
+  assert.equal(
+    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    "coalesced",
+  );
+  firstResult.reject(Object.assign(new Error("bad request"), { status: 400 }));
+  assert.equal(await first, "accepted");
+  assert.equal(sends, 2, "the changed coalesced wake must own a second send");
+  assert.deepEqual(
+    { ...db.prepare("SELECT family, semantic_key, pending FROM role_wake_dedupe").get() },
+    { family: "worker:thread-b", semantic_key: "b".repeat(64), pending: 1 },
+  );
+});
+
+test("repeated changes deliver the latest wake after each confirmed failure", async () => {
+  const db = database();
+  const started = [deferred(), deferred(), deferred()];
+  const results = [deferred(), deferred()];
+  let sends = 0;
+  const bb = api(async () => {
+    const attempt = sends;
+    sends += 1;
+    started[attempt].resolve();
+    return results[attempt]?.promise ?? { ok: true };
+  });
+  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+
+  await started[0].promise;
+  assert.equal(
+    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    "coalesced",
+  );
+  results[0].reject(Object.assign(new Error("first refused"), { status: 400 }));
+  await started[1].promise;
+  assert.equal(
+    await deliverWake(bb, db, target(), "worker:thread-c", "c".repeat(64)),
+    "coalesced",
+  );
+  results[1].reject(Object.assign(new Error("second refused"), { status: 400 }));
+
+  assert.equal(await first, "accepted");
+  assert.equal(sends, 3);
+  assert.deepEqual(
+    { ...db.prepare("SELECT family, semantic_key, pending FROM role_wake_dedupe").get() },
+    { family: "worker:thread-c", semantic_key: "c".repeat(64), pending: 1 },
+  );
+});
+
+test("ambiguous changed-wake delivery retains the reservation and suppresses retry", async () => {
+  const db = database();
+  const firstStarted = deferred();
+  const firstResult = deferred();
+  let sends = 0;
+  const bb = api(async () => {
+    sends += 1;
+    if (sends === 1) {
+      firstStarted.resolve();
+      return firstResult.promise;
+    }
+    throw Object.assign(new Error("server lost reply"), { status: 500 });
+  });
+  const first = deliverWake(bb, db, target(), "worker:thread-a", "a".repeat(64));
+
+  await firstStarted.promise;
+  assert.equal(
+    await deliverWake(bb, db, target(), "worker:thread-b", "b".repeat(64)),
+    "coalesced",
+  );
+  firstResult.reject(Object.assign(new Error("bad request"), { status: 400 }));
+  assert.equal(await first, "ambiguous");
+  assert.equal(sends, 2);
   assert.equal(
     await deliverWake(
-      api(async () => assert.fail("coalesced wake must not send")),
+      api(async () => assert.fail("ambiguous delivery must suppress retry")),
       db,
       target(),
       "worker:thread-b",
       "b".repeat(64),
     ),
     "coalesced",
-  );
-  rejectSend(Object.assign(new Error("bad request"), { status: 400 }));
-  assert.equal(await first, "confirmed-failure");
-  assert.deepEqual(
-    { ...db.prepare("SELECT family, semantic_key, pending FROM role_wake_dedupe").get() },
-    { family: "worker:thread-b", semantic_key: "b".repeat(64), pending: 1 },
   );
 });
 

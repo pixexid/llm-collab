@@ -381,39 +381,61 @@ export async function deliverWake(
     | undefined;
   if (claimed?.reservation !== reservation) return "coalesced";
 
-  try {
-    await bb.sdk.threads.send({
-      threadId: target.thread_id,
-      input: [{
-        type: "text",
-        text: WAKE_POINTER,
-        mentions: [],
-        visibility: "agent-only",
-      }],
-      mode: "queue-if-active",
-    });
-    return "accepted";
-  } catch (failure) {
-    if (isConfirmedFailure(failure)) {
-      db.prepare(`
+  const settleConfirmedFailure = db.prepare(`
         UPDATE role_wake_dedupe
-        SET pending = 0, reservation = NULL
+        SET
+          pending = CASE WHEN family = ? AND semantic_key = ? THEN 0 ELSE 1 END,
+          reservation = CASE
+            WHEN family = ? AND semantic_key = ? THEN NULL
+            ELSE reservation
+          END
         WHERE project_id = ? AND role_thread_id = ? AND reservation = ?
-          AND family = ? AND semantic_key = ?
-      `).run(target.project_id, target.thread_id, reservation, family, semantic);
+        RETURNING family, semantic_key, pending
+      `);
+  let attemptedFamily = family;
+  let attemptedSemantic = semantic;
+  while (true) {
+    try {
+      await bb.sdk.threads.send({
+        threadId: target.thread_id,
+        input: [{
+          type: "text",
+          text: WAKE_POINTER,
+          mentions: [],
+          visibility: "agent-only",
+        }],
+        mode: "queue-if-active",
+      });
+      return "accepted";
+    } catch (failure) {
+      if (!isConfirmedFailure(failure)) {
+        // Timeout, disconnect, and 5xx can happen after server commit. Retaining
+        // the atomic reservation is the only retry-safe outcome.
+        bb.log.warn(
+          `exec-tracking: silent wake acceptance ambiguous for project ${target.project_id} `
+          + `role ${target.thread_id}; retry suppressed`,
+        );
+        return "ambiguous";
+      }
+      const latest = settleConfirmedFailure.get(
+        attemptedFamily,
+        attemptedSemantic,
+        attemptedFamily,
+        attemptedSemantic,
+        target.project_id,
+        target.thread_id,
+        reservation,
+      ) as { family: string; semantic_key: string; pending: number } | undefined;
       bb.log.warn(
         `exec-tracking: silent wake confirmed failed for project ${target.project_id} `
         + `role ${target.thread_id} (${failureStatus(failure)})`,
       );
-      return "confirmed-failure";
+      if (!latest || latest.pending === 0) return "confirmed-failure";
+      // A different semantic event coalesced under this reservation while the
+      // failed send was in flight. Hand the one claimant to that latest event.
+      attemptedFamily = latest.family;
+      attemptedSemantic = latest.semantic_key;
     }
-    // Timeout, disconnect, and 5xx can happen after server commit. Retaining the
-    // atomic reservation is the only retry-safe outcome.
-    bb.log.warn(
-      `exec-tracking: silent wake acceptance ambiguous for project ${target.project_id} `
-      + `role ${target.thread_id}; retry suppressed`,
-    );
-    return "ambiguous";
   }
 }
 

@@ -232,8 +232,9 @@ The `exec-tracking` plugin is the one silent pointer authority:
 - every pointer input part is `agent-only` and uses `queue-if-active`;
 - one plugin-database reservation coalesces producers and daemon reloads per
   role thread; and
-- accepted or ambiguous sends retain the reservation, while a confirmed
-  failure releases it and advances neither host baseline nor host marker.
+- accepted or ambiguous sends retain the reservation; a confirmed failure
+  releases only unchanged state, while changed coalesced state is sent by the
+  same claimant and never released unseen.
 
 Normal worker completion remains one direct `DONE|BLOCKED` tell. Normal idle,
 liveness, marker refresh, `WATCHER LIVE`, and unchanged baselines remain silent.
