@@ -1197,6 +1197,16 @@ class Gh801WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("accepts no caller prompt", " ".join(cutover.split()))
 
+    def test_canonical_native_bootstrap_requires_full_visibility_receipt_gate(self) -> None:
+        workers = (ROOT / "docs/workflows/bb-workers.md").read_text(encoding="utf-8")
+        command = workers[workers.index("spawn_receipt=$("):workers.index("Do not rely on the remembered")]
+        self.assertEqual(1, command.count('"${bb_cmd[@]}" thread spawn'))
+        self.assertIn("--visibility visible", command)
+        self.assertIn("validate_bb_spawn_receipt.py", command)
+        self.assertIn("DO NOT RETRY", command)
+        self.assertIn("hidden parent", workers)
+        self.assertNotIn("--visibility hidden", command)
+
     def test_canonical_claude_coordinate_is_the_live_suffixed_id(self) -> None:
         for relative in (
             "AGENTS.md",

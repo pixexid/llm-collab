@@ -101,26 +101,46 @@ while IFS= read -r -d '' token; do bb_cmd+=("$token"); done < <(python3.11 -c "i
 [ "${#bb_cmd[@]}" -gt 0 ] || { echo "REFUSED: missing bb.executable" >&2; exit 1; }
 git -C "$repo_root" fetch origin "$base_branch"
 base_sha=$(git -C "$repo_root" rev-parse "origin/$base_branch")
-"${bb_cmd[@]}" thread spawn \
-  --project <bb-project-id> \
-  --new-environment worktree \
-  --base-branch "$base_sha" \
-  --provider codex \
-  --model gpt-5.6-luna \
-  --reasoning-level medium \
-  --visibility visible \
-  --permission-mode accept-edits \
-  --title "Provision <writing task>" \
-  --prompt "NO-WRITE WORKTREE PREFLIGHT. BB has no read-only permission mode. Do not modify files, create commits, or begin implementation. Report pwd, current branch, HEAD SHA, and git status --short --untracked-files=all, then end the turn." \
-  --json
+spawn_receipt=$(
+  "${bb_cmd[@]}" thread spawn \
+    --project <bb-project-id> \
+    --new-environment worktree \
+    --base-branch "$base_sha" \
+    --provider codex \
+    --model gpt-5.6-luna \
+    --reasoning-level medium \
+    --visibility visible \
+    --permission-mode accept-edits \
+    --title "Provision <writing task>" \
+    --prompt "NO-WRITE WORKTREE PREFLIGHT. Do not modify files, create commits, or begin implementation." \
+    --json
+) || { echo "DO NOT RETRY: native spawn returned no trusted receipt" >&2; exit 2; }
+printf '%s\n' "$spawn_receipt"
+if ! printf '%s' "$spawn_receipt" | PYTHONPATH="<runtime_root>" \
+  python3.11 <runtime_root>/bin/validate_bb_spawn_receipt.py; then
+  echo "DO NOT RETRY: spawn receipt visibility was refused; reconcile the printed native id first" >&2
+  exit 2
+fi
 ```
 
 Every fleet thread — provision probe, worker, and reviewer — is visible. The
-sanctioned client always passes `--visibility visible` and refuses a returned
-spawn envelope that reports any other value. Direct bootstrap spawns must pass
-the same explicit flag. Do not rely on inherited visibility: a hidden parent
-silently produces a hidden child, which makes live work absent from the
-operator UI and from default thread list/search results.
+operator full-visibility rule is absolute: the sanctioned client and this
+native bootstrap both pass `--visibility visible`, and every returned receipt
+must prove top-level `visibility == visible`. Missing, malformed, hidden, or
+unexpected visibility is a refusal; do not retry because the native spawn may
+already have created a thread. The command above prints the one receipt, then
+validates its visibility through the shared runtime seam before continuing.
+
+Do not rely on the remembered project default or inherited visibility: the
+supported `bb project show <id> --json` API exposes project metadata but no
+visibility getter/setter, while `bb thread spawn --help` confirms omitted
+execution flags use remembered defaults. An explicit visible flag is therefore
+the enforced invariant, including when a caller supplies a hidden parent;
+hidden-parent inheritance must never launder a hidden child into acceptance.
+This rule exists because the observed failure pattern hid approximately 65
+BB threads when a dispatcher passed `--visibility hidden` and hidden-parent
+inheritance amplified it. The operator unhid that existing fleet; new fleet
+threads remain visible by construction.
 
 Never pass a branch name as the base: BB resolves the local ref, while
 `bin/local_main_sync.py` deliberately advances only the detached HEAD in a
