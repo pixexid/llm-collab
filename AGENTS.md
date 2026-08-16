@@ -1,4 +1,4 @@
-<!-- CONTRACT_VERSION: 36 -->
+<!-- CONTRACT_VERSION: 37 -->
 # AGENTS.md
 
 ## This file is the source of truth
@@ -44,6 +44,16 @@ workflows below.
   follow-ups, and never close a requested feature merely because review exposed defects.
 
 ### Recent contract changes
+
+Contract v37 (2026-08-15) makes full visibility an enforced spawn invariant.
+The sanctioned client and native bootstrap both pass explicit `--visibility
+visible`; every receipt must prove top-level `visibility == visible`, including
+missing or malformed values, and a refusal is never retried. The operator's
+remembered project visibility default has no supported getter/setter in the
+available BB API, so it is not authority. A cached v36 spawner could still
+rely on a hidden remembered default or hidden-parent inheritance; after roughly
+65 BB threads were hidden that way, the operator restored the existing fleet,
+but future work must follow the explicit rule. Related GH-825.
 
 Contract v36 (2026-08-12) makes the documented `exec-tracking` running-state
 check mechanical in the session gate and every sanctioned writing spawn. Two

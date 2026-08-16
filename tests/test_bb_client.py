@@ -65,6 +65,7 @@ MISMATCHED_BB_VERSION = "0.0.1"
 SPAWNED_THREAD = "thr_9xirgjgdis"
 SPAWNED_PROJECT = "proj_vny6bi5p8e"
 SHOWN_THREAD = "thr_ru3nj2r8ur"
+MISSING_VISIBILITY = object()
 
 
 def fixture(name: str) -> str:
@@ -135,6 +136,15 @@ def execution_events(**mutations) -> BbTransportResult:
 def spawn_envelope_without(field: str) -> BbTransportResult:
     envelope = json.loads(spawn_ok().stdout)
     del envelope[field]
+    return BbTransportResult(0, json.dumps(envelope), "")
+
+
+def spawn_envelope_with_visibility(value=MISSING_VISIBILITY) -> BbTransportResult:
+    envelope = json.loads(spawn_ok().stdout)
+    if value is MISSING_VISIBILITY:
+        del envelope["visibility"]
+    else:
+        envelope["visibility"] = value
     return BbTransportResult(0, json.dumps(envelope), "")
 
 
@@ -246,6 +256,27 @@ class EnvelopeValidationTest(unittest.TestCase):
         self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
         self.assertIn("visibility", outcome.detail)
 
+    def test_spawn_validator_refuses_missing_malformed_and_unexpected_visibility(self):
+        for value in (MISSING_VISIBILITY, None, 1, [], "agent-only", "hidden"):
+            with self.subTest(value=value):
+                payload = json.loads(spawn_ok().stdout)
+                if value is MISSING_VISIBILITY:
+                    del payload["visibility"]
+                else:
+                    payload["visibility"] = value
+                outcome = BbClient.validate_spawn_visibility(payload)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertIn("visibility", outcome.detail)
+
+    def test_hidden_parent_cannot_launder_hidden_spawn_visibility(self):
+        payload = json.loads(spawn_ok().stdout)
+        payload["parentThreadId"] = "thr_hidden_parent"
+        self.assertIsNone(BbClient.validate_spawn_visibility(payload))
+        payload["visibility"] = "hidden"
+        outcome = BbClient.validate_spawn_visibility(payload)
+        self.assertIsInstance(outcome, BbRefusal)
+        self.assertIn("'hidden'", outcome.detail)
+
     def test_show_validator_reads_the_nested_envelope(self):
         thread = BbClient.validate_show_envelope(json.loads(fixture("thread_show.json")))
         self.assertIsInstance(thread, BbThread)
@@ -291,6 +322,19 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual("kimi-coding/k3", argv[argv.index("--model") + 1])
         self.assertEqual("high", argv[argv.index("--reasoning-level") + 1])
         self.assertEqual("visible", argv[argv.index("--visibility") + 1])
+
+    def test_spawn_receipt_visibility_refusal_keeps_native_id_and_never_retries(self):
+        for value in (MISSING_VISIBILITY, None, "hidden"):
+            with self.subTest(value=value):
+                client, transport = spawning_client(
+                    **{"thread spawn": spawn_envelope_with_visibility(value)}
+                )
+                outcome = spawn(client)
+                self.assertIsInstance(outcome, BbRefusal)
+                self.assertEqual(REFUSAL_IDENTITY_MISMATCH, outcome.reason)
+                self.assertEqual(SPAWNED_THREAD, outcome.native_thread_id)
+                self.assertEqual(1, transport.count("thread", "spawn"))
+
 
     def test_spawn_succeeds_only_after_reading_native_execution_evidence(self):
         thread = spawn(client=spawning_client()[0])
@@ -418,6 +462,35 @@ class ProfileTest(unittest.TestCase):
         spawn(client)
         argv = transport.argv_for("thread", "log")
         self.assertEqual(str(EXECUTION_PROBE_EVENTS), argv[argv.index("--limit") + 1])
+
+
+class NativeReceiptValidatorTest(unittest.TestCase):
+    def test_direct_bootstrap_validator_refuses_untrusted_receipts(self):
+        validator = Path(__file__).resolve().parent.parent / "bin" / "validate_bb_spawn_receipt.py"
+        for receipt in (
+            "not json",
+            '{"id":"thr_x"}',
+            '{"visibility":"hidden"}',
+            '{"visibility":1}',
+        ):
+            with self.subTest(receipt=receipt):
+                result = subprocess.run(
+                    [sys.executable, str(validator)],
+                    input=receipt,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(0, result.returncode)
+
+        result = subprocess.run(
+            [sys.executable, str(validator)],
+            input='{"visibility":"visible"}',
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 class DeadlineTest(unittest.TestCase):

@@ -46,7 +46,8 @@ verified worktree.
    [`Orchestrator Sessions`](orchestrator-sessions.md#succession-protocol).
 2. Provision the worktree through the exact project's configured native BB
    lifecycle, using only the `NO-WRITE WORKTREE PREFLIGHT` turn defined by
-   [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree). Provisioning is
+   [`BB Workers`](bb-workers.md#spawn-in-an-isolated-worktree). Apply that
+   procedure's full-visibility rule and receipt validation; provisioning is
    not an assignment: do not use
    `<runtime_root>/bin/llm-collab bb_spawn.py --new-environment worktree`, which
    deliberately refuses. Wait for the provisioning thread to become idle, then

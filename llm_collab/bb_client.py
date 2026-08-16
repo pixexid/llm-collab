@@ -87,6 +87,7 @@ REFUSAL_IDENTITY_MISMATCH = "bb_identity_mismatch"
 REFUSAL_ORPHANED_THREAD = "bb_orphaned_thread"
 
 _MISSING = object()
+VISIBLE_THREAD_VISIBILITY = "visible"
 
 
 class BbExecutableRefused(ValueError):
@@ -378,6 +379,21 @@ class BbClient:
     # ---- envelope validators -------------------------------------------
 
     @staticmethod
+    def validate_spawn_visibility(payload: Any) -> BbRefusal | None:
+        """Require the native spawn receipt's top-level visibility field."""
+        if not isinstance(payload, Mapping):
+            return BbRefusal(REFUSAL_MALFORMED_RESPONSE, "spawn envelope is not an object")
+        visibility = payload.get("visibility", _MISSING)
+        if visibility != VISIBLE_THREAD_VISIBILITY:
+            reported = "<missing>" if visibility is _MISSING else repr(visibility)
+            return BbRefusal(
+                REFUSAL_IDENTITY_MISMATCH,
+                "spawned worker visibility must be 'visible'; "
+                f"bb reported {reported}",
+            )
+        return None
+
+    @staticmethod
     def validate_spawn_envelope(payload: Any) -> BbThread | BbRefusal:
         """`thread spawn --json` puts the thread at the TOP LEVEL.
 
@@ -392,12 +408,9 @@ class BbClient:
                 REFUSAL_MALFORMED_RESPONSE,
                 "spawn envelope is nested under 'thread'; expected top-level thread object",
             )
-        visibility = _require_str(payload, "visibility")
-        if visibility != "visible":
-            return BbRefusal(
-                REFUSAL_IDENTITY_MISMATCH,
-                f"spawned worker visibility must be 'visible'; bb reported {visibility!r}",
-            )
+        visibility_refusal = BbClient.validate_spawn_visibility(payload)
+        if visibility_refusal is not None:
+            return visibility_refusal
         return BbClient._thread_from(payload, envelope="spawn")
 
     @staticmethod
@@ -511,7 +524,7 @@ class BbClient:
             "--reasoning-level",
             profile.reasoning_level,
             "--visibility",
-            "visible",
+            VISIBLE_THREAD_VISIBILITY,
         ]
         if base_sha is not None:
             argv += ["--new-environment", "worktree", "--base-branch", base_sha]
