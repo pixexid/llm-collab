@@ -49,7 +49,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-PINNED_BB_VERSION = "0.37.0"
+PINNED_BB_VERSION = "0.38.0"
 
 # Refuse rather than parse past this. A response this large is a contract break,
 # and truncating it would turn a resource limit into a correctness bug.
